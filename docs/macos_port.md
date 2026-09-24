@@ -1,8 +1,9 @@
 # macOS port
 
-**Status:** builds are set up and the host code compiles off Windows. It has
-**not** been run on a Mac yet. Graphics on Apple GPUs are the known open
-problem (see [Open graphics issues](#open-graphics-issues)).
+**Status:** builds and runs on an M4 Mac mini (macOS, Xcode beta toolchain,
+SDK v0.10.0). With FSI render targets the boot logos, menus and new-game flow
+work and gameplay starts (audio, cutscene, tutorial). Open problems: in-game
+graphics corruption, low frame rate, and wonky stick input in menus.
 
 ## Prior work
 
@@ -89,14 +90,23 @@ Likely cause of the see-through ground: **depth format**. Apple GPUs have no
 values no longer match what the game expects when depth is reused or copied
 between render targets, which shows up as surfaces failing the depth test.
 
-Things to try on a Mac, in order (cvars go on the command line or in
-`fable_2.toml`):
+### Results on an M4 Mac mini
 
-1. `--render_target_path_vulkan=fsi`: emulate EDRAM in the pixel shader
-   with exact Xenos depth formats. Needs fragment shader interlock, which
-   MoltenVK can expose through Metal raster order groups; the log says if it
-   falls back.
-2. `--depth_float24_convert_in_pixel_shader=true`, then additionally
-   `--depth_float24_round=true`.
-3. For any remaining missing geometry, check `logs/` for pipeline creation
-   failures and run with `MVK_CONFIG_LOG_LEVEL=3` for MoltenVK's view.
+- Default render target path (`fbo`): audio plays, the screen only flashes
+  white. MoltenVK reports no `D24_UNORM_S8`, so the game's 24-bit depth is
+  stored as `D32_SFLOAT_S8`.
+- `render_target_path_vulkan=fsi`: logos and menus render, a new game starts.
+  MoltenVK exposes fragment shader interlock on Apple Silicon. The app now
+  defaults to this on macOS (`REX_RENDER_TARGET_PATH_VULKAN=fsi`, set in
+  `Fable2App::OnPostInitLogging` unless already set); pass
+  `--render_target_path_vulkan=fbo` to compare.
+- MoltenVK's own primitive-restart warning goes to stderr on every strip draw,
+  so the app also defaults `MVK_CONFIG_LOG_LEVEL=1` (errors only) on macOS.
+- The guest arena is mapped at `0x7000000000` on macOS (not `0x100000000`),
+  confirming the probes must not hardcode the Windows base.
+- Device limits worth watching: no geometry shaders,
+  `maxPerStageDescriptorSamplers: 16`, no sparse binding (512 MB shared
+  memory buffer).
+
+For remaining corruption, check `logs/` for pipeline creation failures and run
+with `MVK_CONFIG_LOG_LEVEL=3` for MoltenVK's view.

@@ -216,6 +216,20 @@ class Fable2App : public rex::ReXApp {
   // Plain settings are read via fable2::config::Get(); settings that back a
   // cvar are seeded into it below so the console/overlay keep working.
   void OnPostInitLogging() override {
+#ifdef __APPLE__
+    // macOS defaults, set before Vulkan and the GPU plugin load. overwrite=0
+    // keeps anything the user exported, and a command-line flag still wins
+    // over these (the SDK applies REX_* env vars below the command line).
+    // - FSI render targets: the default host-RT path stores the game's D24S8
+    //   depth as D32_SFLOAT_S8 (Apple GPUs have no D24S8), which renders as a
+    //   white/flashing screen. FSI emulates EDRAM exactly in the pixel shader;
+    //   MoltenVK exposes fragment shader interlock on Apple Silicon.
+    // - MoltenVK log level 1 (errors): it otherwise warns "Metal does not
+    //   support disabling primitive restart" on every strip draw, thousands
+    //   of lines per second on stderr and in logs/.
+    ::setenv("REX_RENDER_TARGET_PATH_VULKAN", "fsi", 0);
+    ::setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+#endif
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();
     fable2::config::Load(exe_dir / "fable2_config.toml");
