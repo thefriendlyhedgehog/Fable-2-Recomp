@@ -47,6 +47,10 @@ __pycache__/
 !tools/repro/*.py
 !tools/apply_recomp_patches.py
 !tools/fable2_control.py
+# macOS/Linux build entry points (counterparts of build.cmd / tools/*.cmd).
+!build.sh
+!tools/setup_sdk.sh
+!tools/stage_content.sh
 
 # --- Fetched/external toolchain deps (created by tools/setup_sdk*.cmd). -------
 # The tracked files in thirdparty/ (rexglue-sdk-local.patch,

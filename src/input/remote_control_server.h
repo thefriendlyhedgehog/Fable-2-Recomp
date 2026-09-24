@@ -56,6 +56,7 @@ inline void CloseSock(sock_t s) {
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>  // TCP_NODELAY
 #include <sys/socket.h>
 #include <unistd.h>
 using sock_t = int;
@@ -116,6 +117,16 @@ struct Value {
   std::vector<Value> arr;
   std::vector<std::pair<std::string, Value>> obj;
 
+  // Declared here, defaulted after the class: std::pair<std::string, Value>
+  // needs Value complete, so the implicit versions (instantiated at the end of
+  // the class body) fail on libstdc++/libc++. MSVC's STL happens to accept it.
+  Value();
+  Value(const Value&);
+  Value(Value&&) noexcept;
+  Value& operator=(const Value&);
+  Value& operator=(Value&&) noexcept;
+  ~Value();
+
   const Value* Find(std::string_view key) const {
     for (const auto& kv : obj)
       if (kv.first == key) return &kv.second;
@@ -147,6 +158,13 @@ struct Value {
     return def;
   }
 };
+
+inline Value::Value() = default;
+inline Value::Value(const Value&) = default;
+inline Value::Value(Value&&) noexcept = default;
+inline Value& Value::operator=(const Value&) = default;
+inline Value& Value::operator=(Value&&) noexcept = default;
+inline Value::~Value() = default;
 
 class Parser {
  public:

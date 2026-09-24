@@ -105,13 +105,18 @@ inline void logline(const char* fmt, ...) {
   }
 }
 
-// Per-frame F5 edge detector. Call from the host input poll (per frame).
-inline void poll_f5() {
-#ifdef _WIN32
-  const bool down = (GetAsyncKeyState(FABLE2_F5_VK) & 0x8000) != 0;
+// Per-frame F5 edge detector, fed the current F5 state by the caller (the
+// non-Windows input path tracks keys through SDK window events).
+inline void poll_f5(bool down) {
   const bool edge = down && !g_f5_down_prev;
   g_f5_down_prev = down;
   if (edge) g_f5_pending.store(true);
+}
+
+// Per-frame F5 edge detector. Call from the host input poll (per frame).
+inline void poll_f5() {
+#ifdef _WIN32
+  poll_f5((GetAsyncKeyState(FABLE2_F5_VK) & 0x8000) != 0);
 #endif
 }
 

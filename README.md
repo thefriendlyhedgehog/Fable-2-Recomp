@@ -403,6 +403,13 @@ build.cmd -release [t]  # build as Release (-O3) instead of Debug (-r is short f
 The first `build.cmd` run fetches the SDK if needed, then configures and
 builds — that is all a fresh checkout requires (plus the game content above).
 
+**macOS / Linux:** `./build.sh` takes the same arguments as `build.cmd`
+(`./build.sh -release fable_2`) and fetches the matching prebuilt SDK
+(`mac-arm64`, `mac-amd64` or `linux-amd64`) via `tools/setup_sdk.sh`; stage
+content with `tools/stage_content.sh`. The macOS port is untested on hardware
+so far — see [docs/macos_port.md](docs/macos_port.md) for status and known
+graphics issues.
+
 Manual/advanced setup (normally not needed):
 
 ```

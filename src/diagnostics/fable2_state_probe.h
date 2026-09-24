@@ -84,6 +84,8 @@
 #include <rex/ppc/context.h>
 #include <rex/logging/macros.h>
 
+#include "guest_memory.h"
+
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -93,7 +95,9 @@
 
 namespace fable2::stateprobe {
 
-constexpr uintptr_t kArena = 0x100000000ull;
+// Host base of the guest arena (0x100000000 on Windows; asked from the
+// runtime so other platforms' mappings work too).
+inline uintptr_t arena() { return fable2::guestmem::GuestBase(); }
 
 // State ids (stable values used by the remote API + the snapshot).
 enum State : int {
@@ -136,14 +140,13 @@ inline bool page_ok(const void* p) {
          (m.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY |
                        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0;
 #else
-  (void)p;
-  return true;
+  return fable2::guestmem::Readable(p);
 #endif
 }
 
-// Safe guest read from the fixed 0x100000000 arena (commit-on-fault).
+// Safe guest read from the guest arena (commit-on-fault).
 inline bool aread(uint32_t ga, void* dst, size_t n) {
-  const uint8_t* p = reinterpret_cast<const uint8_t*>(kArena + ga);
+  const uint8_t* p = reinterpret_cast<const uint8_t*>(arena() + ga);
   size_t off = 0;
   while (off < n) {
     size_t chunk = 0x1000u - ((reinterpret_cast<uintptr_t>(p + off)) & 0xFFFu);
@@ -156,7 +159,7 @@ inline bool aread(uint32_t ga, void* dst, size_t n) {
 }
 
 // Safe guest read at `base` + guest address (render-thread hooks pass their
-// own base; it equals kArena).
+// own base; it equals arena()).
 inline bool gread(const uint8_t* base, uint32_t ga, void* dst, size_t n) {
   const uint8_t* p = base + ga;
   size_t off = 0;
@@ -174,7 +177,7 @@ inline bool gread(const uint8_t* base, uint32_t ga, void* dst, size_t n) {
 // arena page is committed + readable.
 inline bool plausible(uint32_t a) {
   if (a < 0x00400000u || a >= 0xC0000000u) return false;
-  return page_ok(reinterpret_cast<const void*>(kArena + a));
+  return page_ok(reinterpret_cast<const void*>(arena() + a));
 }
 
 inline uint32_t be32(const void* p) {
@@ -532,7 +535,7 @@ inline void do_sample() {
   // Before the guest image is mapped (early boot) we cannot read anything:
   // report Unknown.
   const bool ready = page_ok(
-      reinterpret_cast<const void*>(kArena + 0x820A8064u));  // image strings
+      reinterpret_cast<const void*>(arena() + 0x820A8064u));  // image strings
 
   // The GUI_FRONT_END runtime value: hunt the heap until the value copy is
   // found (bounded; see fe_flag_hunt), then just re-read it. While it stays a

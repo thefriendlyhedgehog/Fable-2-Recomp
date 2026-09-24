@@ -26,6 +26,11 @@
 // [input] at startup, same as the keyboard map above). The cursor is recentered to the window center
 // every poll and that frame's movement is consumed, so the camera rotates
 // continuously and the cursor never wanders or hits the screen edge.
+//
+// Host input is read two ways. On Windows the driver polls Win32 directly
+// (GetAsyncKeyState / cursor recentering). Elsewhere (macOS, Linux) it listens
+// to the SDK window's key and mouse events and uses SDL relative mouse mode
+// for mouse look; the mapping, cvars and guest-side behavior are the same.
 
 #pragma once
 
@@ -45,6 +50,16 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <array>
+#include <atomic>
+#include <limits>
+#include <mutex>
+
+#include <rex/logging.h>
+#include <rex/ui/ui_event.h>
+#include <rex/ui/window.h>
+#include <rex/ui/window_listener.h>
 #endif
 
 // Declared here, defined in main.cpp (REXCVAR_DEFINE_* must live in a .cpp).
@@ -181,19 +196,47 @@ inline std::vector<Mapping> ParseMap(std::string_view text) {
 }  // namespace input_detail
 
 /// Synthetic device that exposes held host keys as guest gamepad buttons.
-class KeyboardGamepadDriver final : public rex::input::InputDriver {
+class KeyboardGamepadDriver final : public rex::input::InputDriver
+#ifndef _WIN32
+    , public rex::ui::WindowInputListener
+#endif
+{
  public:
   // InputDriver's constructor is protected, so expose a public one.
   KeyboardGamepadDriver(rex::ui::Window* window, size_t window_z_order)
-      : rex::input::InputDriver(window, window_z_order) {}
+      : rex::input::InputDriver(window, window_z_order) {
+#ifndef _WIN32
+    if (window) AttachToWindow(window);
+#endif
+  }
 
   ~KeyboardGamepadDriver() override {
+#ifndef _WIN32
+    DetachFromWindow();
+#endif
     if (cursor_hidden_) {
       if (rex::ui::Window* w = GameWindow())
         w->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
       cursor_hidden_ = false;
     }
   }
+
+#ifndef _WIN32
+  void OnWindowAvailable(rex::ui::Window* window) override {
+    if (window) AttachToWindow(window);
+  }
+
+  // WindowInputListener (called on the UI thread). Events are never marked
+  // handled, so the SDK's own overlays/keybinds still see every key.
+  void OnKeyDown(rex::ui::KeyEvent& e) override { SetKey(e.virtual_key(), true); }
+  void OnKeyUp(rex::ui::KeyEvent& e) override { SetKey(e.virtual_key(), false); }
+  void OnMouseMove(rex::ui::MouseEvent& e) override {
+    if (!relative_mouse_.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(mouse_mutex_);
+    mouse_dx_ += e.dx();
+    mouse_dy_ += e.dy();
+  }
+#endif
 
   X_STATUS Setup() override { return X_STATUS_SUCCESS; }
 
@@ -308,6 +351,77 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
     } else {
       mouse_centered_ = false;  // re-prime on (re)focus to avoid a jump
     }
+#else
+    rex::ui::Window* win = attached_window_.load(std::memory_order_acquire);
+    // Focus gates all host input, as on Windows. Drop held keys on focus loss:
+    // their key-up events go to whichever window has focus, not this one.
+    bool focused = win != nullptr && win->HasFocus();
+    if (!focused) ClearKeys();
+
+    // F5 (host) -> run the external Lua file (fable2_f5_lua.h).
+    fable2::f5lua::poll_f5(focused && KeyDown(0x74 /* F5 */));
+
+    // Debug-console toggle key (default F4); see the Windows path above.
+    uint16_t unlock_vk = static_cast<uint16_t>(
+        rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
+    bool has_unlock_key = unlock_vk != 0;
+    if (focused) {
+      bool unlock_down = has_unlock_key && KeyDown(unlock_vk);
+      if (unlock_down && !unlock_down_prev_) console_open_ = !console_open_;
+      unlock_down_prev_ = unlock_down;
+    }
+
+    if (focused) {
+      for (const auto& m : bindings_) {
+        if (has_unlock_key && m.vk == unlock_vk) continue;  // not gamepad input
+        if (!KeyDown(m.vk)) continue;  // not held
+        if (m.button != 0) {
+          buttons |= m.button;
+        } else if (m.trigger == 'L') {
+          left_trigger = 0xFF;
+        } else if (m.trigger == 'R') {
+          right_trigger = 0xFF;
+        } else if (m.axis == 1) {
+          lx += m.axis_sign * input_detail::kStickMax;
+        } else if (m.axis == 2) {
+          ly += m.axis_sign * input_detail::kStickMax;
+        }
+      }
+    }
+    lx = input_detail::ClampStick(lx);
+    ly = input_detail::ClampStick(ly);
+
+    // Mouse -> right stick. Instead of recentering the cursor every poll, use
+    // SDL relative mouse mode: the pointer is locked and hidden, and motion
+    // events carry deltas that accumulate between polls (OnMouseMove).
+    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_;
+    SetRelativeMouse(win, looking);
+    if (looking && !cursor_hidden_) {
+      win->SetCursorVisibility(rex::ui::Window::CursorVisibility::kHidden);
+      cursor_hidden_ = true;
+    } else if (!looking && cursor_hidden_ && win) {
+      win->SetCursorVisibility(rex::ui::Window::CursorVisibility::kVisible);
+      cursor_hidden_ = false;
+    }
+
+    // Consume whole pixels and keep the fraction for the next poll: macOS
+    // trackpads and high-DPI mice report sub-pixel deltas, which truncating
+    // per poll would drop, losing slow camera movement.
+    int32_t dx = 0;
+    int32_t dy = 0;
+    {
+      std::lock_guard<std::mutex> lock(mouse_mutex_);
+      dx = static_cast<int32_t>(mouse_dx_);
+      dy = static_cast<int32_t>(mouse_dy_);
+      mouse_dx_ -= static_cast<float>(dx);
+      mouse_dy_ -= static_cast<float>(dy);
+      if (!looking) mouse_dx_ = mouse_dy_ = 0.0f;
+    }
+    if (looking) {
+      int32_t scale = REXCVAR_GET(mouse_look_scale);
+      rx = input_detail::ClampStick(dx * scale);
+      ry = input_detail::ClampStick(-dy * scale);
+    }
 #endif
 
     out_state->packet_number.set(packet_number_++);
@@ -363,10 +477,72 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
   std::vector<input_detail::Mapping> bindings_;
   std::string cached_text_;
   uint32_t packet_number_ = 0;
-  bool mouse_centered_ = false;  // set once the cursor is first pinned
+  [[maybe_unused]] bool mouse_centered_ = false;  // Windows: set once the cursor is first pinned
   bool cursor_hidden_ = false;   // set while the SDK window cursor is hidden
   bool console_open_ = false;    // debug menu open -> mouse lock released
   bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
+#ifndef _WIN32
+  // Held-key table indexed by rex::ui::VirtualKey (Win32 VK numbering, so the
+  // cvar mapping means the same thing on every platform). Written on the UI
+  // thread by the listener callbacks, read by the guest input poll.
+  std::array<std::atomic<bool>, 256> keys_{};
+  std::atomic<rex::ui::Window*> attached_window_{nullptr};
+  std::atomic<bool> relative_mouse_{false};
+  std::atomic<bool> relative_mouse_failed_{false};  // SetRelativeMouseMode refused
+  std::mutex mouse_mutex_;
+  float mouse_dx_ = 0.0f;
+  float mouse_dy_ = 0.0f;
+
+  bool KeyDown(uint16_t vk) const {
+    return vk < keys_.size() && keys_[vk].load(std::memory_order_relaxed);
+  }
+  void SetKey(rex::ui::VirtualKey vk, bool down) {
+    auto i = static_cast<uint16_t>(vk);
+    if (i < keys_.size()) keys_[i].store(down, std::memory_order_relaxed);
+  }
+  void ClearKeys() {
+    for (auto& k : keys_) k.store(false, std::memory_order_relaxed);
+  }
+
+  // Listener registration touches the window's listener list, which the UI
+  // thread iterates, so it is done on the UI thread. The highest z-order puts
+  // this listener first, ahead of any overlay that marks keys handled.
+  void AttachToWindow(rex::ui::Window* window) {
+    rex::ui::Window* expected = nullptr;
+    if (!attached_window_.compare_exchange_strong(expected, window)) return;
+    window->app_context().CallInUIThread([this, window] {
+      window->AddInputListener(this, std::numeric_limits<size_t>::max());
+    });
+  }
+  void DetachFromWindow() {
+    rex::ui::Window* window = attached_window_.exchange(nullptr);
+    if (!window) return;
+    auto detach = [this, window] {
+      if (relative_mouse_.exchange(false)) window->SetRelativeMouseMode(false);
+      window->RemoveInputListener(this);
+    };
+    auto& ctx = window->app_context();
+    if (ctx.IsInUIThread()) {
+      detach();
+    } else {
+      ctx.CallInUIThreadSynchronous(detach);
+    }
+  }
+
+  // Relative mouse mode is a window (Cocoa/X11) call, so it runs on the UI
+  // thread; only state changes are forwarded.
+  void SetRelativeMouse(rex::ui::Window* window, bool enable) {
+    if (!window || relative_mouse_failed_) return;
+    if (relative_mouse_.exchange(enable) == enable) return;
+    window->app_context().CallInUIThread([this, window, enable] {
+      if (!window->SetRelativeMouseMode(enable) && enable) {
+        relative_mouse_.store(false);
+        relative_mouse_failed_ = true;
+        REXSYS_WARN("[input] relative mouse mode unavailable; mouse look disabled");
+      }
+    });
+  }
+#endif
   // The game window (from the runtime's display window), used for recentering
   // and cursor visibility.
   rex::ui::Window* GameWindow() {

@@ -27,6 +27,7 @@
 #endif
 
 #include "alloc_watch.h"
+#include "guest_memory.h"
 #include "fable2_config.h"
 #include "fable2_patches.h"
 // #include "fable2_deadbeef_overlay.h"
@@ -131,15 +132,14 @@ class Fable2App : public rex::ReXApp {
     //   (B) never valid (consumer first) -> only "null" ever, no "FIRST VALID"
     std::thread([]() {
       using namespace fable2::allocwatch;
-      const uintptr_t base = kGuestBase;  // 0x100000000, stable
+      const uintptr_t base = fable2::guestmem::GuestBase();
       auto t0 = std::chrono::steady_clock::now();
       auto ms = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
       // The guest arena is commit-on-fault; a page may be uncommitted when we
       // sample early. Use VirtualQuery to only read committed pages, so an
       // early sample is skipped instead of faulting the monitor thread.
-      // (Linux/Android: the analogue is a /proc/self/maps scan; PROT_NONE
-      // arena pages show up in maps but are not safe to read, so require
-      // r+w permissions, refreshed periodically.)
+      // (Elsewhere: a kernel-checked read, see guest_memory.h; PROT_NONE
+      // arena pages just fail the read.)
       auto committed = [](const volatile void* p) {
 #ifdef _WIN32
         MEMORY_BASIC_INFORMATION mbi{};
@@ -147,32 +147,7 @@ class Fable2App : public rex::ReXApp {
         return mbi.State == MEM_COMMIT &&
                (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0;
 #else
-        static std::vector<std::pair<uintptr_t, uintptr_t>> rw_ranges;
-        static std::chrono::steady_clock::time_point last_refresh{};
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_refresh > std::chrono::milliseconds(500)) {
-          last_refresh = now;
-          rw_ranges.clear();
-          std::ifstream maps("/proc/self/maps");
-          std::string line;
-          while (std::getline(maps, line)) {
-            uintptr_t lo = 0, hi = 0;
-            char dash = 0;
-            std::istringstream iss(line);
-            if (!(iss >> std::hex >> lo >> dash >> hi)) continue;
-            std::string perms;
-            iss >> perms;
-            if (perms.find('r') != std::string::npos &&
-                perms.find('w') != std::string::npos) {
-              rw_ranges.emplace_back(lo, hi);
-            }
-          }
-        }
-        const auto a = reinterpret_cast<uintptr_t>(p);
-        for (const auto& r : rw_ranges) {
-          if (a >= r.first && a < r.second) return true;
-        }
-        return false;
+        return fable2::guestmem::Readable(const_cast<const void*>(p));
 #endif
       };
       auto safe_sample = [&](uint32_t& tbl, uint32_t& flag, uint32_t& head) -> bool {
