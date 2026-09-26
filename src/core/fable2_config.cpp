@@ -82,11 +82,6 @@ mouse_look_scale = 256
 # Toggles for the recomp-level (mid-asm hook) patches, consulted at runtime
 # by the hook bodies (src/core/fable2_hooks.cpp) - no rebuild needed. Guest-image
 # DATA patches are a different file: fable2_patches.toml next to the exe.
-# 60 FPS (mid-asm hook fable2_hook_60fps; Xenia "60 FPS" by Margen67):
-# lifts the guest main loop from 30/s to ~60/s. false = 30/s (original).
-# Default: true
-fps_60 = true
-
 # Unlock Website Items (mid-asm hooks fable2_hook_website_g1/g1b/grantnew;
 # Xenia "Unlock Website Items" by Guy): forces the website-registration gates
 # AND the grant-method result in the Guild-chest item getter so the website
@@ -101,25 +96,24 @@ unlock_website = true
 # Default: true
 unlock_ce = true
 
-[remote]
-# Remote control server (AI/automation input channel): a localhost TCP
-# server that accepts JSON-lines commands to drive the guest gamepad -
-# press/release/stick, timed scripts, cvar get/set. See
-# src/input/remote_control_server.h and plans/ai-remote-input-control.md.
+# Force a CPU readback of the render-to-texture resolve that regenerates the
+# hero/dog face+skin texture, so the character does not render black on a
+# split-memory host (see plans/hero-dog-texture-readback.md). Approach + the
+# guest base 0x12704000 come from just-harry's Unofficial Xenia femtofork for
+# Fable II. Seeds the SDK cvar readback_resolve_force_addresses; readback then
+# happens only for that resolve, not every frame. false = original black bug.
 # Default: true
-enabled = true
-# Interface to bind. "127.0.0.1" = this machine only (default). "0.0.0.0" =
-# all interfaces (use with a token; a remote attacker could then drive the
-# game and set cvars).
-# Default: "127.0.0.1"
-host = "127.0.0.1"
-# TCP port. If the port is busy the game tries port+1..port+9 (the bound
-# port is logged at startup). Default: 8791
-port = 8791
-# Shared token. Empty = no auth. When set, every client connection must send
-# {"cmd":"auth","token":"..."} as its first line.
-# Default: ""
-token = ""
+hero_dog_texture_readback = true
+
+[perf]
+# NtYieldExecution batching for the hot-function overrides (see
+# src/core/hotfunc/hotfunc_yield.h): every Nth guest yield does the real
+# SwitchToThread; the others take a full memory fence. The work-loop yield
+# was the single biggest cost in the 475 render chain; on multi-core hosts
+# the yield is only a politeness hint, so batch it. 1 = original (yield
+# every call); 0 = never yield; larger = fewer context switches.
+# Default: 8
+hotfunc_yield_every = 8
 )TOML_EOF";
 
 std::string_view TypeName(toml::node_type t) {
@@ -178,7 +172,7 @@ bool Load(const std::filesystem::path& path) {
   // Warn about unknown top-level sections (usually a typo or a file written
   // for a newer build).
   static constexpr std::array<std::string_view, 4> kKnownSections = {
-      "general", "input", "patches", "remote"};
+      "general", "input", "patches", "perf"};
   for (const auto& [key, value] : root) {
     const bool known =
         std::ranges::find(kKnownSections, key.str()) != kKnownSections.end();
@@ -213,27 +207,22 @@ bool Load(const std::filesystem::path& path) {
   const auto patches = root[patches_path];
   if (patches.is_table()) {
     const toml::table& patches_table = *patches.as_table();
-    values.fps_60 = Read<bool>(patches_table, "patches", "fps_60", "boolean",
-                               values.fps_60);
     values.unlock_website = Read<bool>(patches_table, "patches",
                                        "unlock_website", "boolean",
                                        values.unlock_website);
     values.unlock_ce = Read<bool>(patches_table, "patches", "unlock_ce",
                                   "boolean", values.unlock_ce);
+    values.hero_dog_texture_readback =
+        Read<bool>(patches_table, "patches", "hero_dog_texture_readback", "boolean",
+                   values.hero_dog_texture_readback);
   }
-  const toml::path remote_path{"remote"};
-  const auto remote = root[remote_path];
-  if (remote.is_table()) {
-    const toml::table& remote_table = *remote.as_table();
-    values.remote_enabled =
-        Read<bool>(remote_table, "remote", "enabled", "boolean",
-                   values.remote_enabled);
-    values.remote_host = Read<std::string>(
-        remote_table, "remote", "host", "string", values.remote_host);
-    values.remote_port = static_cast<int32_t>(Read<int64_t>(
-        remote_table, "remote", "port", "integer", values.remote_port));
-    values.remote_token = Read<std::string>(
-        remote_table, "remote", "token", "string", values.remote_token);
+  const toml::path perf_path{"perf"};
+  const auto perf = root[perf_path];
+  if (perf.is_table()) {
+    const toml::table& perf_table = *perf.as_table();
+    values.hotfunc_yield_every = static_cast<int32_t>(Read<int64_t>(
+        perf_table, "perf", "hotfunc_yield_every", "integer",
+        values.hotfunc_yield_every));
   }
 
   g_values = values;

@@ -15,6 +15,10 @@ rem   build.cmd -release [t]     build as Release (-O3) instead of Debug
 rem   build.cmd -r [t]           (same, short form)
 rem                              (out\build\win-amd64-release; stages the
 rem                              release rexruntime/rexgpu-xenos plugins)
+rem   build.cmd -clean [t]       wipe the build dir for the config instead of
+rem   build.cmd -c [t]             building. E.g. "build.cmd -clean
+rem                                fable_2_profiler" deletes
+rem                                out\build\win-amd64-release-profiling
 setlocal
 cd /d "%~dp0"
 
@@ -37,11 +41,16 @@ if errorlevel 1 (
     if defined NINJADIR set "PATH=%NINJADIR%;%PATH%"
 )
 
-rem ReXGlue SDK: prefer thirdparty\rexglue-sdk in this repo (fetched by
-rem tools\setup_sdk.cmd), then a sibling install, else auto-download.
-set "REXSDK=%~dp0thirdparty\rexglue-sdk\win-amd64"
+rem ReXGlue SDK: prefer a rexglue.exe found on PATH (SDK root = <bin>\..),
+rem then thirdparty\rexglue-sdk in this repo (fetched by tools\setup_sdk.cmd),
+rem then a sibling install, else auto-download.
+set "REXSDK="
+for /f "delims=" %%f in ('where rexglue.exe 2^>nul') do (
+    if not defined REXSDK for %%d in ("%%~dpf..") do set "REXSDK=%%~fdd"
+)
+if not defined REXSDK set "REXSDK=%~dp0thirdparty\rexglue-sdk\win-amd64"
 if not exist "%REXSDK%\lib\cmake\rexglue\rexglueConfig.cmake" (
-    set "REXSDK=%~dp0..\rexglue-sdk-0.10.0-win-amd64\win-amd64"
+    set "REXSDK=%~dp0..\rexglue-sdk-0.10.0.9-dev.g923c1a5-win-amd64\win-amd64"
 )
 if not exist "%REXSDK%\lib\cmake\rexglue\rexglueConfig.cmake" (
     echo ReXGlue SDK not found; downloading via tools\setup_sdk.cmd ...
@@ -53,10 +62,12 @@ if not exist "%REXSDK%\lib\cmake\rexglue\rexglueConfig.cmake" (
     exit /b 1
 )
 
-rem Argument parsing: -release / -r select the Release preset, the first
-rem non-flag argument is the CMake target (default: fable_2_codegen).
+rem Argument parsing: -release / -r select the Release preset, -clean / -c
+rem wipes the build dir instead of building, the first non-flag argument is
+rem the CMake target (default: fable_2_codegen).
 set "CONFIG=win-amd64-debug"
 set "TARGET="
+set "CLEAN=0"
 :parse_args
 if "%~1"=="" goto args_done
 if /i "%~1"=="-release" (
@@ -69,20 +80,62 @@ if /i "%~1"=="-r" (
     shift
     goto parse_args
 )
+if /i "%~1"=="-clean" (
+    set "CLEAN=1"
+    shift
+    goto parse_args
+)
+if /i "%~1"=="-c" (
+    set "CLEAN=1"
+    shift
+    goto parse_args
+)
 set "TARGET=%~1"
 shift
 goto parse_args
 :args_done
 if "%TARGET%"=="" set "TARGET=fable_2_codegen"
 
-rem SDK source (optional, Vulkan plugin): thirdparty, then a sibling install.
-set "SDKSRC=%~dp0thirdparty\rexglue-sdk-src"
-if not exist "%SDKSRC%\CMakeLists.txt" set "SDKSRC=%~dp0..\rexglue-sdk-src"
+rem Special target: fable_2_profiler = Release (-O3) + symbols, but WITHOUT the
+rem post-build stable-hash PE cleaning, so the exe keeps the linker's real PDB
+rem UUID/Age and debuggers/profilers (VS, WinDbg, VTune) load fable_2.pdb
+rem directly. Builds into out\build\win-amd64-release-profiling.
+if /i "%TARGET%"=="fable_2_profiler" (
+    set "CONFIG=win-amd64-release-profiling"
+    set "TARGET=fable_2"
+)
+
+rem Clean: wipe the whole build dir for the selected config (a full clean is
+rem just deleting the tree for a Ninja + CMake build) and stop.
+if "%CLEAN%"=="1" (
+    if exist "out\build\%CONFIG%" (
+        rmdir /s /q "out\build\%CONFIG%"
+        echo Cleaned out\build\%CONFIG%
+    ) else (
+        echo Nothing to clean: out\build\%CONFIG% does not exist
+    )
+    exit /b 0
+)
+
+rem SDK source (the Vulkan plugin + source runtime): the thirdparty\rexglue-sdk
+rem submodule (your fork, branch vsync-present-gate). The CMake staging only
+rem swaps the source runtime/plugin in if they are BUILT under
+rem <SDKSRC>\out\win-amd64\Release, so build the SDK first (Release) for a
+rem -release / fable_2_profiler build; the Debug config does not stage them.
+set "SDKSRC=%~dp0thirdparty\rexglue-sdk"
+if not exist "%SDKSRC%\CMakeLists.txt" set "SDKSRC=%~dp0..\rexglue-sdk"
+if not exist "%SDKSRC%\CMakeLists.txt" (
+    echo SDK source not found; run: git submodule update --init --recursive 1>&2
+    exit /b 1
+)
+
+rem Build the SDK source (Release) so the staged pair is your fork's
+rem (dual-backend, vsync-capped) runtime + plugin, not the prebuilt 0.10.0 pair.
+if /i not "%CONFIG%"=="win-amd64-debug" (
+    call "%~dp0tools\build_sdk_vulkan.cmd" || exit /b 1
+)
+
 rem (inline -D with quotes at the call site: cmd cannot carry a quoted value
 rem in a variable for paths with spaces)
-if exist "%SDKSRC%\CMakeLists.txt" (
-    cmake --preset %CONFIG% -DCMAKE_PREFIX_PATH="%REXSDK%" -DREXGLUE_SDK_ROOT="%REXSDK%" -DREXGLUE_SDK_SOURCE="%SDKSRC%" || exit /b 1
-) else (
-    cmake --preset %CONFIG% -DCMAKE_PREFIX_PATH="%REXSDK%" -DREXGLUE_SDK_ROOT="%REXSDK%" || exit /b 1
-)
+cmake --preset %CONFIG% -DCMAKE_PREFIX_PATH="%REXSDK%" -DREXGLUE_SDK_ROOT="%REXSDK%" -DREXGLUE_SDK_SOURCE="%SDKSRC%" || exit /b 1
 cmake --build out\build\%CONFIG% --target %TARGET%

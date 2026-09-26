@@ -117,6 +117,32 @@ class Fable2App : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    // Hero/dog black-texture fix (see plans/hero-dog-texture-readback.md).
+    // Approach + guest base 0x12704000 credit just-harry's Unofficial Xenia
+    // femtofork for Fable II. readback_resolve_force_addresses is defined in the
+    // GPU plugin (loaded in OnPreSetup, i.e. after OnPostInitLogging), so it is
+    // seeded here, now that the plugin is loaded and its cvar is registered.
+    // Force a CPU readback of the render-to-texture resolve that regenerates the
+    // hero/dog face+skin texture; the address is Fable-II-specific, so it lives in
+    // the app and the SDK only knows "read back resolves to these addresses".
+    {
+      const fable2::config::Values& cfg = fable2::config::Get();
+      const std::string_view force_addr =
+          cfg.hero_dog_texture_readback ? "0x12704000" : "";
+      if (rex::cvar::GetFlagSource("readback_resolve_force_addresses") ==
+          rex::cvar::Source::kDefault) {
+        if (rex::cvar::SetFlagByName("readback_resolve_force_addresses", force_addr)) {
+          REXSYS_INFO("[fable2-config] seeded readback_resolve_force_addresses "
+                      "from fable2_config.toml (hero_dog_texture_readback={})",
+                      cfg.hero_dog_texture_readback);
+        } else {
+          REXSYS_WARN("[fable2-config] cvar readback_resolve_force_addresses "
+                      "rejected '{}'; hero/dog readback fix may be inactive",
+                      std::string{force_addr});
+        }
+      }
+    }
+
     // Feed the F3 debug overlay with guest FPS (below). The GPU plugin
     // records per-guest-swap frame timing into the shared perf registry
     // (rex::perf, state lives in rexruntime.dll and is shared with the
@@ -256,23 +282,19 @@ class Fable2App : public rex::ReXApp {
     seed_cvar("keyboard_gamepad_map", cfg.keyboard_gamepad_map);
     seed_cvar("mouse_look", cfg.mouse_look ? "true" : "false");
     seed_cvar("mouse_look_scale", std::to_string(cfg.mouse_look_scale));
+    // NOTE: the hero/dog readback fix (readback_resolve_force_addresses) is a
+    // GPU-PLUGIN cvar, so it is seeded in OnPostSetup() (after the plugin is
+    // loaded) rather than here - see plans/hero-dog-texture-readback.md.
 
 #ifdef FABLE2_REMOTE_CONTROL
-    // Start the remote control server (AI input channel; [remote] section).
-    // Debug builds only (FABLE2_REMOTE_CONTROL); Release builds never open the
-    // port.
-    if (cfg.remote_enabled) {
-      fable2::remote::ControlServer::Config rcfg;
-      rcfg.host = cfg.remote_host;
-      rcfg.port = cfg.remote_port;
-      rcfg.token = cfg.remote_token;
-      if (!remote_server_.Start(rcfg)) {
-        REXSYS_WARN(
-            "[fable2-config] remote control server could not start; remote "
-            "input disabled (see logs/)");
-      }
-    } else {
-      REXSYS_INFO("[fable2-config] remote control disabled by config");
+    // Start the remote control server (AI input channel; debug-only, no
+    // config knobs - always on with ControlServer::Config defaults: 127.0.0.1:
+    // 8791, no auth). Debug builds only (FABLE2_REMOTE_CONTROL); Release
+    // builds never open the port.
+    if (!remote_server_.Start({})) {
+      REXSYS_WARN(
+          "[fable2-config] remote control server could not start; remote "
+          "input disabled (see logs/)");
     }
 
     // Observe remote A-presses (the state machine's input transition). The
@@ -283,8 +305,8 @@ class Fable2App : public rex::ReXApp {
         fable2::stateprobe::record_a_press(fable2::stateprobe::t_ms());
     });
     // Start the 1-second game-state classifier (feeds the remote `state`
-    // command + the [state] in-game log). Runs regardless of remote_enabled so
-    // the state is always tracked in debug builds.
+    // command + the [state] in-game log). The state is always tracked in
+    // debug builds.
     fable2::stateprobe::start();
 #endif  // FABLE2_REMOTE_CONTROL
   }

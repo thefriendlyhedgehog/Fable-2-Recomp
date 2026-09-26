@@ -45,7 +45,6 @@ struct Values {
   // hook bodies consult these at runtime (src/core/fable2_hooks.cpp), so a patch
   // can be A/B'd with no rebuild. Guest-image data patches live in
   // fable2_patches.toml instead (see src/core/fable2_patches.h).
-  bool fps_60 = true;
   // Unlock the Guild-chest items that were obtainable from the (now-dead)
   // Fable 2 website. Forces both the registration gates and the grant-method
   // result in GuildChest_GetWebsiteItem_8256E368 (hooks
@@ -56,13 +55,20 @@ struct Values {
   // GuildChest_GetCEContent_824B3528 (hooks fable2_hook_ce_g1/g1b/grantavail
   // in src/core/fable2_hooks.cpp).
   bool unlock_ce = true;
-  // [remote] - localhost JSON-lines command channel so an external AI/
-  // automation harness can drive the guest gamepad (see
-  // src/input/remote_control_server.h and plans/ai-remote-input-control.md).
-  bool remote_enabled = true;
-  std::string remote_host = "127.0.0.1";  // "0.0.0.0" = all interfaces
-  int32_t remote_port = 8791;  // if busy, ports +1..+9 are tried
-  std::string remote_token;  // empty = no auth required
+  // Force a CPU readback of the render-to-texture resolve that (re)generates
+  // the hero/dog face+skin texture, so the character does not render black on
+  // a split-memory host (see plans/hero-dog-texture-readback.md). Approach + the
+  // guest base 0x12704000 come from just-harry's Unofficial Xenia femtofork for
+  // Fable II. This seeds the SDK cvar readback_resolve_force_addresses in
+  // Fable2App; readback then happens only for that resolve, not every frame.
+  bool hero_dog_texture_readback = true;
+  // [perf] - hot-function override tuning.
+  // hotfunc_yield_every: NtYieldExecution batching factor for the hotfunc
+  // overrides (see src/core/hotfunc/hotfunc_yield.h). Every Nth call does
+  // the real SwitchToThread; the others take a full memory fence. 1 =
+  // original (yield every call), 0 = never yield. Larger = fewer context
+  // switches, less frequent CPU rotation to other guest threads.
+  int32_t hotfunc_yield_every = 8;
 };
 
 // Load the config from `path`.
