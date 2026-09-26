@@ -52,13 +52,19 @@ out/build/mac-arm64-release/fable_2
   0.10.0 are refused. Nightlies need the tag too, for example
   `REXGLUE_SDK_VERSION=0.10.0.15-dev.g5cf287f REXGLUE_SDK_TAG=nightly-20260925-5cf287f4`
   (MoltenVK 1.4.3 instead of v0.10.0's 1.4.1; the host code compiles against
-  it). `thirdparty/rexglue-sdk` is the SDK *source* submodule upstream's
-  Windows build uses; macOS/Linux use the prebuilt SDK only.
+  it). **That nightly is not usable yet:** its codegen names the project's
+  files `fable2_*` instead of `fable_2_*` (manifest, `fable2_pch.h`,
+  `fable2_codegen`), which nothing in the project references, so `build.sh`
+  stops with a message saying so. Using it would mean renaming the project
+  (manifest `name`, `src/main.cpp`, the hotfunc includes, `CMakeLists.txt`).
+  `thirdparty/rexglue-sdk` is the SDK *source* submodule upstream's Windows
+  build uses; macOS/Linux use the prebuilt SDK only.
 - `build.sh` mirrors `build.cmd` (`-release`/`-r`, target argument). On a
   fresh checkout it runs `rexglue codegen` once to create
   `generated/rexglue.cmake`, which `CMakeLists.txt` includes, and again when
-  the SDK version it pins no longer matches the installed SDK. `CC`/`CXX`
-  override the preset's compilers.
+  the installed SDK differs from the one recorded in
+  `generated/.rexglue_sdk_version`. `CC`/`CXX` override the preset's
+  compilers.
 - The SDK's CMake helpers stage `librexruntime.dylib`, the GPU plugin, and
   MoltenVK + its ICD next to the executable, and the runtime points the Vulkan
   loader at them itself; no launcher script is needed.

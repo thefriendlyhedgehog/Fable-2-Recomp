@@ -48,23 +48,35 @@ fi
 # generated/ is not tracked, and CMakeLists.txt includes
 # generated/rexglue.cmake, so a fresh checkout cannot configure until codegen
 # has written it. Codegen writes that file first, before it needs default.xex.
-# It also pins the SDK version that generated it (find_package(rexglue X.Y.Z)),
-# so after switching to an older SDK (tools/setup_sdk.sh) configure would fail;
-# regenerate it whenever the pinned version differs from the installed SDK.
-# (Codegen pins major.minor.patch only, also for nightlies like 0.10.0.15.)
+# It is also SDK-specific, so it is regenerated whenever the installed SDK
+# differs from the one recorded in generated/.rexglue_sdk_version (the file
+# itself only pins major.minor.patch, which cannot tell a nightly apart).
 sdk_ver="$(sed -n 's/^set(PACKAGE_VERSION "\(.*\)")$/\1/p' \
-    "$REXSDK/lib/cmake/rexglue/rexglueConfigVersion.cmake" | cut -d. -f1-3)"
-gen_ver="$(sed -n 's/.*find_package(rexglue \([0-9][0-9.]*\) QUIET CONFIG).*/\1/p' \
-    generated/rexglue.cmake 2>/dev/null)"
-if [ ! -f generated/rexglue.cmake ] || [ "$gen_ver" != "$sdk_ver" ]; then
-    echo "generated/rexglue.cmake missing or for SDK ${gen_ver:-none} (installed: $sdk_ver);" \
-         "running rexglue codegen to (re)create it ..."
+    "$REXSDK/lib/cmake/rexglue/rexglueConfigVersion.cmake")"
+stamp=generated/.rexglue_sdk_version
+if [ ! -f generated/rexglue.cmake ] || [ "$(cat "$stamp" 2>/dev/null)" != "$sdk_ver" ]; then
+    echo "generated/rexglue.cmake missing or for SDK $(cat "$stamp" 2>/dev/null || echo none)" \
+         "(installed: $sdk_ver); running rexglue codegen to (re)create it ..."
     rm -f generated/rexglue.cmake
     "$REXSDK/bin/rexglue" codegen fable_2_manifest.toml || true
     if [ ! -f generated/rexglue.cmake ]; then
         echo "Error: rexglue codegen did not create generated/rexglue.cmake." >&2
         exit 1
     fi
+    echo "$sdk_ver" > "$stamp"
+fi
+# The generated file names the manifest and the generated sources after the
+# project; an SDK that derives those names differently (the 0.10.0.15 nightly
+# turns fable_2 into fable2) produces a build that cannot find them.
+manifest="$(sed -n 's/.*codegen \${CMAKE_CURRENT_SOURCE_DIR}\/\([^ ]*_manifest\.toml\).*/\1/p' \
+    generated/rexglue.cmake | head -1)"
+if [ -n "$manifest" ] && [ ! -f "$manifest" ]; then
+    echo "Error: ReXGlue SDK $sdk_ver names this project's files '${manifest%_manifest.toml}_*'," \
+         "but the project uses 'fable_2_*' (fable_2_manifest.toml, fable_2_pch.h, ...)." >&2
+    echo "       This SDK version is incompatible with the project; go back to the" \
+         "release SDK with:  tools/setup_sdk.sh && ./build.sh" >&2
+    rm -f generated/rexglue.cmake "$stamp"
+    exit 1
 fi
 if [ ! -f default.xex ]; then
     echo "Warning: default.xex not found in the repo root; codegen will fail" \

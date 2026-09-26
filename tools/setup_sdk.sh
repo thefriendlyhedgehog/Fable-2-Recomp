@@ -12,9 +12,13 @@
 # tested against). Override with REXGLUE_SDK_VERSION=<x.y.z>; anything older
 # than 0.10.0 is refused, since that is the release that added macOS support
 # (MoltenVK-backed Vulkan). Nightly builds need both the version and the
-# release tag, e.g. (MoltenVK 1.4.3 instead of 0.10.0's 1.4.1):
+# release tag, e.g.:
 #   REXGLUE_SDK_VERSION=0.10.0.15-dev.g5cf287f \
 #   REXGLUE_SDK_TAG=nightly-20260925-5cf287f4 tools/setup_sdk.sh
+# NOTE: that nightly derives the project's file names as fable2_* instead of
+# fable_2_* (manifest, pch, codegen target), so build.sh refuses it; the
+# project would need renaming first. Run this script with no variables to go
+# back to the release SDK.
 #
 # Run automatically by build.sh when the SDK is missing; can also be run
 # manually. Prints the SDK root on the last line of stdout.
