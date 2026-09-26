@@ -282,6 +282,14 @@ class Fable2App : public rex::ReXApp {
     seed_cvar("keyboard_gamepad_map", cfg.keyboard_gamepad_map);
     seed_cvar("mouse_look", cfg.mouse_look ? "true" : "false");
     seed_cvar("mouse_look_scale", std::to_string(cfg.mouse_look_scale));
+#ifdef __APPLE__
+    // MoltenVK also reports its per-draw "Metal does not support disabling
+    // primitive restart" warning through VK_EXT_debug_utils, which
+    // MVK_CONFIG_LOG_LEVEL does not filter: tens of thousands of log lines
+    // per session. Skip the SDK's debug messenger on macOS unless the user
+    // set vulkan_log_debug_messages (config, env or command line).
+    seed_cvar("vulkan_log_debug_messages", "false");
+#endif
     // NOTE: the hero/dog readback fix (readback_resolve_force_addresses) is a
     // GPU-PLUGIN cvar, so it is seeded in OnPostSetup() (after the plugin is
     // loaded) rather than here - see plans/hero-dog-texture-readback.md.
