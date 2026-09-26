@@ -435,11 +435,16 @@ class Fable2App : public rex::ReXApp {
     // The game content itself must actually be present too (covers both the
     // exe-dir default and a --game_data_root override): without data/ the
     // guest fails deep inside content loading with cryptic errors, so fail
-    // fast with the real problem.
+    // fast with the real problem. Check a file inside data/ rather than the
+    // folder alone: a partial copy (e.g. an interrupted stage_content run)
+    // leaves data/ present but empty, and the game then dies on a NULL read.
     if (!paths.game_data_root.empty() &&
-        !std::filesystem::is_directory(paths.game_data_root / "data")) {
+        !std::filesystem::is_regular_file(paths.game_data_root / "data" / "dir.manifest")) {
       const std::string msg = std::format(
-          "The data folder was not found in {}.",
+          "The game data was not found or is incomplete in {} "
+          "(missing data/dir.manifest).\n\n"
+          "Copy the full data folder there, or pass --game_data_root=<path> "
+          "pointing at a complete copy.",
           paths.game_data_root.string());
       rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
       std::exit(1);
