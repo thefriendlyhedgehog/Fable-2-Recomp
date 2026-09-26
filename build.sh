@@ -36,8 +36,10 @@ for tool in cmake ninja clang++; do
     fi
 done
 
-# ReXGlue SDK: thirdparty/rexglue-sdk/<platform>, fetched on first use.
-REXSDK="$PWD/thirdparty/rexglue-sdk/$PLAT"
+# Prebuilt ReXGlue SDK: thirdparty/rexglue-sdk-prebuilt/<platform>, fetched on
+# first use. (thirdparty/rexglue-sdk is the SDK source submodule, which the
+# Windows Release build uses; macOS/Linux build against the prebuilt SDK.)
+REXSDK="$PWD/thirdparty/rexglue-sdk-prebuilt/$PLAT"
 if [ ! -f "$REXSDK/lib/cmake/rexglue/rexglueConfig.cmake" ]; then
     echo "ReXGlue SDK not found; downloading via tools/setup_sdk.sh ..."
     tools/setup_sdk.sh
@@ -46,8 +48,18 @@ fi
 # generated/ is not tracked, and CMakeLists.txt includes
 # generated/rexglue.cmake, so a fresh checkout cannot configure until codegen
 # has written it. Codegen writes that file first, before it needs default.xex.
-if [ ! -f generated/rexglue.cmake ]; then
-    echo "generated/rexglue.cmake missing; running rexglue codegen to create it ..."
+# It also pins the SDK version that generated it (find_package(rexglue X.Y.Z)),
+# so after switching to an older SDK (tools/setup_sdk.sh) configure would fail;
+# regenerate it whenever the pinned version differs from the installed SDK.
+# (Codegen pins major.minor.patch only, also for nightlies like 0.10.0.15.)
+sdk_ver="$(sed -n 's/^set(PACKAGE_VERSION "\(.*\)")$/\1/p' \
+    "$REXSDK/lib/cmake/rexglue/rexglueConfigVersion.cmake" | cut -d. -f1-3)"
+gen_ver="$(sed -n 's/.*find_package(rexglue \([0-9][0-9.]*\) QUIET CONFIG).*/\1/p' \
+    generated/rexglue.cmake 2>/dev/null)"
+if [ ! -f generated/rexglue.cmake ] || [ "$gen_ver" != "$sdk_ver" ]; then
+    echo "generated/rexglue.cmake missing or for SDK ${gen_ver:-none} (installed: $sdk_ver);" \
+         "running rexglue codegen to (re)create it ..."
+    rm -f generated/rexglue.cmake
     "$REXSDK/bin/rexglue" codegen fable_2_manifest.toml || true
     if [ ! -f generated/rexglue.cmake ]; then
         echo "Error: rexglue codegen did not create generated/rexglue.cmake." >&2
@@ -75,8 +87,11 @@ EXTRA=()
 [ -n "${CC:-}" ] && EXTRA+=("-DCMAKE_C_COMPILER=$CC")
 [ -n "${CXX:-}" ] && EXTRA+=("-DCMAKE_CXX_COMPILER=$CXX")
 
+# rexglue_DIR is passed explicitly: find_package caches it, so a build dir
+# configured against an older SDK location would otherwise keep using it.
 cmake --preset "$CONFIG" \
     -DCMAKE_PREFIX_PATH="$REXSDK" \
+    -Drexglue_DIR="$REXSDK/lib/cmake/rexglue" \
     -DREXGLUE_SDK_ROOT="$REXSDK" \
     ${EXTRA[@]+"${EXTRA[@]}"}
 cmake --build "out/build/$CONFIG" --target "$TARGET"

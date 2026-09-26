@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ===========================================================================
 # Fetch the prebuilt ReXGlue SDK for this host (macOS / Linux) into
-# thirdparty/rexglue-sdk/<platform>/ (relative to the repo root). No-op if
-# already present. The macOS/Linux counterpart of tools/setup_sdk.cmd.
+# thirdparty/rexglue-sdk-prebuilt/<platform>/ (relative to the repo root).
+# No-op if already present. The macOS/Linux counterpart of
+# tools/setup_sdk.cmd. (thirdparty/rexglue-sdk is the SDK source submodule.)
 #
 #   macOS Apple Silicon -> mac-arm64      macOS Intel -> mac-amd64
 #   Linux x86_64        -> linux-amd64
@@ -10,7 +11,10 @@
 # The SDK version defaults to 0.10.0 (the version this project is built and
 # tested against). Override with REXGLUE_SDK_VERSION=<x.y.z>; anything older
 # than 0.10.0 is refused, since that is the release that added macOS support
-# (MoltenVK-backed Vulkan).
+# (MoltenVK-backed Vulkan). Nightly builds need both the version and the
+# release tag, e.g. (MoltenVK 1.4.3 instead of 0.10.0's 1.4.1):
+#   REXGLUE_SDK_VERSION=0.10.0.15-dev.g5cf287f \
+#   REXGLUE_SDK_TAG=nightly-20260925-5cf287f4 tools/setup_sdk.sh
 #
 # Run automatically by build.sh when the SDK is missing; can also be run
 # manually. Prints the SDK root on the last line of stdout.
@@ -19,6 +23,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VER="${REXGLUE_SDK_VERSION:-0.10.0}"
+TAG="${REXGLUE_SDK_TAG:-v$VER}"
 MIN_VER="0.10.0"
 
 version_ge() {  # version_ge A B -> true if A >= B
@@ -39,16 +44,16 @@ case "$(uname -s)-$(uname -m)" in
         ;;
 esac
 
-DEST="$REPO/thirdparty/rexglue-sdk"
+DEST="$REPO/thirdparty/rexglue-sdk-prebuilt"
 SDK_ROOT="$DEST/$PLAT"
 MARKER="$SDK_ROOT/lib/cmake/rexglue/rexglueConfig.cmake"
 ZIPNAME="rexglue-sdk-$VER-$PLAT.zip"
-URL="https://github.com/rexglue/rexglue-sdk/releases/download/v$VER/$ZIPNAME"
+URL="https://github.com/rexglue/rexglue-sdk/releases/download/$TAG/$ZIPNAME"
 
 if [ -f "$MARKER" ]; then
     have="$(sed -n 's/^set(PACKAGE_VERSION "\(.*\)")$/\1/p' \
         "$SDK_ROOT/lib/cmake/rexglue/rexglueConfigVersion.cmake" 2>/dev/null || true)"
-    if [ "$have" = "$VER" ]; then
+    if [ "$have" = "${VER%%-*}" ]; then
         echo "ReXGlue SDK v$VER already present: $SDK_ROOT"
         echo "$SDK_ROOT"
         exit 0

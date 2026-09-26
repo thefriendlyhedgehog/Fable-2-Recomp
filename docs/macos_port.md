@@ -3,7 +3,8 @@
 **Status:** builds and runs on an M4 Mac mini (macOS, Xcode beta toolchain,
 SDK v0.10.0). With FSI render targets the boot logos, menus and new-game flow
 work and gameplay starts (audio, cutscene, tutorial). Open problems: in-game
-graphics corruption, low frame rate, and wonky stick input in menus.
+graphics corruption, low frame rate, wonky stick input in menus, and an
+occasional black screen at launch.
 
 ## Prior work
 
@@ -12,7 +13,20 @@ graphics corruption, low frame rate, and wonky stick input in menus.
   [Fable2Recomp/Fable2Recomp#23](https://github.com/Fable2Recomp/Fable2Recomp/issues/23)
   and [rexglue/rexglue-sdk#446](https://github.com/rexglue/rexglue-sdk/issues/446).
   They got intro menus and loading working after reworking the keyboard
-  module; terrain rendered see-through. Their code is not public.
+  module; terrain rendered see-through. Their code is not public, and himdo#9
+  is labeled "Not Planned For a While".
+- Other Fable II recomps (Sept 2026), none with macOS support:
+  [Fable2Recomp/Fable2Recomp](https://github.com/Fable2Recomp/Fable2Recomp),
+  [FenrisSkoll/Fable2Recomp](https://github.com/FenrisSkoll/Fable2Recomp)
+  (Windows/D3D12 only, needs its own SDK fork),
+  [TheSaltTrader/A-Legend-Never-dies---Fable-2-Recompilation](https://github.com/TheSaltTrader/A-Legend-Never-dies---Fable-2-Recompilation)
+  (Windows; fixed a ~3.5 min freeze by switching to ROV render targets, the
+  D3D12 counterpart of FSI) and
+  [Oery/fable-ii-recomp](https://github.com/Oery/fable-ii-recomp) (Linux).
+- Other ReXGlue games that run on macOS, each on its own SDK fork:
+  [skate3recomp](https://github.com/mchughalex/skate3recomp),
+  [MCX360-EDITION](https://github.com/DevZer0D4Y/MCX360-EDITION) and
+  [RaymanOriginsRecomp](https://github.com/BelmanteGu/RaymanOriginsRecomp/pull/23).
 - ReXGlue SDK **v0.10.0** is the first release with macOS support (Vulkan on
   MoltenVK) and ships prebuilt `mac-arm64` / `mac-amd64` SDKs. This project is
   pinned to v0.10.0 (the source pin `f5337cd` is the `v0.10.0` tag).
@@ -32,12 +46,18 @@ out/build/mac-arm64-release/fable_2
 ```
 
 - `tools/setup_sdk.sh` downloads the prebuilt SDK for the host
-  (`mac-arm64`, `mac-amd64` or `linux-amd64`) into `thirdparty/rexglue-sdk/`.
+  (`mac-arm64`, `mac-amd64` or `linux-amd64`) into
+  `thirdparty/rexglue-sdk-prebuilt/`.
   `REXGLUE_SDK_VERSION=<x.y.z>` selects a later release; versions before
-  0.10.0 are refused.
+  0.10.0 are refused. Nightlies need the tag too, for example
+  `REXGLUE_SDK_VERSION=0.10.0.15-dev.g5cf287f REXGLUE_SDK_TAG=nightly-20260925-5cf287f4`
+  (MoltenVK 1.4.3 instead of v0.10.0's 1.4.1; the host code compiles against
+  it). `thirdparty/rexglue-sdk` is the SDK *source* submodule upstream's
+  Windows build uses; macOS/Linux use the prebuilt SDK only.
 - `build.sh` mirrors `build.cmd` (`-release`/`-r`, target argument). On a
   fresh checkout it runs `rexglue codegen` once to create
-  `generated/rexglue.cmake`, which `CMakeLists.txt` includes. `CC`/`CXX`
+  `generated/rexglue.cmake`, which `CMakeLists.txt` includes, and again when
+  the SDK version it pins no longer matches the installed SDK. `CC`/`CXX`
   override the preset's compilers.
 - The SDK's CMake helpers stage `librexruntime.dylib`, the GPU plugin, and
   MoltenVK + its ICD next to the executable, and the runtime points the Vulkan
@@ -110,3 +130,17 @@ between render targets, which shows up as surfaces failing the depth test.
 
 For remaining corruption, check `logs/` for pipeline creation failures and run
 with `MVK_CONFIG_LOG_LEVEL=3` for MoltenVK's view.
+
+## Known gaps
+
+- **Hero/dog black textures:** upstream's fix seeds the GPU cvar
+  `readback_resolve_force_addresses`, which exists only in upstream's locally
+  modified SDK (it is in neither prebuilt v0.10.0 nor the published
+  `himdo/rexglue-sdk` `vsync-present-gate` branch). On macOS the app logs
+  "cvar readback_resolve_force_addresses rejected" and the fix is inactive.
+  `vulkan_readback_resolve = true` in `fable_2.toml` reads back every resolve
+  instead, which covers the same textures at some frame-rate cost.
+- **Keys:** the default `keyboard_gamepad_map` puts the d-pad on F1-F4, while
+  the SDK binds F3 (debug overlay) and F4 (settings overlay, mouse unlock).
+  Mac keyboards also need fn for F-keys unless "Use F1, F2, etc. keys as
+  standard function keys" is on.
