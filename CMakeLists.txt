@@ -19,6 +19,14 @@ include(generated/rexglue.cmake)
 # Grouped into per-category subfolders (frame/, os_notifications/, refcount/, ...);
 # glob recursively so new categories are picked up automatically.
 file(GLOB_RECURSE HOTFUNC_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/core/hotfunc/*.cpp)
+# The overrides are strong symbols, so leaving them out falls back to the
+# generated copies. Toggling only relinks (the generated code is unchanged),
+# which makes it a cheap A/B when a crash might come from an override.
+option(FABLE2_HOTFUNC_OVERRIDES "Link the hand-tuned hotfunc overrides (src/core/hotfunc)" ON)
+if(NOT FABLE2_HOTFUNC_OVERRIDES)
+    message(STATUS "FABLE2_HOTFUNC_OVERRIDES=OFF: using the generated copies of the hotfunc functions")
+    set(HOTFUNC_SOURCES "")
+endif()
 
 set(FABLE2_SOURCES
     src/main.cpp
