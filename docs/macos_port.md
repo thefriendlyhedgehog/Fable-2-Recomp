@@ -137,6 +137,73 @@ between render targets, which shows up as surfaces failing the depth test.
 For remaining corruption, check `logs/` for pipeline creation failures and run
 with `MVK_CONFIG_LOG_LEVEL=3` for MoltenVK's view.
 
+## Renderer review: Vulkan on MoltenVK vs. a native Metal backend
+
+Reviewed against the v0.10.0 SDK source, the M4's reported device features
+and MoltenVK 1.4.1 (bundled). Sizes: `src/graphics/vulkan` 21k lines,
+`src/ui/vulkan` 7k, the Xenos-to-SPIR-V shader translator ~12k of the 26k
+line `pipeline/shader` tree, plus 5k shared.
+
+What the Xenos emulation needs from the GPU and what Metal/MoltenVK gives it:
+
+| Need | On the M4 via MoltenVK | Where it matters |
+|---|---|---|
+| Fragment shader interlock (FSI path's EDRAM emulation) | Exposed (`fragmentShaderPixelInterlock`, `SampleInterlock`), translated to Metal raster order groups | Whole FSI path |
+| Fragment/vertex stores and atomics | Exposed | Hard requirement, met |
+| Geometry shaders (point sprites, rect lists, quad lists) | Absent; SDK falls back to vertex-shader expansion. The rectangle fallback re-implements the geometry shader's corner detection (longest edge = hypotenuse), reviewed and equivalent | Fullscreen passes, particles |
+| `D24_UNORM_S8` depth | Absent, stored as `D32_SFLOAT_S8` | Host-render-target (`fbo`) path only; the FSI path keeps depth in the EDRAM buffer and never uses a host depth image |
+| Disabling primitive restart | Impossible in Metal (the per-draw warning) | Only a 16-bit index buffer using vertex 65535 as a real vertex is affected: negligible |
+| Sparse buffers, custom border colors, null descriptors, cull distance, point polygons | Absent; every use site checks the feature and falls back | None observed |
+| Barriers inside a render pass | Unsupported on Apple GPUs; the SDK never emits one (`SubmitBarriers()` ends the pass first, the FSI render pass has no self-dependency) | Not applicable |
+| Dynamic rendering | Exposed | Fine |
+| 16 samplers per stage (`maxPerStageDescriptorSamplers`) | Not checked by the SDK; Metal would refuse the pipeline and it would be logged. None logged | Not the cause so far |
+| Exact float semantics (35 `NoContraction` / NaN-preserve sites in the translator; float24 depth bit tricks) | MoltenVK compiles with fast math by default (`MVK_CONFIG_FAST_MATH_ENABLED=2`, per-shader limits) | Unverified; cheap to test with `=0` |
+
+Upstream's own Vulkan status: the Windows build ships D3D12 only; the
+Vulkan plugin is "Stage 2, in progress", and the local SDK patch still
+carries "TEMPDIAG" code from a Vulkan black-screen diagnosis. So this SDK's
+Vulkan backend has not been shown to render Fable 2 correctly on any
+platform by this project. Oery/fable-ii-recomp (Linux, therefore Vulkan on a
+native driver) reports the game playable, so the backend can render it.
+
+**Verdict: stay on Vulkan through MoltenVK.** Every hard requirement of the
+FSI path is met, the two missing features have reviewed fallbacks, and the
+one Metal-specific limitation is harmless. A native Metal backend would
+replace ~40k lines (command processor, render target cache, texture cache,
+primitive processor, pipeline cache, presenter) and still need a shader path,
+which would be SPIRV-Cross to MSL, i.e. exactly what MoltenVK already does.
+Xenia's Vulkan backend, which this is, took years; every other ReXGlue macOS
+port (Minecraft 360, Rayman Origins, Skate 3's Xenos path) also runs on
+MoltenVK. Metal-native EDRAM emulation (tile shaders / imageblocks) is a
+research project for the SDK, not a port task. Fixes belong in the SDK's
+Vulkan backend, built from source on macOS, where they also help Linux.
+
+What that leaves for the corruption: either a generic bug in this backend
+(never validated for this game) or a MoltenVK translation issue. Neither is
+found by flag-flipping; the tools that find them, all usable with the
+prebuilt SDK:
+
+1. **Vulkan validation + synchronization validation** (LunarG macOS SDK;
+   the runtime requests `VK_LAYER_KHRONOS_validation` with
+   `--vulkan_validation_enabled`, needs `--vulkan_log_debug_messages` and
+   `VK_LAYER_PATH`).
+2. **Metal API validation** (`MTL_DEBUG_LAYER=1`), for what MoltenVK asks of
+   Metal.
+3. **Xcode GPU frame capture** through MoltenVK
+   (`MVK_CONFIG_AUTO_GPU_CAPTURE_SCOPE=2`), with `--gpu_debug_markers` so
+   draws are labelled; shows the EDRAM buffer and each resolve.
+4. **A newer MoltenVK without a rebuild**: the runtime honours
+   `VK_DRIVER_FILES` if already set, so the LunarG SDK's ICD can replace the
+   bundled 1.4.1.
+5. **The translated shaders** (`--dump_shaders=<dir>`) run through
+   `spirv-cross --msl` to confirm the EDRAM buffer gets
+   `[[raster_order_group]]`, the one mechanism the FSI path depends on.
+6. **The SDK built from source on macOS** (its CI does; Debug build enables
+   the `assert_always` checks in the EDRAM state machine) once something
+   needs fixing.
+7. **The same plugin on a native Vulkan driver** (any Linux or Windows box
+   with a GPU), the decisive Mac-vs-generic test.
+
 ## Known gaps
 
 - **Hero/dog black textures:** upstream's fix seeds the GPU cvar
