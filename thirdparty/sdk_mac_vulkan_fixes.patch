@@ -1,3 +1,89 @@
+diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
+index 696ff48..73f109e 100644
+--- a/include/rex/graphics/vulkan/command_processor.h
++++ b/include/rex/graphics/vulkan/command_processor.h
+@@ -801,6 +801,11 @@ class VulkanCommandProcessor : public CommandProcessor {
+   // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
+   // TODO(Triang3l): Change to a deferred compilation handle.
+   VkPipeline current_guest_graphics_pipeline_;
++  // Fragment shader interlock path statistics (logged periodically).
++  uint32_t fsi_stats_frames_ = 0;
++  uint32_t fsi_stats_draws_ = 0;
++  uint32_t fsi_stats_pass_switches_ = 0;
++  uint32_t fsi_stats_pipeline_pass_mismatches_ = 0;
+   VkPipeline current_external_graphics_pipeline_;
+   VkPipeline current_external_compute_pipeline_;
+ 
+diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
+index 7b938b9..08cc916 100644
+--- a/include/rex/graphics/vulkan/pipeline_cache.h
++++ b/include/rex/graphics/vulkan/pipeline_cache.h
+@@ -96,7 +96,28 @@ class VulkanPipelineCache {
+   bool IsCreatingPipelines() const;
+   void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
+                                     const PipelineLayoutProvider*& pipeline_layout_out,
+-                                    bool* is_placeholder_out = nullptr) const;
++                                    bool* is_placeholder_out = nullptr,
++                                    uint32_t* fsi_host_sample_count_log2_out = nullptr) const;
++  // Whether MoltenVK creates a rasterizing Metal pipeline state for the
++  // description (rasterizer discard, and both faces culled with a triangle
++  // topology, disable rasterization on the Metal side).
++  static bool IsPipelineRasterizingOnMetal(const PipelineDescription& description) {
++    if (description.rasterizer_discard) {
++      return false;
++    }
++    if (description.cull_front && description.cull_back) {
++      switch (description.primitive_topology) {
++        case PipelinePrimitiveTopology::kTriangleList:
++        case PipelinePrimitiveTopology::kTriangleStrip:
++        case PipelinePrimitiveTopology::kTriangleFan:
++        case PipelinePrimitiveTopology::kPatchList:
++          return false;
++        default:
++          break;
++      }
++    }
++    return true;
++  }
+ 
+  private:
+   REXPACKEDSTRUCT(ShaderStoredHeader, {
+@@ -238,13 +259,25 @@ class VulkanPipelineCache {
+     // destroyed by it while the pipeline cache is active.
+     std::atomic<const PipelineLayoutProvider*> pipeline_layout{nullptr};
+     std::atomic<bool> is_placeholder{false};
++    // Fragment shader interlock path: the host sample count (log2) the
++    // pipeline was created with, and thus the render pass it was created
++    // against (VulkanRenderTargetCache::GetFragmentShaderInterlockRenderPass).
++    // 0 for pipelines Metal (MoltenVK) treats as non-rasterizing - rasterizer
++    // discard and both faces culled - whose Metal pipeline state always has a
++    // sample count of 1 regardless of the Vulkan multisample state.
++    // Written when the entry is created, before it is shared with other
++    // threads.
++    uint8_t fsi_host_sample_count_log2 = 0;
++    bool metal_rasterizes = true;
+     Pipeline() = default;
+     Pipeline(const PipelineLayoutProvider* pipeline_layout_provider)
+         : pipeline_layout(pipeline_layout_provider) {}
+     Pipeline(const Pipeline& other)
+         : pipeline(other.pipeline.load(std::memory_order_acquire)),
+           pipeline_layout(other.pipeline_layout.load(std::memory_order_acquire)),
+-          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)) {}
++          is_placeholder(other.is_placeholder.load(std::memory_order_acquire)),
++          fsi_host_sample_count_log2(other.fsi_host_sample_count_log2),
++          metal_rasterizes(other.metal_rasterizes) {}
+     Pipeline& operator=(const Pipeline& other) {
+       if (this == &other) {
+         return *this;
+@@ -254,6 +287,8 @@ class VulkanPipelineCache {
+                             std::memory_order_release);
+       is_placeholder.store(other.is_placeholder.load(std::memory_order_acquire),
+                            std::memory_order_release);
++      fsi_host_sample_count_log2 = other.fsi_host_sample_count_log2;
++      metal_rasterizes = other.metal_rasterizes;
+       return *this;
+     }
+   };
 diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
 index 34f7033..57a6ffa 100644
 --- a/include/rex/graphics/vulkan/render_target_cache.h
@@ -41,8 +127,76 @@ index 34f7033..57a6ffa 100644
    Framebuffer fsi_framebuffer_;
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
+diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
+index 001f36b..864f795 100644
+--- a/src/graphics/vulkan/command_processor.cpp
++++ b/src/graphics/vulkan/command_processor.cpp
+@@ -3857,10 +3857,12 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     return draw_fail("configure_pipeline");
+   }
+   bool pipeline_is_placeholder = false;
++  uint32_t pipeline_fsi_host_sample_count_log2 = 0;
+   // Reload the current handle state to observe async hot-swap completions that
+   // may happen between pipeline configuration and binding.
+   pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline, pipeline_layout_provider,
+-                                                &pipeline_is_placeholder);
++                                                &pipeline_is_placeholder,
++                                                &pipeline_fsi_host_sample_count_log2);
+   if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
+     frame_used_async_placeholder_pipeline_ = true;
+     return true;
+@@ -4111,9 +4113,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // After all commands that may dispatch, copy or insert barriers, submit
+   // the barriers (may end the render pass), and (re)enter the render pass
+   // before drawing.
+-  SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+-      render_target_cache_->last_update_render_pass(),
+-      render_target_cache_->last_update_framebuffer());
++  // With fragment shader interlock and render pass objects, draw in the pass
++  // the pipeline was created against (per host sample count; the 1x pass for
++  // non-rasterizing pipelines) - MoltenVK takes the sample count of an
++  // attachment-less Metal pass from the pipelines created against it.
++  VkRenderPass draw_render_pass = render_target_cache_->last_update_render_pass();
++  if (render_target_cache_->GetPath() == RenderTargetCache::Path::kPixelShaderInterlock &&
++      draw_render_pass != VK_NULL_HANDLE) {
++    draw_render_pass = render_target_cache_->GetFragmentShaderInterlockRenderPass(
++        pipeline_fsi_host_sample_count_log2);
++    uint32_t update_log2 = render_target_cache_->GetFsiHostSampleCountLog2(
++        render_target_cache_->last_update_render_pass_key().msaa_samples);
++    ++fsi_stats_draws_;
++    if (draw_render_pass != current_render_pass_) {
++      ++fsi_stats_pass_switches_;
++    }
++    if (pipeline_fsi_host_sample_count_log2 != update_log2) {
++      ++fsi_stats_pipeline_pass_mismatches_;
++    }
++  }
++  SubmitBarriersAndEnterRenderTargetCacheRenderPass(draw_render_pass,
++                                                    render_target_cache_->last_update_framebuffer());
+ 
+   // Draw.
+   if (primitive_processing_result.index_buffer_type ==
+@@ -5165,6 +5185,18 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   if (is_opening_frame) {
+     frame_open_ = true;
+     frame_used_async_placeholder_pipeline_ = false;
++    // Fragment shader interlock statistics, once per 300 frames.
++    if (++fsi_stats_frames_ >= 300) {
++      REXGPU_INFO(
++          "FSI stats over {} frames: {} draws/frame, {} render pass (re)starts/frame, "
++          "{} draws with a pipeline sample count differing from the guest MSAA mode",
++          fsi_stats_frames_, fsi_stats_draws_ / fsi_stats_frames_,
++          fsi_stats_pass_switches_ / fsi_stats_frames_, fsi_stats_pipeline_pass_mismatches_);
++      fsi_stats_frames_ = 0;
++      fsi_stats_draws_ = 0;
++      fsi_stats_pass_switches_ = 0;
++      fsi_stats_pipeline_pass_mismatches_ = 0;
++    }
+ 
+     // Reset bindings that depend on transient data.
+     std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..99c25f3 100644
+index 91ac08f..be59557 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -91,7 +91,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
@@ -65,20 +219,60 @@ index 91ac08f..99c25f3 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -2968,7 +2979,11 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -1215,13 +1226,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+ 
+ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+     void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
+-    bool* is_placeholder_out) const {
++    bool* is_placeholder_out, uint32_t* fsi_host_sample_count_log2_out) const {
+   if (!handle) {
+     pipeline_out = VK_NULL_HANDLE;
+     pipeline_layout_out = nullptr;
+     if (is_placeholder_out) {
+       *is_placeholder_out = false;
+     }
++    if (fsi_host_sample_count_log2_out) {
++      *fsi_host_sample_count_log2_out = 0;
++    }
+     return;
+   }
+   const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
+@@ -1230,6 +1244,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+   if (is_placeholder_out) {
+     *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
+   }
++  if (fsi_host_sample_count_log2_out) {
++    *fsi_host_sample_count_log2_out = pipeline->fsi_host_sample_count_log2;
++  }
+ }
+ 
+ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
+@@ -2964,11 +2981,23 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+   const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
+   bool use_dynamic_rendering =
+       REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
++  // Non-rasterizing pipelines get a Metal pipeline state with a sample count
++  // of 1 whatever the Vulkan multisample state says, so they are created
++  // against (and drawn in) the 1x pass; the sample count is irrelevant to
++  // them. The draw uses the pass recorded here (see IssueDraw), so a
++  // pipeline is always bound in the pass it was created against.
++  pipeline->second.metal_rasterizes = IsPipelineRasterizingOnMetal(description);
++  pipeline->second.fsi_host_sample_count_log2 =
++      pipeline->second.metal_rasterizes
++          ? uint8_t(render_target_cache_.GetFsiHostSampleCountLog2(
++                description.render_pass_key.msaa_samples))
++          : uint8_t(0);
+   VkRenderPass render_pass = VK_NULL_HANDLE;
    if (!use_dynamic_rendering) {
      render_pass =
          render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock
 -            ? render_target_cache_.GetFragmentShaderInterlockRenderPass()
 +            ? render_target_cache_.GetFragmentShaderInterlockRenderPass(
-+                  description.rasterizer_discard
-+                      ? 0
-+                      : render_target_cache_.GetFsiHostSampleCountLog2(
-+                            description.render_pass_key.msaa_samples))
++                  pipeline->second.fsi_host_sample_count_log2)
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3166,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3180,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -91,6 +285,21 @@ index 91ac08f..99c25f3 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
+@@ -3268,9 +3303,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+   VkSampleMask sample_mask = UINT32_MAX;
+   VkPipelineMultisampleStateCreateInfo multisample_state = {};
+   multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+-  if (description.rasterizer_discard) {
++  if (description.rasterizer_discard ||
++      (edram_fragment_shader_interlock && !IsPipelineRasterizingOnMetal(description))) {
+     // Keep rasterizer-discard pipelines independent from guest MSAA state, as
+-    // done by D3D12 when rasterization is disabled.
++    // done by D3D12 when rasterization is disabled. Same for pipelines that
++    // MoltenVK does not rasterize (both faces culled): their Metal sample
++    // count is 1, and they are created against the 1x FSI render pass.
+     multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+   } else if (!edram_fragment_shader_interlock && !subpass_has_attachments) {
+     // Keep parity with D3D12 host-render-target path, where draws without
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
 index 0298f06..76b5d9f 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp

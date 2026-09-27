@@ -97,7 +97,45 @@ every host translation unit compiles in Debug and Release. That is the
 closest check available without a Mac; it does not cover Apple clang/libc++
 or anything at runtime.
 
-## Open graphics issues
+## Graphics: the MSAA sample-count bug on MoltenVK (fixed)
+
+Symptom: the top half of the frame corrupted or blown out, the bottom half
+correct (the boundary matched the 384-row predicated-tiling split). Metal's
+debug layer (`MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog`) reported
+`The raster sample count (1) does not match the renderPipelineState's raster
+sample count (4)` on tens of thousands of draws per minute.
+
+Root cause: with the fragment shader interlock (`fsi`) path, EDRAM lives in
+a storage buffer and draws run in an attachment-less render pass with the
+guest's MSAA sample count on the pipeline. Metal needs the sample count of an
+attachment-less pass explicitly (`defaultRasterSampleCount`); MoltenVK
+learns it from the pipelines created against a `VkRenderPass` object, keeps
+one value per pass (`MVKPipeline.mm` `setDefaultSampleCount`, default 1), and
+has no pass object at all with dynamic rendering. The SDK used one FSI pass
+for every sample count and dynamic rendering by default, so 4x draws were
+rasterized at 1x.
+
+Fix (both parts needed):
+
+1. `thirdparty/sdk_mac_vulkan_fixes.patch`: one attachment-less FSI render
+   pass per host sample count (1x, 2x, 4x); each pipeline is created against
+   the pass of its sample count, and each draw enters the pass of the
+   pipeline it binds. Pipelines that MoltenVK does not rasterize (rasterizer
+   discard, or both faces culled with a triangle topology) always get a Metal
+   sample count of 1, so they use the 1x pass. The command processor logs an
+   `FSI stats` line every 300 frames (draws per frame, render pass restarts
+   per frame, draws whose pipeline sample count differs from the guest MSAA
+   mode).
+2. `src/core/fable_2_app.h`: `REX_VULKAN_DYNAMIC_RENDERING=false` on macOS,
+   so the pass objects exist.
+
+Result on the M4: the scene renders correctly. The first version of the fix
+(pipelines per pass, but draws still entering the pass of the guest MSAA
+mode) left about 30k "(1) vs (4)" and 25k "(4) vs (1)" debug-layer messages
+per run; the second half is the non-rasterizing pipelines above. The stats
+line tells whether any pass/pipeline disagreement remains on the ReXGlue
+side; a remaining count of Metal messages with zero mismatches there points
+into MoltenVK (tessellation pipelines are the candidate).
 
 What the SDK's Vulkan backend already handles on MoltenVK (from the v0.10.0
 source):
@@ -108,34 +146,42 @@ source):
 - `Metal does not support disabling primitive restart` (rexglue-sdk#446):
   MoltenVK warns whenever a strip is drawn with restart disabled. Metal
   always restarts on index `0xFFFF`/`0xFFFFFFFF`, which only matters if a
-  game uses that value as a real vertex index. Likely noise, not the cause.
-
-Likely cause of the see-through ground: **depth format**. Apple GPUs have no
-`D24_UNORM_S8`, so the game's 24-bit depth buffers are stored as
-`D32_SFLOAT_S8` (`GetDepthVulkanFormat` in `render_target_cache.cpp`). The
-values no longer match what the game expects when depth is reused or copied
-between render targets, which shows up as surfaces failing the depth test.
+  game uses that value as a real vertex index. Noise.
+- Apple GPUs have no `D24_UNORM_S8`; 24-bit depth is stored as
+  `D32_SFLOAT_S8` (`GetDepthVulkanFormat`). Not the cause of the corruption
+  (the `fsi` path keeps depth in the EDRAM buffer).
 
 ### Results on an M4 Mac mini
 
 - Default render target path (`fbo`): audio plays, the screen only flashes
-  white. MoltenVK reports no `D24_UNORM_S8`, so the game's 24-bit depth is
-  stored as `D32_SFLOAT_S8`.
-- `render_target_path_vulkan=fsi`: logos and menus render, a new game starts.
-  MoltenVK exposes fragment shader interlock on Apple Silicon. The app now
-  defaults to this on macOS (`REX_RENDER_TARGET_PATH_VULKAN=fsi`, set in
+  white.
+- `render_target_path_vulkan=fsi`: everything renders once the sample-count
+  fix is in. The app defaults to this on macOS
+  (`REX_RENDER_TARGET_PATH_VULKAN=fsi`, set in
   `Fable2App::OnPostInitLogging` unless already set); pass
   `--render_target_path_vulkan=fbo` to compare.
 - MoltenVK's own primitive-restart warning goes to stderr on every strip draw,
-  so the app also defaults `MVK_CONFIG_LOG_LEVEL=1` (errors only) on macOS.
+  so the app also defaults `MVK_CONFIG_LOG_LEVEL=1` (errors only) on macOS,
+  and seeds `vulkan_log_debug_messages=false` (pass
+  `--vulkan_log_debug_messages` for validation runs).
 - The guest arena is mapped at `0x7000000000` on macOS (not `0x100000000`),
   confirming the probes must not hardcode the Windows base.
 - Device limits worth watching: no geometry shaders,
   `maxPerStageDescriptorSamplers: 16`, no sparse binding (512 MB shared
   memory buffer).
 
-For remaining corruption, check `logs/` for pipeline creation failures and run
-with `MVK_CONFIG_LOG_LEVEL=3` for MoltenVK's view.
+### Performance (open)
+
+GPU at 100% with a low frame rate after the fix. Things known to cost:
+
+- `MTL_DEBUG_LAYER=1` itself: measure frame rate without it.
+- `vulkan_readback_resolve = true` and `vulkan_readback_memexport = true` in
+  `fable_2.toml`: every resolve/memexport waits for the GPU. Compare with
+  `--no-vulkan_readback_resolve --no-vulkan_readback_memexport`.
+- The `fsi` path shades every sample (sample-rate shading at 4x MSAA) with
+  interlock and storage-buffer traffic; it is the slow path on every host.
+  Without dynamic rendering every sample-count change and every barrier
+  restarts the Metal render encoder; the `FSI stats` line shows how often.
 
 ## Renderer review: Vulkan on MoltenVK vs. a native Metal backend
 
@@ -222,7 +268,8 @@ Run on the corrupted scene with `--vulkan_validation_enabled
    its own tessellation path), not MoltenVK-specific.
 2. `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`: pipelines with
    `rasterizerDiscardEnable` still carry a fragment stage. Spec violation;
-   Metal has no rasterizer discard, MoltenVK emulates it. Not fixed yet.
+   Metal has no rasterizer discard, MoltenVK emulates it. Fixed by the patch
+   (the fragment stage is dropped from those pipelines).
 3. `VUID-vkCmdEndQuery-None-07007` / `-01923`: an occlusion query ended
    outside a render pass / before it was begun (once each). Not fixed yet.
 4. `SYNC-HAZARD-WRITE-AFTER-WRITE` on `vkCmdCopyBuffer` to the same buffer
