@@ -443,6 +443,37 @@ size_t ApplyAll(rex::memory::Memory* memory, const rex::PPCImageInfo& image) {
 
   REXSYS_INFO("[patches] done: {} op(s) applied, {} skipped", applied,
               skipped);
+
+  // Xenia's Fable II code patches (Disable MSAA, 1280x720, 60 FPS, Disable
+  // Texture Morphing) rewrite instruction immediates, which a recomp never
+  // executes; each has to become a mid-asm hook, which needs the exact
+  // instruction and register at the site. Log the instruction words around
+  // each site once (read-only) so the hooks can be written from a log.
+  struct CodeSite {
+    const char* name;
+    uint32_t first;
+    uint32_t words;
+  };
+  static const CodeSite kCodeSites[] = {
+      {"Disable MSAA (be8 0x8238DF3F) / 1280x720 (be16 0x8238DF5A)", 0x8238DF20, 24},
+      {"60 FPS (be8 0x82B9C8EB)", 0x82B9C8D8, 8},
+      {"Disable Texture Morphing (be16 0x8220EF10)", 0x8220EF00, 8},
+      {"High Tick Rate (be32 0x8233AEB4)", 0x8233AEA4, 8},
+  };
+  for (const CodeSite& site : kCodeSites) {
+    const uint64_t end = uint64_t(site.first) + uint64_t(site.words) * 4;
+    if (site.first < img_lo || end > img_hi || !memory->LookupHeap(site.first)) {
+      continue;
+    }
+    const uint8_t* host = memory->TranslateVirtual<const uint8_t*>(site.first);
+    std::string words;
+    for (uint32_t i = 0; i < site.words; ++i) {
+      const uint8_t* w = host + i * 4;
+      words += std::format("{}{:02X}{:02X}{:02X}{:02X}", i ? " " : "", w[0], w[1], w[2],
+                           w[3]);
+    }
+    REXSYS_INFO("[patches] code at 0x{:08X} ({}): {}", site.first, site.name, words);
+  }
   return applied;
 }
 

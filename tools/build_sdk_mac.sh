@@ -13,6 +13,12 @@
 #   tools/build_sdk_mac.sh -debug     build the Debug SDK (asserts on) + stage
 #                                     into out/build/mac-arm64-debug
 #   tools/build_sdk_mac.sh -restore   put the prebuilt plugin/runtime back
+#   tools/build_sdk_mac.sh -stage     copy the already-built plugin/runtime
+#                                     next to the game again (no build);
+#                                     build.sh runs this after every game
+#                                     build, because the SDK's CMake helpers
+#                                     copy the prebuilt ones over them on
+#                                     every link
 #
 # Needs Xcode (not only the command line tools: the SDK builds MoltenVK from
 # source with xcodebuild), CMake >= 3.25, Ninja, git, ~4 GB of disk.
@@ -32,6 +38,7 @@ for arg in "$@"; do
     case "$arg" in
         -debug) CONFIG="Debug" ;;
         -restore) MODE="restore" ;;
+        -stage) MODE="stage" ;;
         *) echo "unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -54,6 +61,24 @@ if [ "$MODE" = "restore" ]; then
             echo "restored prebuilt $name"
         fi
     done
+    exit 0
+fi
+
+stage_built() {  # stage the plugin/runtime from an existing source build
+    local found=0 name f
+    for name in librexgpu-xenos.dylib librexruntime.dylib librexgpu-xenosd.dylib librexruntimed.dylib; do
+        f="$(find "$SRC/out" -path "*/$CONFIG/*" -name "$name" -type f 2>/dev/null | head -1)"
+        if [ -n "$f" ]; then stage "$f"; found=1; fi
+    done
+    [ "$found" = 1 ]
+}
+
+if [ "$MODE" = "stage" ]; then
+    [ -d "$GAME_DIR" ] || { echo "Error: $GAME_DIR does not exist." >&2; exit 1; }
+    if ! stage_built; then
+        echo "Error: no source-built $CONFIG plugin under $SRC/out; run tools/build_sdk_mac.sh first." >&2
+        exit 1
+    fi
     exit 0
 fi
 
@@ -102,12 +127,7 @@ fi
 grep -E "^\[[0-9]+/[0-9]+\]" "$LOG" | tail -3
 
 # 4. Stage. The plugin and runtime must come from the same build.
-found=0
-for name in librexgpu-xenos.dylib librexruntime.dylib librexgpu-xenosd.dylib librexruntimed.dylib; do
-    f="$(find "$SRC/out" -path "*/$CONFIG/*" -name "$name" -type f 2>/dev/null | head -1)"
-    if [ -n "$f" ]; then stage "$f"; found=1; fi
-done
-if [ "$found" = 0 ]; then
+if ! stage_built; then
     echo "Error: no librexgpu-xenos*.dylib found under $SRC/out; see the build output above." >&2
     exit 1
 fi

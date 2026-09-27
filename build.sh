@@ -107,3 +107,15 @@ cmake --preset "$CONFIG" \
     -DREXGLUE_SDK_ROOT="$REXSDK" \
     ${EXTRA[@]+"${EXTRA[@]}"}
 cmake --build "out/build/$CONFIG" --target "$TARGET"
+
+# The SDK's CMake helpers copy the prebuilt GPU plugin and runtime next to
+# the executable on every link, replacing ones built from source by
+# tools/build_sdk_mac.sh (which leaves *.prebuilt backups behind as the sign
+# that it staged). Put the source-built ones back after each build.
+if [ "$(uname -s)" = Darwin ] && ls "out/build/$CONFIG"/*.dylib.prebuilt >/dev/null 2>&1; then
+    stage_args=()
+    [ "$CONFIG" = "$PLAT-debug" ] && stage_args+=(-debug)
+    echo "Re-staging the source-built ReXGlue plugin/runtime (tools/build_sdk_mac.sh -stage) ..."
+    tools/build_sdk_mac.sh -stage ${stage_args[@]+"${stage_args[@]}"} ||
+        echo "Warning: could not re-stage the source-built SDK; the game now uses the prebuilt plugin." >&2
+fi
