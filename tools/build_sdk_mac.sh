@@ -73,14 +73,13 @@ if [ ! -d "$SRC/.git" ]; then
         https://github.com/rexglue/rexglue-sdk.git "$SRC"
 fi
 
-# 2. Fixes. `git apply --check` first so a re-run on an already patched tree
-#    is a no-op instead of a failure.
+# 2. Fixes. The tree is reset to the tag first so an updated patch applies
+#    on a re-run (the build only recompiles what the patch touches).
 cd "$SRC"
+git checkout -q -- .
 if git apply --check "$PATCH" 2>/dev/null; then
     git apply "$PATCH"
     echo "Applied $(basename "$PATCH")"
-elif git apply --check --reverse "$PATCH" 2>/dev/null; then
-    echo "$(basename "$PATCH") already applied"
 else
     echo "Error: $PATCH does not apply to $SRC (SDK tag $TAG expected)." >&2
     exit 1
