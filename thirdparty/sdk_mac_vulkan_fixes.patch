@@ -327,7 +327,7 @@ index 001f36b..2f0c3ad 100644
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..be59557 100644
+index 91ac08f..7f0b3ee 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -91,7 +91,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
@@ -350,7 +350,32 @@ index 91ac08f..be59557 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -1215,13 +1226,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -420,6 +431,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+       shader_storage_shareable_root /
+       fmt::format("{:08X}.{}.vk.xpso", title_id, edram_fragment_shader_interlock ? "fsi" : "fbo");
+   pipeline_storage_file_ = rex::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
++  // In "a+" mode the initial read position is at the start of the file with
++  // glibc and MSVC, but at the end with the BSD libc (macOS), so the header
++  // read below would fail there and the stream would be truncated on every
++  // launch. Seek explicitly.
++  if (pipeline_storage_file_) {
++    rex::filesystem::Seek(pipeline_storage_file_, 0, SEEK_SET);
++  }
+   if (!pipeline_storage_file_) {
+     REXGPU_ERROR(
+         "Failed to open the Vulkan pipeline description storage file for "
+@@ -503,6 +521,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+   auto shader_storage_file_path =
+       shader_storage_shareable_root / fmt::format("{:08X}.xsh", title_id);
+   shader_storage_file_ = rex::filesystem::OpenFile(shader_storage_file_path, "a+b");
++  if (shader_storage_file_) {
++    // See the pipeline storage above ("a+" read position on BSD libc).
++    rex::filesystem::Seek(shader_storage_file_, 0, SEEK_SET);
++  }
+   if (!shader_storage_file_) {
+     REXGPU_ERROR(
+         "Failed to open the guest shader storage file for writing, persistent "
+@@ -1215,13 +1237,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
  
  void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
      void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
@@ -368,7 +393,7 @@ index 91ac08f..be59557 100644
      return;
    }
    const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
-@@ -1230,6 +1244,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -1230,6 +1255,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
    if (is_placeholder_out) {
      *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
    }
@@ -378,7 +403,7 @@ index 91ac08f..be59557 100644
  }
  
  bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
-@@ -2964,11 +2981,23 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -2964,11 +2992,23 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    bool use_dynamic_rendering =
        REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
@@ -403,7 +428,7 @@ index 91ac08f..be59557 100644
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3180,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3191,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -416,7 +441,7 @@ index 91ac08f..be59557 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
-@@ -3268,9 +3303,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3268,9 +3314,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    VkSampleMask sample_mask = UINT32_MAX;
    VkPipelineMultisampleStateCreateInfo multisample_state = {};
    multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;

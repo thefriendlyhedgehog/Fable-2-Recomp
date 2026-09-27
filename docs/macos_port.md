@@ -170,6 +170,33 @@ source):
   `maxPerStageDescriptorSamplers: 16`, no sparse binding (512 MB shared
   memory buffer).
 
+### Pipeline store never loaded on macOS (fixed)
+
+Every launch recompiled the same pipelines (a 150 to 500 ms stall each on
+MoltenVK, where a pipeline is a full Metal shader compile), although the
+on-disk store `cache/shaders/shareable/<title>.fsi.vk.xpso` existed. The SDK
+opens the store and the guest shader file in `"a+b"` mode and reads the
+header from the current position. glibc and MSVC start an append-plus stream
+at the beginning; the BSD libc on macOS starts it at the end, so the header
+read failed, the file was treated as new and truncated, and only the current
+run's pipelines were ever saved. The patch seeks to the start after opening
+both files. The stall pattern showed in the `FSI stats` line as a longest
+frame of 150 to 500 ms per window with only a handful of frames over 40 ms.
+
+### Thread scheduling on Apple Silicon (patched)
+
+No runtime thread had a QoS class, so macOS could schedule the guest
+threads, the GPU worker, the vblank timer and audio on the efficiency cores
+under load, and the emulated vblank was a 1 ms polling loop whose wakeups
+are late by several milliseconds there. The patch gives every runtime
+thread `QOS_CLASS_USER_INTERACTIVE`, puts the vblank thread under a Mach
+time-constraint policy and sleeps it until just before the next vblank is
+due. The presenter also picks Vulkan immediate mode when offered
+(`presentation mode 0` in the log); pass
+`--no-vulkan_allow_present_mode_immediate --no-vulkan_allow_present_mode_mailbox
+--no-vulkan_allow_present_mode_fifo_relaxed` for plain vsync (mode 2), which
+was measurably smoother in play.
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:
