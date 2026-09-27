@@ -1,5 +1,48 @@
+diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
+index 34f7033..57a6ffa 100644
+--- a/include/rex/graphics/vulkan/render_target_cache.h
++++ b/include/rex/graphics/vulkan/render_target_cache.h
+@@ -152,9 +152,25 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+   // A render pass managed by the render target cache may be ended and resumed
+   // at any time (to allow for things like copying and texture loading).
+   VkRenderPass GetHostRenderTargetsRenderPass(RenderPassKey key);
+-  VkRenderPass GetFragmentShaderInterlockRenderPass() const {
++  // Host sample count (log2) that fragment shader interlock pipelines and
++  // draws use for the given guest MSAA mode (2x is promoted to 4x on devices
++  // without 2x).
++  uint32_t GetFsiHostSampleCountLog2(xenos::MsaaSamples msaa_samples) const {
++    if (msaa_samples == xenos::MsaaSamples::k2X && !IsMsaa2xSupported(false)) {
++      return 2;
++    }
++    return uint32_t(msaa_samples);
++  }
++  // One attachment-less render pass per host sample count. MoltenVK learns
++  // the sample count of an attachment-less pass from the pipelines created
++  // against it (Metal needs it explicitly, as defaultRasterSampleCount), and
++  // keeps one value per pass, so pipelines of different sample counts must
++  // not share a pass, and dynamic rendering (no pass object) cannot carry it
++  // at all.
++  VkRenderPass GetFragmentShaderInterlockRenderPass(uint32_t host_sample_count_log2) const {
+     assert_true(GetPath() == Path::kPixelShaderInterlock);
+-    return fsi_render_pass_;
++    assert_true(host_sample_count_log2 < kFsiRenderPassCount);
++    return fsi_render_passes_[host_sample_count_log2];
+   }
+ 
+   VkFormat GetDepthVulkanFormat(xenos::DepthRenderTargetFormat format) const;
+@@ -873,7 +889,9 @@ class VulkanRenderTargetCache final : public RenderTargetCache {
+ 
+   // For pixel (fragment) shader interlock.
+ 
+-  VkRenderPass fsi_render_pass_ = VK_NULL_HANDLE;
++  // Indexed by host sample count log2 (1x, 2x, 4x).
++  static constexpr uint32_t kFsiRenderPassCount = 3;
++  VkRenderPass fsi_render_passes_[kFsiRenderPassCount] = {};
+   Framebuffer fsi_framebuffer_;
+ 
+   VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..f0462c9 100644
+index 91ac08f..99c25f3 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -91,7 +91,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
@@ -22,7 +65,20 @@ index 91ac08f..f0462c9 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -3151,6 +3162,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -2968,7 +2979,11 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+   if (!use_dynamic_rendering) {
+     render_pass =
+         render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock
+-            ? render_target_cache_.GetFragmentShaderInterlockRenderPass()
++            ? render_target_cache_.GetFragmentShaderInterlockRenderPass(
++                  description.rasterizer_discard
++                      ? 0
++                      : render_target_cache_.GetFsiHostSampleCountLog2(
++                            description.render_pass_key.msaa_samples))
+             : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
+     if (render_pass == VK_NULL_HANDLE) {
+       return fail("render_pass_unavailable");
+@@ -3151,6 +3166,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -35,3 +91,63 @@ index 91ac08f..f0462c9 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
+diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
+index 0298f06..76b5d9f 100644
+--- a/src/graphics/vulkan/render_target_cache.cpp
++++ b/src/graphics/vulkan/render_target_cache.cpp
+@@ -916,13 +916,17 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+     fsi_render_pass_create_info.pSubpasses = &fsi_subpass;
+     fsi_render_pass_create_info.dependencyCount = uint32_t(rex::countof(fsi_subpass_dependencies));
+     fsi_render_pass_create_info.pDependencies = fsi_subpass_dependencies;
+-    if (dfn.vkCreateRenderPass(device, &fsi_render_pass_create_info, nullptr, &fsi_render_pass_) !=
+-        VK_SUCCESS) {
+-      REXGPU_ERROR(
+-          "VulkanRenderTargetCache: Failed to create the fragment shader "
+-          "interlock render backend render pass");
+-      Shutdown();
+-      return false;
++    // Identical passes, one per host sample count (see
++    // GetFragmentShaderInterlockRenderPass).
++    for (uint32_t i = 0; i < kFsiRenderPassCount; ++i) {
++      if (dfn.vkCreateRenderPass(device, &fsi_render_pass_create_info, nullptr,
++                                 &fsi_render_passes_[i]) != VK_SUCCESS) {
++        REXGPU_ERROR(
++            "VulkanRenderTargetCache: Failed to create the fragment shader "
++            "interlock render backend render pass");
++        Shutdown();
++        return false;
++      }
+     }
+ 
+     // Common framebuffer.
+@@ -930,7 +934,8 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
+     fsi_framebuffer_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+     fsi_framebuffer_create_info.pNext = nullptr;
+     fsi_framebuffer_create_info.flags = 0;
+-    fsi_framebuffer_create_info.renderPass = fsi_render_pass_;
++    // Attachment-less passes are all compatible; any of them works here.
++    fsi_framebuffer_create_info.renderPass = fsi_render_passes_[0];
+     fsi_framebuffer_create_info.attachmentCount = 0;
+     fsi_framebuffer_create_info.pAttachments = nullptr;
+     fsi_framebuffer_create_info.width =
+@@ -989,7 +994,9 @@ void VulkanRenderTargetCache::Shutdown(bool from_destructor) {
+ 
+   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyFramebuffer, device,
+                                          fsi_framebuffer_.framebuffer);
+-  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device, fsi_render_pass_);
++  for (VkRenderPass& fsi_render_pass : fsi_render_passes_) {
++    ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyRenderPass, device, fsi_render_pass);
++  }
+ 
+   for (const auto& dump_pipeline_pair : dump_pipelines_) {
+     // May be null to prevent recreation attempts.
+@@ -1500,7 +1507,8 @@ bool VulkanRenderTargetCache::Update(bool is_rasterization_done,
+       // stencil, at least coarsely, to prevent useless barriers.
+       MarkEdramBufferModified(EdramBufferModificationStatus::kViaFragmentShaderInterlock);
+       last_update_render_pass_key_ = render_pass_key;
+-      last_update_render_pass_ = fsi_render_pass_;
++      last_update_render_pass_ = fsi_render_passes_[GetFsiHostSampleCountLog2(
++          render_pass_key.msaa_samples)];
+       last_update_framebuffer_ = &fsi_framebuffer_;
+     } break;
+ 

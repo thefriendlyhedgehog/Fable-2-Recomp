@@ -255,6 +255,15 @@ class Fable2App : public rex::ReXApp {
     //   of lines per second on stderr and in logs/.
     ::setenv("REX_RENDER_TARGET_PATH_VULKAN", "fsi", 0);
     ::setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+    // - No dynamic rendering: the FSI path draws into attachment-less render
+    //   passes at the guest MSAA sample count. Metal needs that count set
+    //   explicitly, and MoltenVK only learns it from pipelines created against
+    //   a VkRenderPass object (MVKPipeline.mm, setDefaultSampleCount); with
+    //   dynamic rendering there is none, so every 4x draw rasterizes at 1x
+    //   ("raster sample count (1) does not match ... (4)" from the Metal
+    //   debug layer, 67k times in a minute) and MSAA render targets come out
+    //   as garbage. The SDK patch adds one FSI render pass per sample count.
+    ::setenv("REX_VULKAN_DYNAMIC_RENDERING", "false", 0);
 #endif
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();
