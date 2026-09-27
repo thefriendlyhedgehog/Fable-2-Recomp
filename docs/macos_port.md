@@ -204,6 +204,46 @@ prebuilt SDK:
 7. **The same plugin on a native Vulkan driver** (any Linux or Windows box
    with a GPU), the decisive Mac-vs-generic test.
 
+## Validation findings (LunarG 1.4.357.1 layer, sync validation on, M4)
+
+Run on the corrupted scene with `--vulkan_validation_enabled
+--vulkan_log_debug_messages`, `VK_LAYER_PATH` at the SDK's
+`explicit_layer.d` and `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true`:
+
+1. **`VUID-VkGraphicsPipelineCreateInfo-layout-07990`, `xe_system_cbuffer`
+   descriptor type mismatch** in the vertex and tessellation control stages of
+   every tessellation pipeline. Root cause in `src/graphics/vulkan/pipeline_cache.cpp`:
+   the GLSL helpers for tessellation declare the system constants at
+   `set = 0, binding = 0`, but set 0 holds the shared-memory and EDRAM storage
+   buffers; the constants are set 1 (`kDescriptorSetConstants`). Tessellated
+   draws therefore read vertex index parameters and tessellation factor
+   limits out of guest RAM. Fixed by `thirdparty/sdk_mac_vulkan_fixes.patch`,
+   applied by `tools/build_sdk_mac.sh`. Generic Vulkan-backend bug (D3D12 has
+   its own tessellation path), not MoltenVK-specific.
+2. `VUID-VkGraphicsPipelineCreateInfo-pStages-06894`: pipelines with
+   `rasterizerDiscardEnable` still carry a fragment stage. Spec violation;
+   Metal has no rasterizer discard, MoltenVK emulates it. Not fixed yet.
+3. `VUID-vkCmdEndQuery-None-07007` / `-01923`: an occlusion query ended
+   outside a render pass / before it was begun (once each). Not fixed yet.
+4. `SYNC-HAZARD-WRITE-AFTER-WRITE` on `vkCmdCopyBuffer` to the same buffer
+   (10+). Two transfer writes without a barrier; ordered within a Metal blit
+   encoder in practice. Not fixed yet.
+5. `VUID-vkDestroySwapchainKHR-swapchain-01282` once, on a window resize.
+
+KosmicKrisp (LunarG's Mesa driver, also in the SDK) was tried via
+`VK_DRIVER_FILES`: it does not expose fragment shader interlock, so the SDK
+silently falls back to the host-render-target path, which froze (as it
+flashed white on MoltenVK). Not usable for this game until it gains interlock.
+
+## Building the SDK from source on macOS
+
+`tools/build_sdk_mac.sh` clones the exact `v0.10.0` tag (shallow, with
+submodules; the SDK builds its whole Vulkan stack including MoltenVK, so a
+full Xcode is required), applies `thirdparty/sdk_mac_vulkan_fixes.patch`,
+builds `rexgpu-xenos` and `rexruntime`, and stages both dylibs next to the
+game with `.prebuilt` backups (`-restore` puts them back, `-debug` builds
+the Debug SDK with its asserts for the Debug game).
+
 ## Known gaps
 
 - **Hero/dog black textures:** upstream's fix seeds the GPU cvar

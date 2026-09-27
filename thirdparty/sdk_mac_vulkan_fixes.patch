@@ -1,0 +1,24 @@
+diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
+index 91ac08f..1e4932c 100644
+--- a/src/graphics/vulkan/pipeline_cache.cpp
++++ b/src/graphics/vulkan/pipeline_cache.cpp
+@@ -91,7 +91,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
+ 
+ std::string GetTessellationSystemConstantsBlockGlsl() {
+   std::string source;
+-  source += "layout(set = 0, binding = 0, std140) uniform XeSystemConstants {\n";
++  // The system constants live in the constants descriptor set
++  // (SpirvShaderTranslator::kDescriptorSetConstants, set 1, binding
++  // kConstantBufferSystem = 0). Set 0 is the shared memory + EDRAM storage
++  // buffers, so declaring the block there made every tessellation pipeline
++  // read its vertex index parameters and tessellation factor range out of
++  // guest RAM (VUID-VkGraphicsPipelineCreateInfo-layout-07990, "VkDescriptorType
++  // mismatch" for xe_system_cbuffer in the vertex and tessellation control
++  // stages).
++  source += fmt::format(
++      "layout(set = {}, binding = {}, std140) uniform XeSystemConstants {{\n",
++      uint32_t(SpirvShaderTranslator::kDescriptorSetConstants),
++      uint32_t(SpirvShaderTranslator::kConstantBufferSystem));
+   source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
+                         offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
+   source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
