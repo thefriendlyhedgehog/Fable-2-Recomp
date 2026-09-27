@@ -146,6 +146,93 @@ index 34f7033..57a6ffa 100644
    Framebuffer fsi_framebuffer_;
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
+diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
+index 9ac8d15..9c943b4 100644
+--- a/src/core/threading_posix.cpp
++++ b/src/core/threading_posix.cpp
+@@ -1403,6 +1403,13 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+   if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr) != 0) {
+     assert_always();
+   }
++#endif
++#if defined(__APPLE__)
++  // Every runtime thread (guest threads, GPU worker, vblank timer, audio) is
++  // latency-sensitive. At the default QoS class macOS may schedule them on the
++  // efficiency cores and defer their timers, which shows up as uneven frame
++  // pacing and audio drop-outs on Apple Silicon.
++  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+ #endif
+   set_current_thread_name("");
+ 
+diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
+index 8f2fcb0..241649b 100644
+--- a/src/graphics/graphics_system.cpp
++++ b/src/graphics/graphics_system.cpp
+@@ -31,6 +31,13 @@
+ #include <rex/ui/window.h>
+ #include <rex/ui/windowed_app_context.h>
+ 
++#if defined(__APPLE__)
++#include <mach/mach.h>
++#include <mach/mach_time.h>
++#include <mach/thread_policy.h>
++#include <pthread.h>
++#endif
++
+ REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
+     .allowed({"none", "fxaa", "fxaa_extreme"})
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+@@ -158,6 +165,26 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
+         uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
+         uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
++#if defined(__APPLE__)
++        // Real-time scheduling for the vblank timer: a plain 1 ms sleep loop
++        // wakes late by several milliseconds on Apple Silicon, so vblanks
++        // arrive in bursts and the guest's frame cadence inherits the jitter.
++        {
++          mach_timebase_info_data_t timebase;
++          mach_timebase_info(&timebase);
++          auto ms_to_abs = [&](double ms) {
++            return uint32_t(ms * 1e6 * double(timebase.denom) / double(timebase.numer));
++          };
++          thread_time_constraint_policy_data_t policy;
++          policy.period = ms_to_abs(1000.0 / refresh_rate_hz);
++          policy.computation = ms_to_abs(0.3);
++          policy.constraint = ms_to_abs(1.0);
++          policy.preemptible = TRUE;
++          thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,
++                            reinterpret_cast<thread_policy_t>(&policy),
++                            THREAD_TIME_CONSTRAINT_POLICY_COUNT);
++        }
++#endif
+         while (vsync_worker_running_) {
+           uint64_t current_time = chrono::Clock::QueryGuestTickCount();
+           uint64_t interval_ticks =
+@@ -166,7 +193,22 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+             MarkVblank();
+             last_frame_time += interval_ticks;
+           }
+-          rex::thread::Sleep(std::chrono::milliseconds(1));
++          // Sleep until just before the next vblank is due (guest ticks are
++          // assumed to advance at wall-clock rate; if they do not, the loop
++          // simply re-evaluates early), then let the final stretch be covered
++          // by a short sleep so the vblank fires within a fraction of a
++          // millisecond of its time instead of up to a whole polling period
++          // late.
++          uint64_t elapsed_ticks = current_time - last_frame_time;
++          uint64_t remaining_ticks = interval_ticks - std::min(interval_ticks, elapsed_ticks);
++          auto remaining = std::chrono::nanoseconds(
++              int64_t(double(remaining_ticks) * 1e9 / double(guest_tick_frequency)));
++          constexpr auto kWakeupMargin = std::chrono::microseconds(300);
++          if (remaining > kWakeupMargin + std::chrono::microseconds(100)) {
++            rex::thread::Sleep(remaining - kWakeupMargin);
++          } else {
++            rex::thread::Sleep(std::chrono::microseconds(100));
++          }
+         }
+         return 0;
+       }));
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
 index 001f36b..2f0c3ad 100644
 --- a/src/graphics/vulkan/command_processor.cpp
