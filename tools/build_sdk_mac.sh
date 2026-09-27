@@ -19,6 +19,14 @@
 #                                     changes are rewritten, so the next game
 #                                     build recompiles just those); from then
 #                                     on build.sh keeps using that recompiler
+#   tools/build_sdk_mac.sh -mvk-private
+#                                     also build MoltenVK with Metal's private
+#                                     API (MVK_USE_METAL_PRIVATE_API) and stage
+#                                     it in vulkan/lib: lets MoltenVK really
+#                                     disable primitive restart (Metal otherwise
+#                                     restarts strips at index 0xFFFF even when
+#                                     the game asked it not to). Experimental;
+#                                     -restore puts the prebuilt one back
 #   tools/build_sdk_mac.sh -stage     copy the already-built plugin/runtime
 #                                     next to the game again (no build);
 #                                     build.sh runs this after every game
@@ -41,12 +49,14 @@ case "$(uname -m)" in arm64) PLAT="mac-arm64" ;; x86_64) PLAT="mac-amd64" ;; esa
 
 MODE="build"
 CODEGEN=0
+MVK_PRIVATE=0
 for arg in "$@"; do
     case "$arg" in
         -debug) CONFIG="Debug" ;;
         -restore) MODE="restore" ;;
         -stage) MODE="stage" ;;
         -codegen) CODEGEN=1 ;;
+        -mvk-private) MVK_PRIVATE=1 ;;
         *) echo "unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -61,6 +71,7 @@ stage() {  # stage <file> : copy into the game dir, keeping a one-time backup
     cp -p "$f" "$GAME_DIR/$name"
     echo "staged $name -> $GAME_DIR"
 }
+MVK_DIR_REL="vulkan/lib"  # where the SDK's CMake helpers stage libMoltenVK.dylib
 
 if [ "$MODE" = "restore" ]; then
     for name in librexgpu-xenos.dylib librexgpu-xenosd.dylib librexruntime.dylib librexruntimed.dylib; do
@@ -69,8 +80,30 @@ if [ "$MODE" = "restore" ]; then
             echo "restored prebuilt $name"
         fi
     done
+    if [ -f "$GAME_DIR/$MVK_DIR_REL/libMoltenVK.dylib.prebuilt" ]; then
+        mv -f "$GAME_DIR/$MVK_DIR_REL/libMoltenVK.dylib.prebuilt" "$GAME_DIR/$MVK_DIR_REL/libMoltenVK.dylib"
+        echo "restored prebuilt $MVK_DIR_REL/libMoltenVK.dylib"
+    fi
     exit 0
 fi
+
+stage_mvk() {  # stage the source-built MoltenVK (private API build) if wanted
+    local dst="$GAME_DIR/$MVK_DIR_REL/libMoltenVK.dylib" f
+    # Only when asked this run, or when a previous -mvk-private staged it
+    # (its backup is the marker).
+    [ "$MVK_PRIVATE" = 1 ] || [ -f "$dst.prebuilt" ] || return 0
+    f="$(find "$SRC/out" -path "*/$CONFIG/*" -name libMoltenVK.dylib -type f 2>/dev/null | head -1)"
+    if [ -z "$f" ]; then
+        echo "Warning: no source-built libMoltenVK.dylib under $SRC/out; keeping the prebuilt one." >&2
+        return 0
+    fi
+    mkdir -p "$(dirname "$dst")"
+    if [ -f "$dst" ] && [ ! -f "$dst.prebuilt" ]; then
+        cp -p "$dst" "$dst.prebuilt"
+    fi
+    cp -p "$f" "$dst"
+    echo "staged libMoltenVK.dylib (private API build) -> $GAME_DIR/$MVK_DIR_REL"
+}
 
 stage_built() {  # stage the plugin/runtime from an existing source build
     local found=0 name f
@@ -78,6 +111,7 @@ stage_built() {  # stage the plugin/runtime from an existing source build
         f="$(find "$SRC/out" -path "*/$CONFIG/*" -name "$name" -type f 2>/dev/null | head -1)"
         if [ -n "$f" ]; then stage "$f"; found=1; fi
     done
+    stage_mvk
     [ "$found" = 1 ]
 }
 
@@ -123,10 +157,18 @@ fi
 #    The full output goes to a log; on failure only the error lines are
 #    shown (the SDK emits hundreds of warnings per file).
 LOG="$SRC/build_sdk_mac.log"
-cmake --preset "$PLAT" -DREXGLUE_BUILD_TESTS=OFF > "$LOG" 2>&1 || {
+# Sticky: once staged (its .prebuilt backup exists), keep building MoltenVK
+# with the private API until -restore.
+MVK_OPT=OFF
+if [ "$MVK_PRIVATE" = 1 ] || [ -f "$GAME_DIR/$MVK_DIR_REL/libMoltenVK.dylib.prebuilt" ]; then
+    MVK_PRIVATE=1
+    MVK_OPT=ON
+fi
+cmake --preset "$PLAT" -DREXGLUE_BUILD_TESTS=OFF -DMVK_USE_METAL_PRIVATE_API=$MVK_OPT > "$LOG" 2>&1 || {
     tail -40 "$LOG"; echo "Error: cmake configure failed; full output in $LOG" >&2; exit 1; }
 TARGETS=(rexgpu-xenos rexruntime)
 [ "$CODEGEN" = 1 ] && TARGETS+=(rexglue)
+[ "$MVK_PRIVATE" = 1 ] && TARGETS+=(MoltenVK)
 echo "Building ${TARGETS[*]} ($CONFIG); log: $LOG"
 if ! cmake --build --preset "$PLAT-$cfg_lower" --target "${TARGETS[@]}" >> "$LOG" 2>&1; then
     echo "Build FAILED. Errors:" >&2
