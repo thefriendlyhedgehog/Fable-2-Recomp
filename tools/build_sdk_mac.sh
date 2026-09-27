@@ -87,8 +87,19 @@ fi
 
 # 3. Configure + build only what the game loads. The presets use Ninja
 #    Multi-Config; outputs land in out/<platform>/<Config>/.
-cmake --preset "$PLAT" -DREXGLUE_BUILD_TESTS=OFF
-cmake --build --preset "$PLAT-$cfg_lower" --target rexgpu-xenos rexruntime
+#    The full output goes to a log; on failure only the error lines are
+#    shown (the SDK emits hundreds of warnings per file).
+LOG="$SRC/build_sdk_mac.log"
+cmake --preset "$PLAT" -DREXGLUE_BUILD_TESTS=OFF > "$LOG" 2>&1 || {
+    tail -40 "$LOG"; echo "Error: cmake configure failed; full output in $LOG" >&2; exit 1; }
+echo "Building rexgpu-xenos + rexruntime ($CONFIG); log: $LOG"
+if ! cmake --build --preset "$PLAT-$cfg_lower" --target rexgpu-xenos rexruntime >> "$LOG" 2>&1; then
+    echo "Build FAILED. Errors:" >&2
+    grep -n -A3 -E "error:|ld: error|Undefined symbols" "$LOG" | grep -v -E "warning:|note:" | head -60 >&2
+    echo "(full output: $LOG)" >&2
+    exit 1
+fi
+grep -E "^\[[0-9]+/[0-9]+\]" "$LOG" | tail -3
 
 # 4. Stage. The plugin and runtime must come from the same build.
 found=0
