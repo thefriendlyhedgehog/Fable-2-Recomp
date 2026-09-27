@@ -1,5 +1,5 @@
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..1e4932c 100644
+index 91ac08f..f0462c9 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -91,7 +91,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
@@ -22,3 +22,16 @@ index 91ac08f..1e4932c 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
+@@ -3151,6 +3162,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+       }
+     }
+   }
++  // With rasterization discarded nothing reaches the fragment stage, and a
++  // pipeline that disables rasterization must not carry one
++  // (VUID-VkGraphicsPipelineCreateInfo-pStages-06894).
++  if (description.rasterizer_discard) {
++    shader_stage_fragment.module = VK_NULL_HANDLE;
++  }
+   if (shader_stage_fragment.module == VK_NULL_HANDLE) {
+     --shader_stage_count;
+   }
