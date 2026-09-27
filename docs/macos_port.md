@@ -191,20 +191,66 @@ under load, and the emulated vblank was a 1 ms polling loop whose wakeups
 are late by several milliseconds there. The patch gives every runtime
 thread `QOS_CLASS_USER_INTERACTIVE`, puts the vblank thread under a Mach
 time-constraint policy and sleeps it until just before the next vblank is
-due. The presenter also picks Vulkan immediate mode when offered
-(`presentation mode 0` in the log); pass
-`--no-vulkan_allow_present_mode_immediate --no-vulkan_allow_present_mode_mailbox
---no-vulkan_allow_present_mode_fifo_relaxed` for plain vsync (mode 2), which
-was measurably smoother in play.
+due.
+
+The presenter picks Vulkan immediate mode when the driver offers it, and
+MoltenVK does (`presentation mode 0` in the log): frames are shown as soon
+as they are ready, unrelated to the display refresh. The app now seeds
+`vulkan_allow_present_mode_immediate`, `_mailbox` and `_fifo_relaxed` to
+false on macOS, so the presenter uses plain vsync (`presentation mode 2`),
+which measured smoother. Any of them in `fable_2.toml` or on the command line
+wins.
+
+### Readback defaults on macOS (changed)
+
+Two SDK features copy GPU results back to guest memory, and both drained
+the whole GPU queue on MoltenVK:
+
+- **Memexport readback** (`readback_memexport`, on by default in the SDK).
+  Every draw whose shader writes memory through memexport copies the result
+  back. The double-buffered fast path falls back to a full queue drain for
+  any new address or a second draw to the same address in one frame; in busy
+  scenes that was hundreds of draws and 200 to 500 ms frames ("GPU waits" in
+  the long-frame log). The fast path also writes the previous frame's
+  results into guest memory. Xenia runs Fable II without it. The app now
+  seeds `readback_memexport = false` on macOS.
+- **Resolve readback** (`vulkan_readback_resolve = true` means the "fast"
+  mode: every resolve, one frame late). The hero/dog texture only needs one
+  resolve read back; the SDK patch adds `readback_resolve_force_addresses`,
+  which the app already seeds with the hero/dog texture address
+  `0x12704000`, and reads those resolves back synchronously.
+
+The Vulkan aliases `vulkan_readback_resolve` and `vulkan_readback_memexport`
+override the shared cvars whenever they differ from their default (false),
+so `true` in an old `fable_2.toml` brings the full cost back; the app logs a
+warning when it sees them. Stale one-frame-late data from the fast paths is
+also the prime suspect for flickering shadows (a shadow map resolved one
+frame late) and broken polygons on skinned characters.
+
+### Long-frame log
+
+The SDK patch logs every frame over 100 ms as
+`Long frame N ms: draws (pipelines, textures, shared memory), resolves, GPU
+waits, swap, idle waiting for guest commands, WAIT_REG_MEM, other`. "GPU
+waits" means the CPU waited for the GPU (readbacks). "Idle waiting for
+guest commands" means the game had not submitted the next work, so the time
+went to the guest CPU side. Plus an `FSI stats` line every 300 frames with
+the fps, the longest frame and the count over 40 ms.
 
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:
 
 - `MTL_DEBUG_LAYER=1` itself: measure frame rate without it.
-- `vulkan_readback_resolve = true` and `vulkan_readback_memexport = true` in
-  `fable_2.toml`: every resolve/memexport waits for the GPU. Compare with
-  `--no-vulkan_readback_resolve --no-vulkan_readback_memexport`.
+- The readbacks above (now off by default on macOS). Note that
+  `--no-vulkan_readback_memexport` alone never turned memexport readback
+  off: it only returns the alias to its default, which hands control to
+  `readback_memexport` (default on).
+- The game's own 4x MSAA. Xenia's Fable II patch file has "Disable MSAA"
+  (be8 `0x8238DF3F` = 1), but that address is code, which a recomp never
+  executes; it has to become a mid-asm hook. The app logs the instruction
+  words around each Xenia code-patch site at startup (`[patches] code at`)
+  so the hook can be written.
 - The `fsi` path shades every sample (sample-rate shading at 4x MSAA) with
   interlock and storage-buffer traffic; it is the slow path on every host.
   Without dynamic rendering every sample-count change and every barrier
@@ -318,15 +364,41 @@ builds `rexgpu-xenos` and `rexruntime`, and stages both dylibs next to the
 game with `.prebuilt` backups (`-restore` puts them back, `-debug` builds
 the Debug SDK with its asserts for the Debug game).
 
+The SDK's CMake helpers copy the prebuilt plugin and runtime next to the
+executable on every link, which used to undo the staging whenever the game
+was rebuilt. `build.sh` now runs `tools/build_sdk_mac.sh -stage` after each
+build when the `.prebuilt` backups show the source SDK was staged.
+
+Options:
+
+- `-codegen` also builds the recompiler (`rexglue`) with the patch's codegen
+  fixes (currently the upstream `vpkuhus`/`vpkuwus` aliasing fix, rexglue-sdk
+  6319e23) and regenerates `generated/`; only files whose output changes are
+  rewritten. `build.sh` then passes `FABLE2_CODEGEN_EXECUTABLE` so later
+  codegen runs keep the fix. Worth it only if the game uses those
+  instructions with the destination as a source; see the check below.
+- `-mvk-private` builds MoltenVK with `MVK_USE_METAL_PRIVATE_API` and stages
+  it in `vulkan/lib`. MoltenVK can then honour "primitive restart disabled"
+  (Metal otherwise restarts strips at index 0xFFFF). Experimental.
+
+Check for the codegen bug (prints any `vpkuhus`/`vpkuwus` whose destination
+register is also a source):
+
+```sh
+grep -rhoE "// vpku[hw]us(128)? v[0-9]+, ?v[0-9]+, ?v[0-9]+" generated | awk -F'[ ,]+' '{d=$3; if ($4==d || $5==d) print}' | sort | uniq -c
+```
+
 ## Known gaps
 
 - **Hero/dog black textures:** upstream's fix seeds the GPU cvar
   `readback_resolve_force_addresses`, which exists only in upstream's locally
-  modified SDK (it is in neither prebuilt v0.10.0 nor the published
-  `himdo/rexglue-sdk` `vsync-present-gate` branch). On macOS the app logs
-  "cvar readback_resolve_force_addresses rejected" and the fix is inactive.
-  `vulkan_readback_resolve = true` in `fable_2.toml` reads back every resolve
-  instead, which covers the same textures at some frame-rate cost.
+  modified SDK. The SDK patch now adds it, so with the source-built plugin
+  the app's seed is accepted and the log shows `Forced resolve readback to
+  0x12704000` when the texture is regenerated. With the prebuilt plugin the
+  app still logs "cvar readback_resolve_force_addresses rejected".
+- **Snow:** snowflakes render as small framed squares (point sprites
+  expanded in the vertex shader, since Apple GPUs have no geometry shaders).
+  Not diagnosed yet.
 - **Keys:** the default `keyboard_gamepad_map` puts the d-pad on F1-F4, while
   the SDK binds F3 (debug overlay) and F4 (settings overlay, mouse unlock).
   Mac keyboards also need fn for F-keys unless "Use F1, F2, etc. keys as
