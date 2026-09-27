@@ -13,6 +13,12 @@
 #   tools/build_sdk_mac.sh -debug     build the Debug SDK (asserts on) + stage
 #                                     into out/build/mac-arm64-debug
 #   tools/build_sdk_mac.sh -restore   put the prebuilt plugin/runtime back
+#   tools/build_sdk_mac.sh -codegen   also build the recompiler (rexglue) with
+#                                     the patch's codegen fixes and regenerate
+#                                     generated/ with it (only files whose code
+#                                     changes are rewritten, so the next game
+#                                     build recompiles just those); from then
+#                                     on build.sh keeps using that recompiler
 #   tools/build_sdk_mac.sh -stage     copy the already-built plugin/runtime
 #                                     next to the game again (no build);
 #                                     build.sh runs this after every game
@@ -34,11 +40,13 @@ PLAT="mac-arm64"
 case "$(uname -m)" in arm64) PLAT="mac-arm64" ;; x86_64) PLAT="mac-amd64" ;; esac
 
 MODE="build"
+CODEGEN=0
 for arg in "$@"; do
     case "$arg" in
         -debug) CONFIG="Debug" ;;
         -restore) MODE="restore" ;;
         -stage) MODE="stage" ;;
+        -codegen) CODEGEN=1 ;;
         *) echo "unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -117,8 +125,10 @@ fi
 LOG="$SRC/build_sdk_mac.log"
 cmake --preset "$PLAT" -DREXGLUE_BUILD_TESTS=OFF > "$LOG" 2>&1 || {
     tail -40 "$LOG"; echo "Error: cmake configure failed; full output in $LOG" >&2; exit 1; }
-echo "Building rexgpu-xenos + rexruntime ($CONFIG); log: $LOG"
-if ! cmake --build --preset "$PLAT-$cfg_lower" --target rexgpu-xenos rexruntime >> "$LOG" 2>&1; then
+TARGETS=(rexgpu-xenos rexruntime)
+[ "$CODEGEN" = 1 ] && TARGETS+=(rexglue)
+echo "Building ${TARGETS[*]} ($CONFIG); log: $LOG"
+if ! cmake --build --preset "$PLAT-$cfg_lower" --target "${TARGETS[@]}" >> "$LOG" 2>&1; then
     echo "Build FAILED. Errors:" >&2
     grep -n -A3 -E "error:|ld: error|Undefined symbols" "$LOG" | grep -v -E "warning:|note:" | head -60 >&2
     echo "(full output: $LOG)" >&2
@@ -131,4 +141,20 @@ if ! stage_built; then
     echo "Error: no librexgpu-xenos*.dylib found under $SRC/out; see the build output above." >&2
     exit 1
 fi
+# 5. Optional: regenerate the recompiled code with the patched recompiler.
+#    The codegen fingerprint covers the inputs and the SDK version, not the
+#    tool, so drop the stamp to force one run; unchanged files are not
+#    rewritten.
+if [ "$CODEGEN" = 1 ]; then
+    TOOL="$(find "$SRC/out" -path "*/$CONFIG/*" -name rexglue -type f -perm -u+x 2>/dev/null | head -1)"
+    [ -n "$TOOL" ] || { echo "Error: no rexglue binary under $SRC/out." >&2; exit 1; }
+    [ -f "$REPO/default.xex" ] || { echo "Error: default.xex not found in $REPO (codegen needs it)." >&2; exit 1; }
+    echo "Regenerating generated/ with $TOOL ..."
+    rm -f "$REPO/generated/codegen.stamp"
+    (cd "$REPO" && "$TOOL" codegen fable_2_manifest.toml) > "$SRC/codegen.log" 2>&1 || {
+        tail -30 "$SRC/codegen.log"; echo "Error: codegen failed; full output in $SRC/codegen.log" >&2; exit 1; }
+    grep -i -E "wrote|written|changed|unchanged" "$SRC/codegen.log" | tail -5 || true
+    echo "Codegen done (log: $SRC/codegen.log). Now rebuild the game: ./build.sh -release fable_2"
+fi
+
 echo "Done. Launch the game normally; to go back to the prebuilt SDK: tools/build_sdk_mac.sh -restore"

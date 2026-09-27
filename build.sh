@@ -96,6 +96,12 @@ TARGET="${TARGET:-fable_2_codegen}"
 # CC / CXX in the environment override the preset's compilers (e.g. the
 # Linux presets ask for clang-20).
 EXTRA=()
+# Recompiler built from source by tools/build_sdk_mac.sh -codegen (carries
+# codegen fixes the prebuilt SDK lacks). Always passed, empty when absent, so
+# a stale cache entry never points at a deleted binary.
+CODEGEN_TOOL="$PWD/thirdparty/rexglue-sdk-src/out/$PLAT/Release/rexglue"
+[ -x "$CODEGEN_TOOL" ] || CODEGEN_TOOL=""
+EXTRA+=("-DFABLE2_CODEGEN_EXECUTABLE=$CODEGEN_TOOL")
 [ -n "${CC:-}" ] && EXTRA+=("-DCMAKE_C_COMPILER=$CC")
 [ -n "${CXX:-}" ] && EXTRA+=("-DCMAKE_CXX_COMPILER=$CXX")
 
