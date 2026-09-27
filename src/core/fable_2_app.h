@@ -143,6 +143,42 @@ class Fable2App : public rex::ReXApp {
       }
     }
 
+#ifdef __APPLE__
+    // Readback defaults for MoltenVK. Both cvars live in the GPU plugin, so
+    // they are handled here, after the plugin is loaded.
+    // - Memexport readback (the SDK default is on): every draw whose shader
+    //   writes memory through memexport copies the result back to the CPU.
+    //   When the double-buffered fast path cannot be used (a new address or a
+    //   second draw to the same address in one frame) it drains the whole GPU
+    //   queue first; in busy Fable II scenes that is hundreds of draws and
+    //   200-500 ms frames on an M4 ("GPU waits" in the SDK patch's long-frame
+    //   log). The fast path also writes the previous frame's results into
+    //   guest memory. Xenia runs Fable II without memexport readback.
+    //   readback_memexport = true in fable_2.toml (or --readback_memexport)
+    //   turns it back on.
+    if (rex::cvar::GetFlagSource("readback_memexport") == rex::cvar::Source::kDefault) {
+      if (rex::cvar::SetFlagByName("readback_memexport", "false")) {
+        REXSYS_INFO("[fable2-config] macOS default: readback_memexport = false");
+      }
+    }
+    // The Vulkan-specific aliases override the shared cvars whenever they
+    // differ from their default (false), so an old fable_2.toml that sets
+    // them to true silently brings back the full cost. Say so in the log.
+    if (rex::cvar::Query<bool>("vulkan_readback_memexport")) {
+      REXSYS_WARN(
+          "[fable2-config] vulkan_readback_memexport = true (fable_2.toml or command line) "
+          "re-enables memexport readback, which stalls the GPU on every memexport draw on "
+          "MoltenVK. Remove it unless a specific glitch needs it.");
+    }
+    if (rex::cvar::Query<bool>("vulkan_readback_resolve")) {
+      REXSYS_WARN(
+          "[fable2-config] vulkan_readback_resolve = true (fable_2.toml or command line) "
+          "reads back every render-to-texture resolve, one frame late. The hero/dog texture "
+          "only needs readback_resolve_force_addresses (seeded above); remove the setting "
+          "unless another texture needs it.");
+    }
+#endif
+
     // Feed the F3 debug overlay with guest FPS (below). The GPU plugin
     // records per-guest-swap frame timing into the shared perf registry
     // (rex::perf, state lives in rexruntime.dll and is shared with the
@@ -298,6 +334,16 @@ class Fable2App : public rex::ReXApp {
     // per session. Skip the SDK's debug messenger on macOS unless the user
     // set vulkan_log_debug_messages (config, env or command line).
     seed_cvar("vulkan_log_debug_messages", "false");
+    // Plain vsync (FIFO) presentation. The presenter prefers immediate mode
+    // when the driver offers it, and MoltenVK does ("presentation mode 0" in
+    // the log): frames are shown as soon as they are ready with no relation
+    // to the display refresh, so a 30 fps game lands on the display as an
+    // uneven mix of frames shown once and twice. FIFO ("presentation mode 2")
+    // measured smoother on an M4. Any of the three set in fable_2.toml or on
+    // the command line wins over this.
+    seed_cvar("vulkan_allow_present_mode_immediate", "false");
+    seed_cvar("vulkan_allow_present_mode_mailbox", "false");
+    seed_cvar("vulkan_allow_present_mode_fifo_relaxed", "false");
 #endif
     // NOTE: the hero/dog readback fix (readback_resolve_force_addresses) is a
     // GPU-PLUGIN cvar, so it is seeded in OnPostSetup() (after the plugin is
