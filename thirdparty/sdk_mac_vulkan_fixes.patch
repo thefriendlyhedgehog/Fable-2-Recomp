@@ -15,16 +15,23 @@ index 696ff48..73f109e 100644
    VkPipeline current_external_compute_pipeline_;
  
 diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
-index 7b938b9..08cc916 100644
+index 7b938b9..db73d7b 100644
 --- a/include/rex/graphics/vulkan/pipeline_cache.h
 +++ b/include/rex/graphics/vulkan/pipeline_cache.h
-@@ -96,7 +96,28 @@ class VulkanPipelineCache {
+@@ -96,7 +96,8 @@ class VulkanPipelineCache {
    bool IsCreatingPipelines() const;
    void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
                                      const PipelineLayoutProvider*& pipeline_layout_out,
 -                                    bool* is_placeholder_out = nullptr) const;
 +                                    bool* is_placeholder_out = nullptr,
 +                                    uint32_t* fsi_host_sample_count_log2_out = nullptr) const;
+ 
+  private:
+   REXPACKEDSTRUCT(ShaderStoredHeader, {
+@@ -232,19 +233,52 @@ class VulkanPipelineCache {
+     PipelineDescription description;
+   });
+ 
 +  // Whether MoltenVK creates a rasterizing Metal pipeline state for the
 +  // description (rasterizer discard, and both faces culled with a triangle
 +  // topology, disable rasterization on the Metal side).
@@ -45,10 +52,10 @@ index 7b938b9..08cc916 100644
 +    }
 +    return true;
 +  }
- 
-  private:
-   REXPACKEDSTRUCT(ShaderStoredHeader, {
-@@ -238,13 +259,25 @@ class VulkanPipelineCache {
++
+   struct Pipeline {
+     std::atomic<VkPipeline> pipeline{VK_NULL_HANDLE};
+     // The layouts are owned by the VulkanCommandProcessor, and must not be
      // destroyed by it while the pipeline cache is active.
      std::atomic<const PipelineLayoutProvider*> pipeline_layout{nullptr};
      std::atomic<bool> is_placeholder{false};
@@ -75,7 +82,7 @@ index 7b938b9..08cc916 100644
      Pipeline& operator=(const Pipeline& other) {
        if (this == &other) {
          return *this;
-@@ -254,6 +287,8 @@ class VulkanPipelineCache {
+@@ -254,6 +288,8 @@ class VulkanPipelineCache {
                              std::memory_order_release);
        is_placeholder.store(other.is_placeholder.load(std::memory_order_acquire),
                             std::memory_order_release);
