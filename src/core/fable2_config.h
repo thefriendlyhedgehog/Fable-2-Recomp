@@ -62,6 +62,18 @@ struct Values {
   // Fable II. This seeds the SDK cvar readback_resolve_force_addresses in
   // Fable2App; readback then happens only for that resolve, not every frame.
   bool hero_dog_texture_readback = true;
+  // Game MSAA mode (Xenia "Disable MSAA" by Margen67, as mid-asm hook
+  // fable2_hook_game_msaa at 0x8238DF3C, where the game does `li r9, 2` and
+  // stores r9 as its multisample type next to the 1120x720 render size).
+  // Xbox 360 D3DMULTISAMPLE_*: 0 = none, 1 = 2x, 2 = 4x (the game's own
+  // value). -1 = leave the game's value. Default 1 on macOS (the Xenia
+  // patch's value): MSAA is costly on the fragment-shader-interlock path the
+  // Mac uses; -1 elsewhere.
+#ifdef __APPLE__
+  int32_t game_msaa = 1;
+#else
+  int32_t game_msaa = -1;
+#endif
   // [perf] - hot-function override tuning.
   // hotfunc_yield_every: NtYieldExecution batching factor for the hotfunc
   // overrides (see src/core/hotfunc/hotfunc_yield.h). Every Nth call does

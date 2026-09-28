@@ -111,6 +111,16 @@ name = "fable2_hook_ce_grantavail"
 registers = ["r3"]
 after_instruction = true
 
+# Game MSAA mode (Xenia "Disable MSAA" by Margen67, be8 0x8238DF3F = 1):
+# the render setup does `li r9, 2` at 0x8238DF3C (multisample type, 4x) and
+# stores it with `stw r9, 156(r31)` at 0x8238DF68. Set r9 right after the li
+# (fable2_hook_game_msaa, fable2_config.toml [patches] game_msaa).
+[[entrypoint.midasm_hook]]
+address = 0x8238DF3C
+name = "fable2_hook_game_msaa"
+registers = ["r9"]
+after_instruction = true
+
 # Conservative settings: no register optimizations
 skip_lr = false
 skip_msr = false

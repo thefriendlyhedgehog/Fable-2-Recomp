@@ -96,3 +96,21 @@ void fable2_hook_ce_grantavail(PPCRegister& r3) {
     r3.u32 = 1;
   }
 }
+
+// Game MSAA mode (Xenia "Disable MSAA" by Margen67: be8 0x8238DF3F = 1). The
+// render-setup code at 0x8238DF3C does `li r9, 2` (4x) and later stores r9 as
+// the multisample type (stw r9, 156(r31)) beside the 1120x720 size. Replace it
+// with the configured value; see fable2_config.h game_msaa.
+void fable2_hook_game_msaa(PPCRegister& r9) {
+  const int32_t mode = fable2::config::Get().game_msaa;
+  if (mode < 0 || mode > 2) {
+    return;
+  }
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    REXSYS_INFO("[patches] game MSAA mode {} -> {} (fable2_config.toml game_msaa)",
+                r9.u32, mode);
+  }
+  r9.u64 = uint64_t(mode);
+}

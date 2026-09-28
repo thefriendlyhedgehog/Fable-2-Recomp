@@ -13,7 +13,7 @@ index da8e432..a5a9754 100644
    bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
  
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..8744d08 100644
+index 696ff48..7c834fb 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -33,7 +33,7 @@ index 696ff48..8744d08 100644
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
-@@ -801,6 +802,37 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -801,6 +802,38 @@ class VulkanCommandProcessor : public CommandProcessor {
    // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
    // TODO(Triang3l): Change to a deferred compilation handle.
    VkPipeline current_guest_graphics_pipeline_;
@@ -65,6 +65,7 @@ index 696ff48..8744d08 100644
 +  uint64_t frame_ns_gpu_wait_ = 0;
 +  uint64_t frame_ns_swap_ = 0;
 +  uint64_t frame_ns_copy_ = 0;
++  uint64_t frame_ns_throttle_ = 0;
 +  // Set by IssueDraw before IssueCopy: the copy is a PM4_DRAW_INDX_2
 +  // 3-vertex rectangle list (a complete resolve blit).
 +  bool copy_is_full_blit_ = false;
@@ -496,7 +497,7 @@ index 8f2fcb0..241649b 100644
          return 0;
        }));
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..605de1c 100644
+index 001f36b..c961cb8 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,6 +11,7 @@
@@ -543,7 +544,7 @@ index 001f36b..605de1c 100644
  
    const RegisterFile& regs = *register_file_;
    (void)index_buffer_info;
-@@ -3612,7 +3628,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3612,7 +3628,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
    if (edram_mode == xenos::EdramMode::kCopy) {
@@ -551,12 +552,18 @@ index 001f36b..605de1c 100644
 +    // Special copy handling. Forced resolve readback only takes the complete
 +    // texture blit: PM4_DRAW_INDX_2 with a 3-vertex rectangle list, the way
 +    // Direct3D 9 resolves (as the Fable II femtofork detects it).
-+    copy_is_full_blit_ = draw_packet::is_draw_indx_2 &&
-+                         prim_type == xenos::PrimitiveType::kRectangleList && index_count == 3;
++    // Also color only, 8_8_8_8 only (the femtofork's filter): the hero/dog
++    // texture is a 512x512 8_8_8_8 chain, while a 256x256 texture of another
++    // format is resolved to the same address every frame and must not force
++    // a GPU sync each time.
++    copy_is_full_blit_ =
++        draw_packet::is_draw_indx_2 && prim_type == xenos::PrimitiveType::kRectangleList &&
++        index_count == 3 && regs.Get<reg::RB_COPY_CONTROL>().copy_src_select < 4 &&
++        regs.Get<reg::RB_COPY_DEST_INFO>().copy_dest_format == xenos::ColorFormat::k_8_8_8_8;
      return IssueCopy();
    }
  
-@@ -3835,7 +3855,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,7 +3861,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -568,7 +575,7 @@ index 001f36b..605de1c 100644
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
-@@ -3849,18 +3872,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3849,18 +3878,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // textures.
    VkPipeline pipeline;
    void* pipeline_handle = nullptr;
@@ -600,7 +607,7 @@ index 001f36b..605de1c 100644
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -4014,7 +4044,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4014,7 +4050,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
          continue;
        }
@@ -609,7 +616,7 @@ index 001f36b..605de1c 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4032,7 +4062,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4068,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -618,7 +625,7 @@ index 001f36b..605de1c 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4074,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4080,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -627,7 +634,7 @@ index 001f36b..605de1c 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4111,9 +4141,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,9 +4147,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -658,7 +665,7 @@ index 001f36b..605de1c 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4385,22 +4433,36 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +4439,36 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -697,7 +704,7 @@ index 001f36b..605de1c 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +4481,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +4487,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -705,7 +712,7 @@ index 001f36b..605de1c 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4944,6 +5005,7 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5011,7 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -713,7 +720,21 @@ index 001f36b..605de1c 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -5165,6 +5227,51 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5179,12 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+   // is still available, and whether the await was successful.
+   uint64_t await_submission =
+       is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
+-  CheckSubmissionFenceAndDeviceLoss(await_submission);
++  {
++    // Frame throttle: waiting here means the GPU is still busy with the frame
++    // kMaxFramesInFlight back, i.e. GPU-bound (not a readback).
++    ScopedNs throttle_ns(frame_ns_throttle_);
++    CheckSubmissionFenceAndDeviceLoss(await_submission);
++  }
+   if (device_lost_ || submission_completed_ < await_submission) {
+     return false;
+   }
+@@ -5165,6 +5238,52 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -736,16 +757,17 @@ index 001f36b..605de1c 100644
 +                           ms(frame_timing::ring_wait_ns) + ms(frame_timing::wait_reg_mem_ns);
 +        REXGPU_INFO(
 +            "Long frame {:.0f} ms: draws {:.0f} ms (pipelines {:.0f}, textures {:.0f}, shared "
-+            "memory {:.0f}), resolves {:.0f} ms, GPU waits {:.0f} ms, swap {:.0f} ms, idle "
++            "memory {:.0f}), resolves {:.0f} ms, GPU waits {:.0f} ms (of which GPU-bound frame "
++            "throttle {:.0f} ms), swap {:.0f} ms, idle "
 +            "waiting for guest commands {:.0f} ms, WAIT_REG_MEM {:.0f} ms, other {:.0f} ms",
 +            frame_ms, ms(frame_ns_draw_), ms(frame_ns_pipeline_), ms(frame_ns_textures_),
 +            ms(frame_ns_shared_memory_), ms(frame_ns_copy_), ms(frame_ns_gpu_wait_),
-+            ms(frame_ns_swap_), ms(frame_timing::ring_wait_ns), ms(frame_timing::wait_reg_mem_ns),
++            ms(frame_ns_throttle_), ms(frame_ns_swap_), ms(frame_timing::ring_wait_ns), ms(frame_timing::wait_reg_mem_ns),
 +            std::max(0.0, frame_ms - accounted));
 +      }
 +    }
 +    frame_ns_draw_ = frame_ns_pipeline_ = frame_ns_textures_ = frame_ns_shared_memory_ =
-+        frame_ns_gpu_wait_ = frame_ns_swap_ = frame_ns_copy_ = 0;
++        frame_ns_gpu_wait_ = frame_ns_swap_ = frame_ns_copy_ = frame_ns_throttle_ = 0;
 +    frame_timing::ring_wait_ns = frame_timing::wait_reg_mem_ns = 0;
 +    fsi_stats_last_frame_ = frame_now;
 +    if (++fsi_stats_frames_ >= 300) {

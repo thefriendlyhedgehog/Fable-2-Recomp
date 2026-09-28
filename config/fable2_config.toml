@@ -74,3 +74,10 @@ unlock_ce = true
 # happens only for that resolve, not every frame. false = original black bug.
 # Default: true
 hero_dog_texture_readback = true
+
+# Game MSAA mode (Xenia "Disable MSAA" by Margen67, applied as a mid-asm
+# hook). 0 = none, 1 = 2x, 2 = 4x (the game's own setting), -1 = leave the
+# game's value. MSAA is expensive on the Mac's rendering path, so the
+# built-in default is 1 on macOS (the Xenia patch's value) and -1 elsewhere;
+# uncomment to override.
+# game_msaa = 1

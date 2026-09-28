@@ -105,6 +105,13 @@ unlock_ce = true
 # Default: true
 hero_dog_texture_readback = true
 
+# Game MSAA mode (Xenia "Disable MSAA" by Margen67, applied as a mid-asm
+# hook). 0 = none, 1 = 2x, 2 = 4x (the game's own setting), -1 = leave the
+# game's value. MSAA is expensive on the Mac's rendering path, so the
+# built-in default is 1 on macOS (the Xenia patch's value) and -1 elsewhere;
+# uncomment to override.
+# game_msaa = 1
+
 [perf]
 # NtYieldExecution batching for the hot-function overrides (see
 # src/core/hotfunc/hotfunc_yield.h): every Nth guest yield does the real
@@ -210,6 +217,8 @@ bool Load(const std::filesystem::path& path) {
     values.unlock_website = Read<bool>(patches_table, "patches",
                                        "unlock_website", "boolean",
                                        values.unlock_website);
+    values.game_msaa = static_cast<int32_t>(Read<int64_t>(
+        patches_table, "patches", "game_msaa", "integer", values.game_msaa));
     values.unlock_ce = Read<bool>(patches_table, "patches", "unlock_ce",
                                   "boolean", values.unlock_ce);
     values.hero_dog_texture_readback =
