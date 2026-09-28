@@ -501,8 +501,24 @@ class Fable2App : public rex::ReXApp {
     // fast with the real problem. Check a file inside data/ rather than the
     // folder alone: a partial copy (e.g. an interrupted stage_content run)
     // leaves data/ present but empty, and the game then dies on a NULL read.
+    // The build also writes a data/dir.manifest next to the exe listing only
+    // the recomp's own scripts (scripts\recomp\*, see
+    // tools/ensure_recomp_manifest.cmake), so the file alone does not prove
+    // the game content is there: require an entry that is not one of those.
+    const auto has_game_manifest = [](const std::filesystem::path& manifest) {
+      std::ifstream in(manifest, std::ios::binary);
+      std::string line;
+      while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (!line.empty() && line.rfind("scripts\\recomp\\", 0) != 0 &&
+            line.rfind("scripts/recomp/", 0) != 0) {
+          return true;
+        }
+      }
+      return false;
+    };
     if (!paths.game_data_root.empty() &&
-        !std::filesystem::is_regular_file(paths.game_data_root / "data" / "dir.manifest")) {
+        !has_game_manifest(paths.game_data_root / "data" / "dir.manifest")) {
       const std::string msg = std::format(
           "The game data was not found or is incomplete in {} "
           "(missing data/dir.manifest).\n\n"
