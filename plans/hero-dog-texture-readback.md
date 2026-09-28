@@ -1,11 +1,13 @@
 # Hero / Dog black-texture fix (targeted readback-resolve)
 
-**STATUS: IMPLEMENTED + BUILT (pending in-game verification)**
+**STATUS: IMPLEMENTED + VERIFIED (Phase 0 — done).**
 
 Implementation is complete and the Release build is green; both the staged
 `rexgpu-xenos.dll` (cvar + gated readback + diagnostic log) and `fable_2.exe`
-(config toggle + `OnPostSetup` seeding) verified to contain the change. The
-only remaining step is in-game verification (needs a display/save).
+(config toggle + `OnPostSetup` seeding) verified to contain the change.
+In-game: hero + dog are **no longer black** and stable (see Phase 0 in the
+attempt-by-attempt log in `hero-dog-shifty-texture-mipmap.md`). The follow-up
+"shifty / multiple-textures / shimmering" dog work is tracked in that plan.
 
 Goal: fix the rendering bug where the hero and the dog render completely black, by
 forcing a CPU readback of their render-to-texture result only when the game regenerates
@@ -98,6 +100,23 @@ its destination base is in a caller-supplied list. The Fable-2 address stays in 
     `ShouldForceReadbackResolve(register_file_->values[XE_GPU_REG_RB_COPY_DEST_BASE])` (the
     fork's exact detection signal). This reuses the existing readback body verbatim (scaled
     downscale + format handling inherited automatically) — no body refactor needed.
+  - `ShouldForceReadbackResolve` also requires the **blit shape**, matching the fork: the
+    current draw's `VGT_DRAW_INITIATOR` must be `prim_type == kRectangleList (0x08)` and
+    `num_indices == 0x03`. This is essential, not optional: the dog's texture region is also
+    touched by extra / partial copies that are *not* the full-texture blit. Reading those back
+    mid-update makes the dog look glitchy / constantly shifting, while the hero (a single clean
+    blit) stays stable. Restricting to the `kRectangleList`/3 blit reads back only the complete
+    texture, so the dog matches the hero.
+  - **The gate must be keyed on the `PM4_DRAW_INDX_2` opcode (the actual fix).** The fork's
+    `may_require_readback_resolve` flag is `false` for `PM4_DRAW_INDX` and `true` for
+    `PM4_DRAW_INDX_2` — it is set by the opcode dispatch, not derived from the draw state. The
+    hero/dog EDRAM-resolve copy is issued as `PM4_DRAW_INDX_2`. Regular `PM4_DRAW_INDX` draws
+    can *also* be a `kRectangleList`/3 copy to `0x12704000` (the game sampling that texture
+    mid-frame); reading those back captures a mid-update state, which is exactly the red /
+    constantly-shifting dog. The recompile threads a `may_require_readback_resolve_` member set
+    in `ExecutePacketType3_DRAW_INDX` (false) / `ExecutePacketType3_DRAW_INDX_2` (true), and
+    `ShouldForceReadbackResolve` requires it. Without this, the readback fires on the wrong
+    draws even with the correct address + blit shape.
   - The Vulkan readback body has an extra `if (readback_mode == kDisabled) return true;` guard
     (the D3D12 body does not); it is extended with the same `ShouldForceReadbackResolve` check
     so a forced copy is not dropped. In the force case the mode stays `kDisabled`, which yields
@@ -165,6 +184,12 @@ App (`src/`):
   If it differs, only the config list value needs changing.
 - **Dog address:** the fork uses the single base for both; if the dog resolves to a different
   base, add it to `readback_resolve_force_addresses`.
+- **Window width (realized, fixed):** a 1 MiB match window was too broad. `0x12704000` sits in a
+  densely-packed region of GPU memory (`0x12700000+`) full of other EDRAM-resolve targets
+  (`0x12724000`, `0x1272c000`, …) that the game blits in rapid bursts. The wide window caught all
+  of them and forced an immediate GPU-sync readback for each, stalling the GPU mid-frame — the dog
+  looked glitchy / partly red / constantly shifting. The nearest unrelated target is 128 KiB away,
+  so the window is now 64 KiB. **Keep it small; do not widen it back toward 1 MiB.**
 - **Debug / prebuilt builds** use the prebuilt 0.10.0 plugin and will not show the fix; test
   with the source plugin (default `fable2.cmd` d3d12 / release).
 - **Vulkan** is a secondary target (recompile Vulkan is WIP; the fork's fix is D3D12-only). The

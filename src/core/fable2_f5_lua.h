@@ -160,20 +160,32 @@ inline bool run_external(PPCContext& ctx, uint8_t* base) {
     std::memcpy(reinterpret_cast<void*>(ta::host_addr(base, str_obj + i)), &z, 4);
   }
 
+  // DIAG: trace each guest step so fable2_f5_lua.log shows the last step before
+  // a hard crash (the log is flushed per line).
+  logline("[f5] step1 src=0x%08X str_obj=0x%08X this=0x%08X method=0x%08X -> "
+          "ConstructRefCounted\n",
+          src, str_obj, this_ptr, method);
   // ConstructRefCounted_8222CF18(dest, cstring, len=-1): build the game string.
   ctx.r3.u32 = str_obj;
   ctx.r4.u32 = src;
   ctx.r5.u32 = 0xFFFFFFFF;
   REX_CALL_INDIRECT_FUNC(0x8222CF18);
+  logline("[f5] step2 after ConstructRefCounted -> RunScript\n");
 
   // CScriptManager::RunScript(this, const String& path).
   ctx.r3.u32 = this_ptr;
   ctx.r4.u32 = str_obj;
   REX_CALL_INDIRECT_FUNC(method);
+  logline("[f5] step3 after RunScript -> (keeping string alive) done\n");
 
-  // DestructRefCounted_82214F08(dest): release the game string.
-  ctx.r3.u32 = str_obj;
-  REX_CALL_INDIRECT_FUNC(0x82214F08);
+  // NOTE: we deliberately do NOT call DestructRefCounted on str_obj here.
+  // CScriptManager::RunScript may defer the actual file load/compile to a later
+  // frame; freeing the path String synchronously would be a use-after-free the
+  // moment the deferred load dereferences it (observed as a "read of guest 0x5"
+  // access violation, intermittent, only when the menu is up). Leaving the
+  // string's refcount at 1 keeps it valid for the deferred load. The small
+  // per-press leak is acceptable for an on-demand utility.
+  // (src C-string is likewise intentionally left allocated.)
 
   logline("[f5] ran external lua: %s (this=0x%08X method=0x%08X)\n", path.c_str(), this_ptr,
           method);
@@ -189,6 +201,8 @@ inline void poll_mainloop(PPCContext& ctx, uint8_t* base) {
   // method, DestructRefCounted) which clobber the PPC registers. Save the whole
   // context and restore it so the real MainRenderLoop sees the state it had
   // when the hook fired (only F5 detection should be side-effectful).
+  logline("[f5] poll_mainloop: r1=0x%08X r2=0x%08X r3=0x%08X (about to run_external)\n",
+          (uint32_t)ctx.r1.u64, (uint32_t)ctx.r2.u64, (uint32_t)ctx.r3.u64);
   const PPCContext saved = ctx;
   try {
     run_external(ctx, base);

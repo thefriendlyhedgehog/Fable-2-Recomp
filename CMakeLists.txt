@@ -168,22 +168,39 @@ add_custom_command(TARGET fable_2 POST_BUILD
 
 # --- F5 external-Lua runner (src/lua/) -----------------------------------
 # src/core/fable2_f5_lua.h runs an external script (cvar `f5_lua_path`, default
-# "recomp/F5.lua") via CScriptManager::RunScript when F5 is pressed. The game
-# indexes /data/ and /data/scripts/ at startup, so the file must already exist
-# there before the game starts. The source lives in src/lua/ (git-tracked); on
-# every build copy it into BOTH the content root (so stage_content.cmd / a
-# --game_data_root=<root> run finds it) and next to the exe (the default game
-# data root). Runs in the scripts/recomp/ subfolder so RunScript("recomp/...")
-# resolves it.
-add_custom_command(TARGET fable_2 POST_BUILD
+# "scripts/recomp/F5.lua") via CScriptManager::RunScript when F5 is pressed.
+# The game's VFS indexes data/ from dir.manifest at startup, so the .lua file
+# must exist AND be a dir.manifest line before the game starts. Sources live in
+# src/lua/ (git-tracked); they are staged into BOTH the repo data/ (the
+# git-tracked content root) and the exe dir (the default game data root), and
+# dir.manifest is kept in sync in BOTH trees.
+#
+# This is a custom target that fable_2 depends on (NOT a POST_BUILD step) so it
+# runs on every `build fable_2` even when the exe is up to date -- the .lua
+# files are not CMake sources, so a no-op fable_2 relink would otherwise skip
+# re-copying an edited script. dir.manifest syncing is idempotent: it appends
+# only missing "scripts\\recomp\\<name>" entries (CRLF), leaving other entries
+# untouched.
+file(GLOB FABLE2_LUA_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/lua/*.lua)
+add_custom_target(fable_2_lua_staging
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_CURRENT_SOURCE_DIR}/src/lua
           ${CMAKE_CURRENT_SOURCE_DIR}/data/scripts/recomp
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_CURRENT_SOURCE_DIR}/src/lua
           $<TARGET_FILE_DIR:fable_2>/data/scripts/recomp
-  COMMENT "Staging src/lua/* -> data/scripts/recomp/ (content root + exe dir)"
+  COMMAND ${CMAKE_COMMAND}
+          -Dlua_dir=${CMAKE_CURRENT_SOURCE_DIR}/src/lua
+          -Dmanifests=${CMAKE_CURRENT_SOURCE_DIR}/data/dir.manifest
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/ensure_recomp_manifest.cmake
+  COMMAND ${CMAKE_COMMAND}
+          -Dlua_dir=${CMAKE_CURRENT_SOURCE_DIR}/src/lua
+          -Dmanifests=$<TARGET_FILE_DIR:fable_2>/data/dir.manifest
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/tools/ensure_recomp_manifest.cmake
+  DEPENDS ${FABLE2_LUA_FILES}
+  COMMENT "Staging src/lua/* -> data/scripts/recomp/ + dir.manifest (content root + exe dir)"
 )
+add_dependencies(fable_2 fable_2_lua_staging)
 
 # The remote-control CLI client is a debug-only feature (see the
 # FABLE2_REMOTE_CONTROL gate above), so only stage it for Debug builds.
