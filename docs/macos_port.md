@@ -6,7 +6,8 @@ With FSI render targets the game renders and plays; normal scenes run at the
 game's 30 fps cap. Open problems: some scenes (near fire, in snow) turn
 GPU-bound at about 300 ms per frame, thin lines along some triangle edges
 (rocks, snowflake quads), snowflakes drawn as framed squares, and an
-occasional black screen at launch.
+occasional black screen at launch. Current state, open problems with the
+evidence so far, and next steps: `plans/macos-port-handoff.md`.
 
 ## Prior work
 
