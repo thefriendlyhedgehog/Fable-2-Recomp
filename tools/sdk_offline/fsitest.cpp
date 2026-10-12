@@ -1,6 +1,8 @@
 // Translates a small hand-built pixel shader (writes depth, has a conditional
 // jump) and the depth-only shader for the FSI path, with and without
-// vulkan_fsi_end_interlock_in_function, and writes the SPIR-V.
+// vulkan_fsi_end_interlock_in_function, and writes the SPIR-V. Also a
+// color-only variant (early depth / stencil, so it has the early quad skip),
+// with vulkan_fsi_quad_skip_quad_ops off and on.
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -13,6 +15,7 @@
 #include <rex/string/buffer.h>
 
 REXCVAR_DECLARE(bool, vulkan_fsi_end_interlock_in_function);
+REXCVAR_DECLARE(bool, vulkan_fsi_quad_skip_quad_ops);
 
 using namespace rex::graphics;
 
@@ -89,6 +92,32 @@ int main(int argc, char** argv) {
     std::fwrite(depth_only.data(), 1, depth_only.size(), f);
     std::fclose(f);
     std::printf("wrote %s (%zu bytes)\n", path.c_str(), depth_only.size());
+  }
+
+  // Color only: slot 2 writes oC0 too, so the shader does not write depth and
+  // the depth / stencil test runs early.
+  alu(&ucode[6], 0, 1);
+  REXCVAR_SET(vulkan_fsi_end_interlock_in_function, true);
+  for (int quad_ops = 0; quad_ops < 2; ++quad_ops) {
+    REXCVAR_SET(vulkan_fsi_quad_skip_quad_ops, quad_ops != 0);
+    SpirvShaderTranslator::Features features(true);
+    SpirvShaderTranslator translator(features, true, true, true, 1, 1);
+    Shader shader(xenos::ShaderType::kPixel, 0x5678, ucode.data(), ucode.size(),
+                  std::endian::native);
+    rex::string::StringBuffer disasm;
+    shader.AnalyzeUcode(disasm);
+    uint64_t modification = translator.GetDefaultPixelShaderModification(64);
+    Shader::Translation& translation = *shader.GetOrCreateTranslation(modification);
+    if (!translator.TranslateAnalyzedShader(translation) || !translation.is_valid()) {
+      std::printf("translation failed\n");
+      return 1;
+    }
+    std::string path =
+        std::string(out_dir) + "/ps_color_" + (quad_ops ? "quad" : "deriv") + ".spv";
+    FILE* f = std::fopen(path.c_str(), "wb");
+    std::fwrite(translation.translated_binary().data(), 1, translation.translated_binary().size(), f);
+    std::fclose(f);
+    std::printf("wrote %s (%zu bytes)\n", path.c_str(), translation.translated_binary().size());
   }
   return 0;
 }

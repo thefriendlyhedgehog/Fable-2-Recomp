@@ -134,7 +134,7 @@ index 2cf24c4..85ab717 100644
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..98cdc71 100644
+index dce3dbf..2384138 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -151,6 +151,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -162,6 +162,16 @@ index dce3dbf..98cdc71 100644
    };
    static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
  
+@@ -399,6 +410,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+ 
+     bool demote_to_helper_invocation;
+     bool sample_rate_shading;
++
++    // OpGroupNonUniformQuadSwap in fragment shaders (SPIR-V 1.3+).
++    bool subgroup_quad_fragment;
+   };
+ 
+   SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
 index 696ff48..abf4451 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
@@ -448,6 +458,22 @@ index 1cb3faa..be34c10 100644
  };
  
  /// Create a default InputSystem with SDL + NOP drivers.
+diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
+index 947817f..2401b34 100644
+--- a/include/rex/ui/vulkan/device.h
++++ b/include/rex/ui/vulkan/device.h
+@@ -168,6 +168,11 @@ class VulkanDevice {
+     // VK_EXT_robustness2
+ 
+     bool nullDescriptor = false;
++
++    // VkPhysicalDeviceSubgroupProperties (Vulkan 1.1): quad operations
++    // (OpGroupNonUniformQuad*) are supported in fragment shaders.
++
++    bool subgroupQuadOperationsInFragment = false;
+   };
+ 
+   // Properties of the core API and enabled extensions, and enabled features.
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..2e0070a 100644
 --- a/src/codegen/builders/vector.cpp
@@ -948,10 +974,10 @@ index 8f2fcb0..c7f886a 100644
          return 0;
        }));
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..f9fed1a 100644
+index 1774f97..7775637 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
-@@ -21,11 +21,35 @@
+@@ -21,11 +21,44 @@
  #include <fmt/format.h>
  
  #include <rex/assert.h>
@@ -984,10 +1010,49 @@ index 1774f97..f9fed1a 100644
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +#undef REX_FSI_END_INTERLOCK_IN_FUNCTION_DEFAULT
 +
++REXCVAR_DEFINE_BOOL(vulkan_fsi_quad_skip_quad_ops, true, "GPU/Vulkan",
++                    "Fragment shader interlock: decide whether a 2x2 quad that failed the early "
++                    "depth / stencil test can skip the shader with subgroup quad operations "
++                    "where supported, instead of fine derivatives. Metal (MoltenVK) computes "
++                    "fine derivatives like coarse ones, so the derivative check lets single "
++                    "pixels run without the rest of their quad, which breaks their texture "
++                    "derivatives (wrong mip levels, lines along triangle edges).")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
  namespace rex::graphics {
  
  SpirvShaderTranslator::Features::Features(bool all)
-@@ -1750,6 +1774,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -42,7 +75,8 @@ SpirvShaderTranslator::Features::Features(bool all)
+       rounding_mode_rte_float32(all),
+       fragment_shader_sample_interlock(all),
+       demote_to_helper_invocation(all),
+-      sample_rate_shading(all) {}
++      sample_rate_shading(all),
++      subgroup_quad_fragment(all) {}
+ 
+ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const vulkan_device)
+     : max_storage_buffer_range(vulkan_device->properties().maxStorageBufferRange),
+@@ -59,7 +93,8 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+       rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32),
+       fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
+       demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation),
+-      sample_rate_shading(vulkan_device->properties().sampleRateShading) {
++      sample_rate_shading(vulkan_device->properties().sampleRateShading),
++      subgroup_quad_fragment(vulkan_device->properties().subgroupQuadOperationsInFragment) {
+   const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
+   if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+     spirv_version = spv::Spv_1_5;
+@@ -70,6 +105,9 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+   } else {
+     spirv_version = spv::Spv_1_0;
+   }
++  if (spirv_version < spv::Spv_1_3) {
++    subgroup_quad_fragment = false;
++  }
+ }
+ 
+ uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
+@@ -1750,6 +1788,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
    builder_->addMemberName(type_struct_per_vertex, kOutputPerVertexMemberPosition, "gl_Position");
    builder_->addMemberDecoration(type_struct_per_vertex, kOutputPerVertexMemberPosition,
                                  spv::DecorationBuiltIn, spv::BuiltInPosition);
@@ -1004,7 +1069,7 @@ index 1774f97..f9fed1a 100644
    if (output_per_vertex_member_clip_distance_ != UINT32_MAX) {
      builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_clip_distance_,
                              "gl_ClipDistance");
-@@ -2574,6 +2608,90 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+@@ -2574,6 +2622,90 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
    position_xyz =
        builder_->createNoContractionBinOp(spv::OpFAdd, type_float3_, position_xyz, ndc_offset_mul_w);
  
@@ -1095,14 +1160,87 @@ index 1774f97..f9fed1a 100644
    spv::Id kill_vertex = spv::NoResult;
    if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) {
      assert_true(var_main_point_size_edge_flag_kill_vertex_ != spv::NoResult);
-@@ -3080,6 +3198,14 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
-                   builder_->createTriOp(spv::OpSelect, type_float_, quad_needs_execution,
-                                         const_float_1_, const_float_0_)),
-               const_float_0_));
+@@ -3052,34 +3184,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+       // failed the depth / stencil test, and there are no depth and stencil
+       // values to conditionally write after running the shader to check if
+       // samples don't additionally need to be discarded.
+-      spv::Id quad_needs_execution =
+-          builder_->createBinOp(spv::OpINotEqual, type_bool_, main_fsi_sample_mask_, const_uint_0_);
+-      // TODO(Triang3l): Use GroupNonUniformQuad operations where supported.
+-      // If none of the pixels in the quad passed the depth / stencil test, the
+-      // value of (any samples covered ? 1.0f : 0.0f) for the current pixel will
+-      // be 0.0f, and since it will be 0.0f in other pixels too, the derivatives
+-      // will be zero as well.
+-      builder_->addCapability(spv::CapabilityDerivativeControl);
+-      // Query the horizontally adjacent pixel.
+-      quad_needs_execution = builder_->createBinOp(
+-          spv::OpLogicalOr, type_bool_, quad_needs_execution,
+-          builder_->createBinOp(
+-              spv::OpFOrdNotEqual, type_bool_,
+-              builder_->createUnaryOp(
+-                  spv::OpDPdxFine, type_float_,
+-                  builder_->createTriOp(spv::OpSelect, type_float_, quad_needs_execution,
+-                                        const_float_1_, const_float_0_)),
+-              const_float_0_));
+-      // Query the vertically adjacent pair of pixels.
++      spv::Id quad_needs_execution;
++      if (features_.subgroup_quad_fragment && REXCVAR_GET(vulkan_fsi_quad_skip_quad_ops)) {
++        // OR the sample masks of the whole quad, so the decision is exactly
++        // quad-uniform and every pixel of an executed quad (needed for
++        // implicit derivatives) runs.
++        builder_->addCapability(spv::CapabilityGroupNonUniformQuad);
++        spv::Id scope_subgroup = builder_->makeUintConstant(uint32_t(spv::ScopeSubgroup));
++        spv::Id quad_sample_mask = main_fsi_sample_mask_;
++        for (uint32_t direction = 0; direction < 2; ++direction) {
++          id_vector_temp_.clear();
++          id_vector_temp_.push_back(scope_subgroup);
++          id_vector_temp_.push_back(quad_sample_mask);
++          id_vector_temp_.push_back(builder_->makeUintConstant(direction));
++          quad_sample_mask = builder_->createBinOp(
++              spv::OpBitwiseOr, type_uint_, quad_sample_mask,
++              builder_->createOp(spv::OpGroupNonUniformQuadSwap, type_uint_, id_vector_temp_));
++        }
++        quad_needs_execution =
++            builder_->createBinOp(spv::OpINotEqual, type_bool_, quad_sample_mask, const_uint_0_);
++      } else {
++        quad_needs_execution = builder_->createBinOp(spv::OpINotEqual, type_bool_,
++                                                     main_fsi_sample_mask_, const_uint_0_);
++        // If none of the pixels in the quad passed the depth / stencil test, the
++        // value of (any samples covered ? 1.0f : 0.0f) for the current pixel will
++        // be 0.0f, and since it will be 0.0f in other pixels too, the derivatives
++        // will be zero as well.
++        builder_->addCapability(spv::CapabilityDerivativeControl);
++        // Query the horizontally adjacent pixel.
++        quad_needs_execution = builder_->createBinOp(
++            spv::OpLogicalOr, type_bool_, quad_needs_execution,
++            builder_->createBinOp(
++                spv::OpFOrdNotEqual, type_bool_,
++                builder_->createUnaryOp(
++                    spv::OpDPdxFine, type_float_,
++                    builder_->createTriOp(spv::OpSelect, type_float_, quad_needs_execution,
++                                          const_float_1_, const_float_0_)),
++                const_float_0_));
++        // Query the vertically adjacent pair of pixels.
++        quad_needs_execution = builder_->createBinOp(
++            spv::OpLogicalOr, type_bool_, quad_needs_execution,
++            builder_->createBinOp(
++                spv::OpFOrdNotEqual, type_bool_,
++                builder_->createUnaryOp(
++                    spv::OpDPdyCoarse, type_float_,
++                    builder_->createTriOp(spv::OpSelect, type_float_, quad_needs_execution,
++                                          const_float_1_, const_float_0_)),
++                const_float_0_));
++      }
 +      // Debug switch: run the whole quad anyway.
-+      quad_needs_execution = builder_->createBinOp(
-+          spv::OpLogicalOr, type_bool_, quad_needs_execution,
-+          builder_->createBinOp(
+       quad_needs_execution = builder_->createBinOp(
+           spv::OpLogicalOr, type_bool_, quad_needs_execution,
+           builder_->createBinOp(
+-              spv::OpFOrdNotEqual, type_bool_,
+-              builder_->createUnaryOp(
+-                  spv::OpDPdyCoarse, type_float_,
+-                  builder_->createTriOp(spv::OpSelect, type_float_, quad_needs_execution,
+-                                        const_float_1_, const_float_0_)),
+-              const_float_0_));
 +              spv::OpINotEqual, type_bool_,
 +              builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
 +                                    builder_->makeUintConstant(kSysFlag_FSIExecuteWholeQuads)),
@@ -2593,3 +2731,41 @@ index 813bb1c..4b46c83 100644
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
+diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
+index 8197bb4..d22286d 100644
+--- a/src/ui/vulkan/vulkan_device.cpp
++++ b/src/ui/vulkan/vulkan_device.cpp
+@@ -330,6 +330,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   VulkanFeatures<VkPhysicalDeviceCustomBorderColorFeaturesEXT,
+                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT>
+       features_EXT_custom_border_color;
++  VkPhysicalDeviceSubgroupProperties properties_1_1_subgroup = {
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+   VkPhysicalDeviceCustomBorderColorPropertiesEXT properties_EXT_custom_border_color = {
+       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT};
+   VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
+@@ -376,6 +378,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     if (device->extensions_.ext_EXT_robustness2) {
+       features_EXT_robustness2.Link(supported_features_2, device_create_info);
+     }
++    if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
++      properties_1_1_subgroup.pNext = properties_2.pNext;
++      properties_2.pNext = &properties_1_1_subgroup;
++    }
+     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
+     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
+   }
+@@ -731,6 +737,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+     }
+   }
+ 
++  device->properties_.subgroupQuadOperationsInFragment =
++      (properties_1_1_subgroup.supportedStages & VK_SHADER_STAGE_FRAGMENT_BIT) &&
++      (properties_1_1_subgroup.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT);
++  REXLOG_INFO("* subgroupSize: {}, subgroup quad operations in fragment shaders: {}",
++              properties_1_1_subgroup.subgroupSize,
++              device->properties_.subgroupQuadOperationsInFragment);
++
+ #undef XE_UI_VULKAN_LIMIT
+ #undef XE_UI_VULKAN_ENUM_LIMIT
+ #undef XE_UI_VULKAN_FEATURE

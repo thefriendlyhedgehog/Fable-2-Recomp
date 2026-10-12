@@ -389,6 +389,35 @@ nothing in MSL. Checked offline with SPIRV-Cross at MoltenVK's commit on a
 hand-built shader of that kind: no raster order group without the option,
 `raster_order_group(0)` on `xe_edram` with it, and spirv-val accepts both.
 
+### FSI early quad skip with quad operations (wrong mips, edge lines)
+
+With early depth / stencil, an FSI pixel shader skips its body when no pixel
+of its 2x2 quad passed the test. Xenia decides this with derivatives of
+`passed ? 1 : 0` (`OpDPdxFine`, then `OpDPdyCoarse`). SPIRV-Cross emits plain
+`dfdx` / `dfdy` for every derivative op, and on Apple GPUs these act like
+coarse derivatives. So in a quad where, say, only the bottom-right pixel
+passed, both derivatives are 0, the other three lanes skip, and that pixel
+runs alone. Its texture derivatives (mip selection) are then garbage.
+
+The debug sweep (2026-10-12) showed it: with the whole-quads switch
+(`vulkan_debug_fsi_whole_quads`), the snowflakes became round dots instead of
+framed squares, the hero's face looked right, and the white dashed lines
+along triangle edges were gone. Forcing mip 0 fixed the first two but not
+the lines. Forcing mips 1-5 showed blurrier but sane textures, so the mip
+data itself is fine.
+
+`vulkan_fsi_quad_skip_quad_ops` (SDK patch, on by default, needs a restart)
+makes the decision with two `OpGroupNonUniformQuadSwap`s over the sample mask
+(MSL `quad_shuffle_xor`) when the device reports quad operations in fragment
+shaders (`VkPhysicalDeviceSubgroupProperties`, logged as "subgroup quad
+operations in fragment shaders"). The decision is then exactly the same for
+all four lanes. The derivative path stays as the fallback. Checked offline
+with `tools/sdk_offline/fsitest.cpp` (`ps_color_{deriv,quad}.spv`): spirv-val
+accepts both, and SPIRV-Cross emits `quad_shuffle_xor(value, 1)` and `(value, 2)`. In the
+game (M4, MoltenVK reports subgroup size 32 with quad operations in fragment
+shaders) the snowflakes, the hero and the edges look right, and the
+whole-quads switch changes only 1.9% of pixels.
+
 ### Ported from himdo/rexglue-sdk
 
 Upstream's Windows build moved to the himdo/rexglue-sdk fork. Its fixes

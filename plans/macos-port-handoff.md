@@ -9,33 +9,25 @@ shader checks: `tools/sdk_offline/README.md`.
 
 ## Resume here
 
-The **debug sweep** (key 0, see below) ran once (capture 2026-10-12): all
-10 steps saved. Average brightness per step (0-255) from the log: 00
-baseline 80, 01-06 mip 0-5 forced 76 / 78 / 80 / 77 / 70 / 78, 07 whole FSI
-quads 47, 08 without the shadow shader 78, 09 without the lighting passes 94.
-Two things stand out: whole quads darkens the picture a lot (80 to 47;
-running the FSI shader on helper lanes changes what is written, so a
-helper-lane or quad-coverage difference is in play), and the brightness
-alone does not show which mip level breaks.
+**Fixed (2026-10-12): wrong mip levels and the white edge lines.** Both came
+from the FSI early quad skip. It decided with fine derivatives, which Metal
+computes like coarse ones, so single pixels ran without the rest of their
+quad and got garbage texture derivatives. The SDK now decides with subgroup
+quad operations (`vulkan_fsi_quad_skip_quad_ops`, on by default; details in
+`docs/macos_port.md`, "FSI early quad skip with quad operations"). Verified
+with a sweep: snowflakes are round dots, the hero's face is right, no edge
+lines, and the whole-quads tile now differs from baseline by only 1.9% of
+pixels (before the fix, whole quads changed the picture a lot).
 
-The contact sheet was not made that time: the game's PNG writer wrote the
-deflate block lengths big-endian (fixed, they are little-endian), which
-zlib rejects. `tools/mac_sweep_sheet.py` now reads those older shots too,
-so the sheet can be made from an existing sweep folder without rerunning:
-`python3 tools/mac_sweep_sheet.py out/capture/sweep`.
+**Next: problem 1 below (black shadow areas).** With correct derivatives,
+shadowed areas are now plainly pitch black (a whole building side in the
+last sweep). On the 360 they are soft and lit by ambient light.
 
-Next step (or rerun the sweep):
-
-1. Build (see "Building and running") and run `tools/mac_capture.sh
-   --merge_controllers --vulkan_hoist_shared_memory_uploads`.
-2. Load the save (it starts at the brazier in the snowy town), stand still
-   with the hero and some snow piles in view, press **0**, wait ~30 s, quit.
-3. Look at `out/capture/sweep/sheet.png` (opened automatically) and the
-   per-step difference numbers at the end of `out/capture/summary.txt`.
-   Tile order: 00 baseline, 01-06 mip level 0-5 forced, 07 whole FSI quads,
-   08 without the shadow shader, 09 without the lighting passes.
-4. The first forced mip level that looks broken (squares, garbage, wrong
-   colors) is where to dig (see "Open problems" 1).
+1. Run the capture, stand where a wall or building is in shadow, press **0**.
+2. Compare tile 00 with tile 08 (without the screen-space shadow shader
+   `401A01FD4E5F8757`). If 08 removes the black, the shadow shader's inputs
+   are wrong (shadow maps, scene depth, the comparison); if not, look at the
+   one-channel mask (resolve to `0x12B17000`) that the base pass samples.
 
 ## Building and running (on the Mac)
 
@@ -110,6 +102,7 @@ Keys work only while the game window is focused; every press is logged as
 | 8 / fn+F8 | `vulkan_debug_skip_ps_group` | cycles the `;`-separated groups of `vulkan_debug_skip_ps` (guest pixel shader hashes), skipping one group's draws at a time |
 | 9 / fn+F9 | `vulkan_frame_report` | logs every draw and resolve of the next frame (`[frame]` lines) |
 | 0 / fn+F10 | (app) | debug sweep: `debug_sweep_steps`, `debug_sweep_dir`, `debug_sweep_settle_ms` |
+| - | `vulkan_fsi_quad_skip_quad_ops` | quad-uniform early quad skip with subgroup quad ops (on; needs a restart; off = the old derivative check) |
 | - | `vulkan_snap_vertex_positions` | snap vertex screen positions to 1/16 pixel (did not help, off) |
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS) |
@@ -119,71 +112,15 @@ Keys work only while the game window is focused; every press is logged as
 
 ## Open problems, with evidence
 
-### 1. Smaller mip levels are wrong (strongest lead)
+### (fixed) Wrong mip levels and white edge lines
 
-- Sampling only the base level (`vulkan_debug_base_mip_only`, or one press
-  of key 7 = `vulkan_debug_force_mip` 0) made the snowflakes soft round dots
-  instead of framed squares, made the hero look right (confirmed twice, the
-  second time with key 7 once), and removed some of the white edge lines. So
-  levels >= 1 hold wrong data or get selected wrong. Which level first goes
-  wrong is not known yet (the sweep shows it).
-- Snow: 23 draws per frame of ~4000 **point sprites** each, ps
-  `718C12FF9E1B888B`, additive (src*1 + dst*1), sampling a **64x64 DXT1**
-  texture at `0x14450000` with **packed mips 0-6** (the 360 stores levels
-  of 16x16 and smaller packed together in one tile at the mip address).
-  Without geometry shaders the SDK expands points in the vertex shader
-  (`kPointListAsTriangleStrip`); that path was read and looks correct.
-- Hero: with `[patches] realtime_texture_morphing` (default on) the hero's
-  and dog's textures are rendered and **their mips built on the GPU by
-  resolves** (`plans/hero-dog-realtime-texture-morphing.md`). In the frame:
-  resolves 0-3 to `0x12704000` (256x256), `0x12724000` (128), `0x1272C000`
-  (64), `0x1272E000` (32), format 1_5_5_5, sampled as a 256x256 texture with
-  mips 0-3 by ps `06547412E4B72251`. The Windows notes already mention
-  "small flickering light rectangles" on the dog
-  (`plans/hero-dog-shifty-texture-mipmap.md`), so this may not be Mac-only.
-- The Vulkan load path (`VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl`)
-  is Xenia's: one compute dispatch per level into a scratch buffer, then
-  one `vkCmdCopyBufferToImage` with a region per level; packed levels copy
-  sub-rectangles out of the loaded tail (`GetPackedMipOffset`). Candidates:
-  MoltenVK's copy of small block-compressed regions (2x2 and 1x1 levels of
-  BC formats, offsets inside the tail); stale mip data for textures whose
-  mips are written by resolves (texture invalidation of the mip range); the
-  mip range requested from shared memory.
-- Next: the sweep tells which level breaks. Then dump a texture's levels
-  (e.g. read the host image back per level, or log the load's copy regions
-  for the snowflake texture) and compare with the guest data.
+Both came from the FSI early quad skip (see "Resume here"). The sweep showed
+the mip data is fine (forced mips 1-5 look sane, just blurrier) and that
+running whole quads removed both symptoms. Kept for reference: snowflakes
+are point sprites (ps `718C12FF9E1B888B`, 64x64 DXT1, packed mips 0-6), the
+hero's textures are built by resolves (`plans/hero-dog-realtime-texture-morphing.md`).
 
-### 2. White dashed lines along triangle edges
-
-- They flicker and are visible on snow piles and walls. They are the white
-  of the bare color buffer: skipping the depth prepass turns the whole
-  picture that white. So they are pixels the base pass did not paint.
-- 401 of 404 meshes draw the depth prepass with vs `F160B4DA459A6D40`
-  (position only) and the base/lighting passes with other vertex shaders
-  (e.g. `ECD66A10092E6562`). Depth test is greater-or-equal with write and
-  stencil in all of them.
-- Tried, no visible change: invariant position (on), raster order group fix
-  (now 118/118 FSI shaders have it), snapping vertex positions to 1/16 pixel,
-  turning fast math off (`MVK_CONFIG_FAST_MATH_ENABLED=0`; SPIRV-Cross keeps
-  the translator's no-contraction arithmetic exact anyway).
-- Some lines went away with the base-mip-only switch, which points at edge
-  pixels selecting a wrong (broken) mip level: quads straddling an edge
-  have helper lanes, and the FSI early quad skip uses fine derivatives
-  (`DPdxFine`), which Metal may implement coarsely. Confirmed half of that:
-  SPIRV-Cross (adec7ac, `spirv_msl.cpp` "Derivatives") emits plain `dfdx` /
-  `dfdy` for the fine, coarse and default ops alike, so whether the skip is
-  quad-uniform depends on what Apple's `dfdx` does. If it is coarse, a quad
-  with one passing pixel in the bottom row runs that pixel alone and its
-  texture derivatives (mip selection) are undefined. A derivative-free skip
-  would use quad operations (the SDK's own TODO there: "Use
-  GroupNonUniformQuad operations where supported"). The whole-quads switch
-  (key 6, sweep tile 07) changed the picture a lot (brightness 80 to 47),
-  which a pure skip removal should not do; look at tile 07 before
-  concluding.
-- Guest polygon mode is fill for every draw (frame report `polymode`), so
-  not a wireframe pass.
-
-### 3. Large black shadow areas
+### 1. Large black shadow areas
 
 - Shadows are screen-space: ps `401A01FD4E5F8757` (29-32 draws, depth test
   greater, no write, blend src*1 + dst*(1-srcA) into the lighting buffer)
@@ -202,7 +139,7 @@ Keys work only while the game window is focused; every press is logged as
   (format, filter `filt 001`, integer number format, swizzle) and the depth
   resolve path.
 
-### 4. Performance
+### 2. Performance
 
 - GPU at 100%; ~29 fps at the brazier with upload hoisting; heavy scenes
   were 130-400 ms per frame before the fixes. A Metal System Trace put
@@ -238,6 +175,9 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- FSI early quad skip with subgroup quad operations instead of fine
+  derivatives (`vulkan_fsi_quad_skip_quad_ops`): fixes the wrong mip levels
+  (framed snowflakes, the hero's face) and the white edge lines.
 - Debug tooling: sweep (`620d151`), forced mip level (`b46bb90`), number-key
   aliases (`7a2c33a`), skip groups / whole quads / polymode (`214a560`),
   live switches (`4550081`), rotated-log analysis (`a57d5ce`), timed frame

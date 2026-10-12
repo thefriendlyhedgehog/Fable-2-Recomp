@@ -12,7 +12,9 @@ for every EDRAM shader").
   (`alloc colors; cjmp b0, L3; exec: max oDepth, c0, c0; L3: exece: max oC0,
   c1, c1`), plus the SDK's depth-only FSI shader, each translated with
   `vulkan_fsi_end_interlock_in_function` off and on. Writes
-  `ps_jump_depth_{orig,split}.spv` and `depth_only_{orig,split}.spv`.
+  `ps_jump_depth_{orig,split}.spv` and `depth_only_{orig,split}.spv`. Also a
+  color-only variant (early depth / stencil, so it has the early quad skip)
+  with `vulkan_fsi_quad_skip_quad_ops` off and on: `ps_color_{deriv,quad}.spv`.
 - `vstest.cpp` - a minimal vertex shader (`oPos = c0`), for checking vertex
   shader epilogue changes (vertex position snapping was checked with it).
 - `stubs.cpp` - defines the `dump_shaders` cvar the translator objects
