@@ -315,16 +315,20 @@ still (each press logs `[input] F6: <cvar> = true/false`):
 
 | Key (fn+) | cvar | Effect |
 |---|---|---|
-| F6 | `vulkan_snap_vertex_positions` | Vertex position snapping (on by default on macOS, see below); off brings the edge lines back for comparison. |
-| F7 | `vulkan_debug_base_mip_only` | Samples only the base mip level. Wrong-looking small or distant textures (snowflakes as framed squares) that look right then point at the smaller mips (packed mip tails). |
-| F8 | `vulkan_debug_skip_ps_active` | Skips the draws of the pixel shaders listed in `vulkan_debug_skip_ps` (hex hashes, comma-separated, from the frame report), for example `401A01FD4E5F8757`, which samples both shadow maps and the scene depth. |
+| F6 | `vulkan_debug_fsi_whole_quads` | Runs FSI pixel shaders for every 2x2 quad, also those where no pixel passed the early depth / stencil test. The skip checks the neighbors with derivatives and needs fine ones; artifacts along triangle edges that go away point at the GPU's derivatives. |
+| F7 | `vulkan_debug_base_mip_only` | Samples only the base mip level. Wrong-looking small or distant textures that look right then point at the smaller mips (packed mip tails); edge artifacts that go away point at texture LOD from bad derivatives. |
+| F8 | `vulkan_debug_skip_ps_group` | Cycles through the groups of `vulkan_debug_skip_ps` (guest pixel shader hashes, comma-separated, groups separated by `;`), skipping the draws of one group at a time, then none. Each press logs the group. |
+
+The analyzer lists the key presses the game logged, and the draws whose
+polygons the guest draws as lines or points (`PA_SU_SC_MODE_CNTL` dual
+polygon mode, now in the frame report as `polymode`).
 
 `vulkan_debug_skip_depth_only_draws` (no key) skips the depth prepass, but
 Fable II's prepass also writes the stencil the later passes test, so the
 picture turns white (the bare color buffer) - which is also what the edge
 lines are: pixels the base pass did not draw.
 
-### Vertex position snapping (the white dashed lines along edges)
+### Vertex position snapping (tried for the white edge lines)
 
 Fable II draws the depth prepass with a position-only vertex shader and the
 base and lighting passes (greater-or-equal depth test, stencil test against
@@ -336,7 +340,8 @@ pixels whose centers lie between the two slightly different edges are
 covered by the prepass but not by the base pass, or the other way around,
 and the base pass leaves them unpainted: white dashed lines along triangle
 edges that flicker with the slightest motion. `vulkan_snap_vertex_positions`
-(SDK patch, hot-reloadable, on by default on macOS, fn+F6) snaps the screen
+(SDK patch, hot-reloadable, off by default: it did not remove the lines on
+the Mac, so their cause is elsewhere) snaps the screen
 position of every vertex to the 1/16 pixel grid in the translated vertex
 shader (plus 1/512 pixel so the host's own quantization rounds it the same
 way everywhere), for vertices in front of the viewer and not far outside

@@ -39,6 +39,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <string>
@@ -445,18 +446,19 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     }
     frame_report_down_prev_ = frame_report_down;
 
-    // F6 / F7 / F8 (host) -> flip a GPU switch of the macOS SDK patch, to
-    // compare the picture with and without it while standing still: F6
-    // vertex position snapping (on by default), F7 everything but the base
-    // mip level, F8 the pixel shaders listed in vulkan_debug_skip_ps.
+    // F6 / F7 (host) -> flip a GPU debug switch of the macOS SDK patch, to
+    // compare the picture with and without it while standing still: F6 runs
+    // fragment shader interlock shaders for whole 2x2 quads (no early quad
+    // skip), F7 samples only the base mip level. F8 cycles through the
+    // groups of pixel shaders in vulkan_debug_skip_ps (';'-separated),
+    // skipping the draws of one group at a time, then none.
     static constexpr struct {
       uint16_t vk;
       const char* key;
       const char* cvar;
     } kDebugToggles[] = {
-        {0x75, "F6", "vulkan_snap_vertex_positions"},
+        {0x75, "F6", "vulkan_debug_fsi_whole_quads"},
         {0x76, "F7", "vulkan_debug_base_mip_only"},
-        {0x77, "F8", "vulkan_debug_skip_ps_active"},
     };
     for (size_t i = 0; i < std::size(kDebugToggles); ++i) {
       bool down = focused && KeyDown(kDebugToggles[i].vk);
@@ -471,6 +473,29 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       }
       debug_toggle_down_prev_[i] = down;
     }
+    bool skip_group_down = focused && KeyDown(0x77 /* F8 */);
+    if (skip_group_down && !debug_toggle_down_prev_[2]) {
+      std::string groups = rex::cvar::Query<std::string>("vulkan_debug_skip_ps");
+      int32_t group_count =
+          groups.empty() ? 0 : int32_t(std::count(groups.begin(), groups.end(), ';')) + 1;
+      int32_t group =
+          (rex::cvar::Query<int32_t>("vulkan_debug_skip_ps_group") + 1) % (group_count + 1);
+      if (rex::cvar::SetFlagByName("vulkan_debug_skip_ps_group", std::to_string(group))) {
+        std::string hashes;
+        if (group) {
+          size_t begin = 0;
+          for (int32_t g = 1; g < group; ++g) {
+            begin = groups.find(';', begin) + 1;
+          }
+          hashes = groups.substr(begin, groups.find(';', begin) - begin);
+        }
+        REXSYS_INFO("[input] F8: skipping pixel shader group {} of {}{}{}", group, group_count,
+                    group ? ": " : " (none)", hashes);
+      } else {
+        REXSYS_WARN("[input] F8: vulkan_debug_skip_ps_group is not available in this SDK build");
+      }
+    }
+    debug_toggle_down_prev_[2] = skip_group_down;
 
     // Debug-console toggle key (default F4); see the Windows path above.
     uint16_t unlock_vk = static_cast<uint16_t>(

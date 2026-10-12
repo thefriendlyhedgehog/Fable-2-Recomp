@@ -206,6 +206,13 @@ def analyze_frame(log, top, find=(), report=-1):
     lines = read_log(log)
     print(f"log: {os.path.basename(log)}"
           f"{f' and {len(parts) - 1} rotated parts' if len(parts) > 1 else ''}, {len(lines)} lines")
+    # Debug key presses that reached the game (fn+F6 / F7 / F8 / F9).
+    keys = [line for line in lines if re.search(r"\[input\] F[5-9]", line)]
+    if keys:
+        print(f"  keys that reached the game: {len(keys)}")
+        for line in keys[-12:]:
+            stamp = re.match(r"\[\d{4}-\d\d-\d\d ([\d:.]+)\]", line)
+            print(f"    {stamp.group(1) if stamp else ''} {line.split('[input] ', 1)[1][:150]}")
     begins = [i for i, line in enumerate(lines) if "[frame] begin" in line]
     if not begins:
         f9 = sum(1 for line in lines if "F9: logging" in line)
@@ -280,6 +287,18 @@ def analyze_frame(log, top, find=(), report=-1):
     for r in resolves[:40]:
         print(f"    {r[:200]}")
     draws = parse_draws(frame)
+    wireframe = collections.Counter()
+    for d in draws:
+        mode = d["polymode"]
+        if mode and mode[0] == 1 and d["prim"] not in (1, 2, 3, 12) and (
+                (mode[1] < 2 and "F" not in d["cull"]) or (mode[2] < 2 and "B" not in d["cull"])):
+            wireframe[f"ps {d['ps']} vs {d['vs']} polymode {mode[0]} {mode[1]}{mode[2]} "
+                      f"cull {d['cull']}"] += 1
+    if any(d["polymode"] for d in draws):
+        print(f"  draws whose polygons the guest draws as lines or points: "
+              f"{sum(wireframe.values())}")
+        for k, n in wireframe.most_common(8):
+            print(f"    {n:4d}x {k}")
     analyze_multipass(draws)
     analyze_particles(draws)
     analyze_textures(frame, textures, sampled, top)
@@ -319,12 +338,16 @@ def parse_draws(frame):
         (vs, ps, prim, count, packet, samples, pipeline_samples, pitch, targets, dfmt, dbase,
          ztest, zfunc, zwrite, stencil, atest, afunc, a2c, cull, po_f, po_b, new_pass) = m.groups()
         blends = re.findall(r"rt(\d) fmt (\d+) base \d+ mask ([0-9A-F]) blend ([0-9A-F]{8})", targets)
+        polymode = re.search(r"\| polymode (\d) (\d)(\d)", line)
         draws.append({
             "index": len(draws), "vs": vs, "ps": ps, "prim": int(prim), "count": int(count),
             "msaa": samples, "pitch": pitch, "dbase": dbase, "ztest": ztest == "1",
             "zfunc": zfunc, "zwrite": zwrite == "1", "atest": atest == "1", "afunc": afunc,
             "a2c": a2c == "1", "cull": cull or "none", "poly_offset": "1" in (po_f + po_b),
-            "color": bool(blends), "blends": blends, "textures": textures_of(line)})
+            "color": bool(blends), "blends": blends, "textures": textures_of(line),
+            # Guest PA_SU_SC_MODE_CNTL: poly_mode 1 (dual) with a front or back
+            # type below 2 (0 points, 1 lines) draws polygons as points or lines.
+            "polymode": tuple(int(g) for g in polymode.groups()) if polymode else None})
     return draws
 
 

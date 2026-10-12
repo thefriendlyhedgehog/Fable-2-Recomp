@@ -134,10 +134,10 @@ index 2cf24c4..85ab717 100644
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..5b55e38 100644
+index dce3dbf..98cdc71 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
-@@ -151,6 +151,11 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -151,6 +151,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
      // taking into account the potential relation with occlusion queries (but
      // should be safe at least temporarily).
      kSysFlag_FSIDepthStencilEarlyWrite_Shift,
@@ -146,19 +146,24 @@ index dce3dbf..5b55e38 100644
 +    // shaders computing nearly the same position (a depth prepass and the
 +    // color passes) cover exactly the same pixels, as on the guest.
 +    kSysFlag_SnapVertexPositions_Shift,
++    // Debug: with fragment shader interlock and early depth / stencil, run
++    // the shader for the whole 2x2 quad even if none of its pixels passed
++    // (no early quad skip, which relies on fine derivatives).
++    kSysFlag_FSIExecuteWholeQuads_Shift,
  
      kSysFlag_Count,
  
-@@ -199,6 +204,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -199,6 +208,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSysFlag_FSIDepthWrite = 1u << kSysFlag_FSIDepthWrite_Shift,
      kSysFlag_FSIStencilTest = 1u << kSysFlag_FSIStencilTest_Shift,
      kSysFlag_FSIDepthStencilEarlyWrite = 1u << kSysFlag_FSIDepthStencilEarlyWrite_Shift,
 +    kSysFlag_SnapVertexPositions = 1u << kSysFlag_SnapVertexPositions_Shift,
++    kSysFlag_FSIExecuteWholeQuads = 1u << kSysFlag_FSIExecuteWholeQuads_Shift,
    };
    static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
  
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..2c80626 100644
+index 696ff48..abf4451 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -247,7 +252,7 @@ index 696ff48..2c80626 100644
  
    std::vector<VkSparseMemoryBind> sparse_memory_binds_;
    std::vector<SparseBufferBind> sparse_buffer_binds_;
-@@ -801,6 +840,43 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -801,6 +840,44 @@ class VulkanCommandProcessor : public CommandProcessor {
    // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
    // TODO(Triang3l): Change to a deferred compilation handle.
    VkPipeline current_guest_graphics_pipeline_;
@@ -269,6 +274,7 @@ index 696ff48..2c80626 100644
 +  std::chrono::steady_clock::time_point frame_report_last_auto_;
 +  // vulkan_debug_skip_ps, parsed.
 +  std::string debug_skip_ps_list_;
++  int32_t debug_skip_ps_group_ = 0;
 +  std::vector<uint64_t> debug_skip_ps_hashes_;
 +  bool frame_report_active_ = false;
 +  uint32_t frame_report_draws_ = 0;
@@ -942,7 +948,7 @@ index 8f2fcb0..c7f886a 100644
          return 0;
        }));
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..19984be 100644
+index 1774f97..f9fed1a 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
 @@ -21,11 +21,35 @@
@@ -1089,6 +1095,21 @@ index 1774f97..19984be 100644
    spv::Id kill_vertex = spv::NoResult;
    if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) {
      assert_true(var_main_point_size_edge_flag_kill_vertex_ != spv::NoResult);
+@@ -3080,6 +3198,14 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+                   builder_->createTriOp(spv::OpSelect, type_float_, quad_needs_execution,
+                                         const_float_1_, const_float_0_)),
+               const_float_0_));
++      // Debug switch: run the whole quad anyway.
++      quad_needs_execution = builder_->createBinOp(
++          spv::OpLogicalOr, type_bool_, quad_needs_execution,
++          builder_->createBinOp(
++              spv::OpINotEqual, type_bool_,
++              builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
++                                    builder_->makeUintConstant(kSysFlag_FSIExecuteWholeQuads)),
++              const_uint_0_));
+       spv::Block& main_fsi_early_depth_stencil_execute_quad = builder_->makeNewBlock();
+       main_fsi_early_depth_stencil_execute_quad_merge_ = &builder_->makeNewBlock();
+       builder_->createSelectionMerge(main_fsi_early_depth_stencil_execute_quad_merge_,
 diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
 index 765c141..3dfd11a 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
@@ -1145,7 +1166,7 @@ index 765c141..3dfd11a 100644
  }
  
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..a35b7f8 100644
+index 001f36b..0b8e1ea 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,7 +11,9 @@
@@ -1186,30 +1207,30 @@ index 001f36b..a35b7f8 100644
 +// Debug switches for comparing the picture with and without some draws or
 +// mip levels while the game runs (the Fable II app toggles them on fn+F6 /
 +// fn+F7 / fn+F8 on macOS).
-+#if defined(__APPLE__)
-+#define REX_SNAP_VERTEX_POSITIONS_DEFAULT true
-+#else
-+#define REX_SNAP_VERTEX_POSITIONS_DEFAULT false
-+#endif
-+REXCVAR_DEFINE_BOOL(vulkan_snap_vertex_positions, REX_SNAP_VERTEX_POSITIONS_DEFAULT, "GPU/Vulkan",
++REXCVAR_DEFINE_BOOL(vulkan_snap_vertex_positions, false, "GPU/Vulkan",
 +                    "Snap vertex screen positions to the guest rasterizer's 1/16 pixel grid, so "
 +                    "a depth prepass and color passes drawn with different vertex shaders cover "
 +                    "the same pixels (host GPUs use a finer grid, and the later passes then "
-+                    "miss pixels along triangle edges: white dashed lines). On by default on "
-+                    "macOS.")
++                    "miss pixels along triangle edges).")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-+#undef REX_SNAP_VERTEX_POSITIONS_DEFAULT
++REXCVAR_DEFINE_BOOL(vulkan_debug_fsi_whole_quads, false, "GPU/Vulkan",
++                    "Debug: with fragment shader interlock, run the pixel shader for every 2x2 "
++                    "quad, also those where no pixel passed the early depth / stencil test (the "
++                    "skip relies on fine derivatives, which may be coarse on some GPUs).")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_BOOL(vulkan_debug_skip_depth_only_draws, false, "GPU/Vulkan",
 +                    "Debug: skip draws without a pixel shader and color that write depth "
 +                    "without polygon offset (depth prepasses), to check whether lines along "
 +                    "triangle edges come from the later passes failing their depth test.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_STRING(vulkan_debug_skip_ps, "", "GPU/Vulkan",
-+                      "Debug: guest pixel shader hashes (hex, comma-separated) whose draws are "
-+                      "skipped while vulkan_debug_skip_ps_active is on.")
++                      "Debug: groups of guest pixel shader hashes (hex, comma-separated within a "
++                      "group, groups separated by ';') whose draws can be skipped; "
++                      "vulkan_debug_skip_ps_group selects the group.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-+REXCVAR_DEFINE_BOOL(vulkan_debug_skip_ps_active, false, "GPU/Vulkan",
-+                    "Debug: skip the draws of the pixel shaders in vulkan_debug_skip_ps.")
++REXCVAR_DEFINE_INT32(vulkan_debug_skip_ps_group, 0, "GPU/Vulkan",
++                     "Debug: skip the draws of group N (1 = the first) of vulkan_debug_skip_ps; "
++                     "0 = none.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
 +REXCVAR_DEFINE_BOOL(vulkan_long_frame_log, false, "GPU/Vulkan",
@@ -1311,7 +1332,7 @@ index 001f36b..a35b7f8 100644
      return IssueCopy();
    }
  
-@@ -3681,6 +3775,39 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3681,6 +3775,49 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
  
@@ -1325,20 +1346,30 @@ index 001f36b..a35b7f8 100644
 +      return true;
 +    }
 +  }
-+  if (REXCVAR_GET(vulkan_debug_skip_ps_active) && pixel_shader) {
++  int32_t debug_skip_ps_group = REXCVAR_GET(vulkan_debug_skip_ps_group);
++  if (debug_skip_ps_group > 0 && pixel_shader) {
 +    const std::string& skip_list = REXCVAR_GET(vulkan_debug_skip_ps);
-+    if (skip_list != debug_skip_ps_list_) {
++    if (skip_list != debug_skip_ps_list_ || debug_skip_ps_group != debug_skip_ps_group_) {
 +      debug_skip_ps_list_ = skip_list;
++      debug_skip_ps_group_ = debug_skip_ps_group;
 +      debug_skip_ps_hashes_.clear();
++      int32_t group = 1;
 +      const char* p = skip_list.c_str();
 +      while (*p) {
++        if (*p == ';') {
++          ++group;
++          ++p;
++          continue;
++        }
 +        char* end;
 +        uint64_t hash = std::strtoull(p, &end, 16);
 +        if (end == p) {
 +          ++p;
 +          continue;
 +        }
-+        debug_skip_ps_hashes_.push_back(hash);
++        if (group == debug_skip_ps_group) {
++          debug_skip_ps_hashes_.push_back(hash);
++        }
 +        p = end;
 +      }
 +    }
@@ -1351,7 +1382,7 @@ index 001f36b..a35b7f8 100644
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
        pixel_shader ? (vertex_shader->writes_interpolators() &
-@@ -3835,7 +3962,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,7 +3972,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -1363,7 +1394,7 @@ index 001f36b..a35b7f8 100644
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
-@@ -3849,18 +3979,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3849,18 +3989,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // textures.
    VkPipeline pipeline;
    void* pipeline_handle = nullptr;
@@ -1410,7 +1441,7 @@ index 001f36b..a35b7f8 100644
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -3933,7 +4085,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3933,7 +4095,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
  
    // Update dynamic graphics pipeline state.
@@ -1419,7 +1450,7 @@ index 001f36b..a35b7f8 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -4014,7 +4166,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4014,7 +4176,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
          continue;
        }
@@ -1428,7 +1459,7 @@ index 001f36b..a35b7f8 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4032,7 +4184,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4194,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -1437,7 +1468,7 @@ index 001f36b..a35b7f8 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4196,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4206,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -1446,7 +1477,7 @@ index 001f36b..a35b7f8 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4072,6 +4224,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4072,6 +4234,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
  
        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1454,7 +1485,7 @@ index 001f36b..a35b7f8 100644
        SubmitBarriers(true);
  
        VkBufferCopy guest_dma_index_copy_region = {};
-@@ -4111,9 +4264,37 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,9 +4274,37 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -1494,7 +1525,7 @@ index 001f36b..a35b7f8 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4206,6 +4387,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
+@@ -4206,6 +4397,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1502,7 +1533,7 @@ index 001f36b..a35b7f8 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4331,6 +4513,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4331,6 +4523,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1510,7 +1541,7 @@ index 001f36b..a35b7f8 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4350,12 +4533,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +4543,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -1540,7 +1571,7 @@ index 001f36b..a35b7f8 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,22 +4580,80 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +4590,80 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -1623,7 +1654,7 @@ index 001f36b..a35b7f8 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +4672,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +4682,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -1631,7 +1662,7 @@ index 001f36b..a35b7f8 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4579,6 +4831,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4579,6 +4841,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
  
      texture_cache_->UseScaledResolveBufferForRead();
@@ -1639,7 +1670,7 @@ index 001f36b..a35b7f8 100644
      SubmitBarriers(true);
  
      VkBufferMemoryBarrier pre_barrier = {};
-@@ -4635,6 +4888,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4635,6 +4898,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                               readback.buffers[write_index], 1, &readback_region);
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1647,7 +1678,7 @@ index 001f36b..a35b7f8 100644
      SubmitBarriers(true);
  
      VkBufferCopy readback_region = {};
-@@ -4849,6 +5103,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4849,6 +5113,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -1655,7 +1686,7 @@ index 001f36b..a35b7f8 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4874,6 +5129,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -4874,6 +5139,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
      return false;
    }
  
@@ -1663,7 +1694,7 @@ index 001f36b..a35b7f8 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4944,6 +5200,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5210,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -1673,7 +1704,7 @@ index 001f36b..a35b7f8 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +5229,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +5239,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -1689,7 +1720,7 @@ index 001f36b..a35b7f8 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5111,7 +5373,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5383,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -1701,7 +1732,7 @@ index 001f36b..a35b7f8 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5136,6 +5402,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +5412,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -1717,7 +1748,7 @@ index 001f36b..a35b7f8 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5165,6 +5440,118 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +5450,118 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -1836,7 +1867,7 @@ index 001f36b..a35b7f8 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +5617,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +5627,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -1844,7 +1875,7 @@ index 001f36b..a35b7f8 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5308,9 +5696,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5308,9 +5706,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -1861,7 +1892,7 @@ index 001f36b..a35b7f8 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5368,6 +5762,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5368,6 +5772,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        sparse_memory_binds_.clear();
      }
  
@@ -1870,7 +1901,7 @@ index 001f36b..a35b7f8 100644
      SubmitBarriers(true);
  
      assert_false(command_buffers_writable_.empty());
-@@ -5385,6 +5781,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,6 +5791,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -1896,7 +1927,7 @@ index 001f36b..a35b7f8 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5652,9 +6067,103 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5652,9 +6077,105 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
    swap_fxaa_source_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
  }
  
@@ -1976,7 +2007,7 @@ index 001f36b..a35b7f8 100644
 +  REXGPU_INFO(
 +      "[frame] draw {}: vs {:016X} ps {:016X} prim {} count {} ({}) | msaa {}x (pipeline {}x) "
 +      "pitch {} |{} depth fmt {} base {} test {} func {} write {} stencil {} | alpha test {} "
-+      "func {} to-coverage {} | cull {}{} poly offset {}{}{} | tex{}",
++      "func {} to-coverage {} | cull {}{} poly offset {}{}{} | polymode {} {}{} | tex{}",
 +      frame_report_draws_++, vertex_shader ? vertex_shader->ucode_data_hash() : 0,
 +      pixel_shader ? pixel_shader->ucode_data_hash() : 0, uint32_t(prim_type), index_count,
 +      draw_packet::is_draw_indx_2 ? "DRAW_INDX_2" : "DRAW_INDX",
@@ -1990,6 +2021,8 @@ index 001f36b..a35b7f8 100644
 +      mode_control.cull_front ? "F" : "", mode_control.cull_back ? "B" : "",
 +      uint32_t(mode_control.poly_offset_front_enable),
 +      uint32_t(mode_control.poly_offset_back_enable), pass_restarted ? " | new pass" : "",
++      uint32_t(mode_control.poly_mode), uint32_t(mode_control.polymode_front_ptype),
++      uint32_t(mode_control.polymode_back_ptype),
 +      textures.empty() ? std::string(" none") : textures);
 +}
 +
@@ -2001,7 +2034,7 @@ index 001f36b..a35b7f8 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5718,6 +6227,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +6239,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
@@ -2013,17 +2046,20 @@ index 001f36b..a35b7f8 100644
      // std::memcmp instead of != so in case of NaN, every draw won't be
      // invalidating it.
      dynamic_depth_bias_update_needed_ |=
-@@ -5990,6 +6504,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -5990,6 +6516,12 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (pa_cl_vte_cntl.vtx_w0_fmt) {
      flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
    }
 +  if (REXCVAR_GET(vulkan_snap_vertex_positions)) {
 +    flags |= SpirvShaderTranslator::kSysFlag_SnapVertexPositions;
 +  }
++  if (REXCVAR_GET(vulkan_debug_fsi_whole_quads)) {
++    flags |= SpirvShaderTranslator::kSysFlag_FSIExecuteWholeQuads;
++  }
    // Whether the primitive is polygonal, and gl_FrontFacing matters.
    if (primitive_polygonal) {
      flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
-@@ -6146,9 +6663,13 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6146,9 +6678,13 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
      system_constants_.point_vertex_diameter_max = point_vertex_diameter_max;
      system_constants_.point_constant_diameter[0] = point_constant_diameter_x;
      system_constants_.point_constant_diameter[1] = point_constant_diameter_y;
