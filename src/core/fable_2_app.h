@@ -40,6 +40,7 @@
 // Re-enable to re-measure the frame pacing:
 // #include "fps_probe.h"
 #include "keyboard_gamepad.h"
+#include "fable2_debug_sweep.h"
 #ifdef FABLE2_REMOTE_CONTROL
 #include "remote_control_server.h"
 #include "remote_gamepad_driver.h"
@@ -439,6 +440,12 @@ class Fable2App : public rex::ReXApp {
     // GPU-PLUGIN cvar, so it is seeded in OnPostSetup() (after the plugin is
     // loaded) rather than here - see plans/hero-dog-texture-readback.md.
 
+    // The debug sweep (0 key / fn+F10 on macOS) saves screenshots read from
+    // the window's presenter, queried when the sweep runs (the presenter may
+    // not exist yet here).
+    fable2::debugsweep::Instance().SetPresenterProvider(
+        [this]() -> rex::ui::Presenter* { return GetWindowPresenter(window()); });
+
 #ifdef FABLE2_REMOTE_CONTROL
     // Start the remote control server (AI input channel; debug-only, no
     // config knobs - always on with ControlServer::Config defaults: 127.0.0.1:
@@ -471,14 +478,16 @@ class Fable2App : public rex::ReXApp {
 #endif  // FABLE2_REMOTE_CONTROL
   }
 
-#ifdef FABLE2_REMOTE_CONTROL
-  // Stop the state classifier thread, then the remote control server threads,
-  // before anything else tears down.
+  // Stop the debug sweep (it reads the presenter) and, in debug builds, the
+  // state classifier thread and the remote control server threads, before
+  // anything else tears down.
   void OnShutdown() override {
+    fable2::debugsweep::Instance().Stop();
+#ifdef FABLE2_REMOTE_CONTROL
     fable2::stateprobe::stop();
     remote_server_.Stop();
-  }
 #endif  // FABLE2_REMOTE_CONTROL
+  }
   // Apply the game patches (see src/core/fable2_patches.h) once the SDK has
   // decrypted default.xex into the guest arena, before the module launches.
   // Each patch is switched on by a [patches] key in fable2_config.toml

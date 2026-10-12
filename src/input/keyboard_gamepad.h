@@ -70,6 +70,8 @@
 #include <rex/ui/window.h>
 #include <rex/ui/window_listener.h>
 #include <rex/ui/windowed_app_context.h>
+
+#include "fable2_debug_sweep.h"
 #endif
 
 // Declared here, defined in main.cpp (REXCVAR_DEFINE_* must live in a .cpp).
@@ -517,6 +519,15 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     }
     debug_toggle_down_prev_[2] = skip_group_down;
 
+    // 0 / fn+F10 (host) -> debug sweep: step through debug_sweep_steps and
+    // save a screenshot of each (src/diagnostics/fable2_debug_sweep.h).
+    bool sweep_down = focused && (KeyDown(0x79 /* F10 */) || KeyDown(0x30 /* 0 */));
+    if (sweep_down && !debug_toggle_down_prev_[3]) {
+      REXSYS_INFO("[input] 0: debug sweep");
+      fable2::debugsweep::Instance().Start();
+    }
+    debug_toggle_down_prev_[3] = sweep_down;
+
     // Debug-console toggle key (default F4); see the Windows path above.
     uint16_t unlock_vk = static_cast<uint16_t>(
         rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
@@ -634,7 +645,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
   [[maybe_unused]] bool frame_report_down_prev_ = false;  // F9 state (non-Windows)
   [[maybe_unused]] int32_t frame_report_requests_ = 0;  // F9 presses (vulkan_frame_report)
-  [[maybe_unused]] bool debug_toggle_down_prev_[3] = {};  // F6-F8 state (non-Windows)
+  [[maybe_unused]] bool debug_toggle_down_prev_[4] = {};  // F6-F8, F10 state (non-Windows)
 #ifndef _WIN32
   // Held-key table indexed by rex::ui::VirtualKey (Win32 VK numbering, so the
   // cvar mapping means the same thing on every platform). Written on the UI

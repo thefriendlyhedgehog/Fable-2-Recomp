@@ -56,6 +56,29 @@ REXCVAR_DEFINE_INT32(mouse_look_scale, 256, "Input",
                      "mouse movement (larger = more sensitive). Default comes "
                      "from fable2_config.toml [input] mouse_look_scale.")
     .range(1, 4096);
+// Debug sweep (src/diagnostics/fable2_debug_sweep.h): the 0 key (fn+F10) on
+// macOS steps through these settings and saves a screenshot of each.
+REXCVAR_DEFINE_STRING(
+    debug_sweep_steps,
+    "baseline:vulkan_debug_force_mip=-1,vulkan_debug_fsi_whole_quads=false,"
+    "vulkan_debug_skip_ps_group=0,vulkan_snap_vertex_positions=false;"
+    "mip0:vulkan_debug_force_mip=0;mip1:vulkan_debug_force_mip=1;"
+    "mip2:vulkan_debug_force_mip=2;mip3:vulkan_debug_force_mip=3;"
+    "mip4:vulkan_debug_force_mip=4;mip5:vulkan_debug_force_mip=5;"
+    "whole_quads:vulkan_debug_force_mip=-1,vulkan_debug_fsi_whole_quads=true;"
+    "no_shadow_shader:vulkan_debug_fsi_whole_quads=false,"
+    "vulkan_debug_skip_ps=401A01FD4E5F8757,vulkan_debug_skip_ps_group=1;"
+    "no_lighting:vulkan_debug_skip_ps=9C2144E42E95A76F+4755A2E4A05BA678+578342593A37DD35+"
+    "04F23292B2F44077+AF1E16EE57E4BB06+45243B758F9272AB",
+    "Debug",
+    "Debug sweep steps (0 key / fn+F10 on macOS): label:cvar=value,cvar=value;... Each "
+    "step applies on top of the previous one, then a screenshot is saved; afterwards "
+    "the touched cvars get their old values back.");
+REXCVAR_DEFINE_STRING(debug_sweep_dir, "debug_sweep", "Debug",
+                      "Where the debug sweep saves its screenshots (NN_label.png).");
+REXCVAR_DEFINE_INT32(debug_sweep_settle_ms, 1500, "Debug",
+                     "Debug sweep: time between applying a step and its screenshot.")
+    .range(100, 20000);
 REXCVAR_DEFINE_BOOL(merge_controllers, false, "Input",
                     "Every connected controller drives player 1 (macOS/Linux), for a "
                     "controller that shows up as two devices, such as the Steam "

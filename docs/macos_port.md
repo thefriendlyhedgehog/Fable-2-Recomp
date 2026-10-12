@@ -321,6 +321,19 @@ still (each press logs `[input] F6: <cvar> = true/false`):
 | F7 | `vulkan_debug_force_mip` | Cycles the mip level every texture is sampled at: off, 0, 1, ... 6, off (`vulkan_debug_base_mip_only` is level 0 only). With level 0 only, the snowflakes (64x64 DXT1 point sprites) and the hero looked right and some edge lines went away, so smaller levels are loaded or selected wrong; forcing each level shows which. |
 | F8 | `vulkan_debug_skip_ps_group` | Cycles through the groups of `vulkan_debug_skip_ps` (guest pixel shader hashes, comma-separated, groups separated by `;`), skipping the draws of one group at a time, then none. Each press logs the group. |
 
+**Debug sweep (key 0 or fn+F10).** Judging a setting live is hard, so the
+sweep steps through `debug_sweep_steps` (app cvar:
+`label:cvar=value,...;label:...`, each step applied on top of the previous;
+by default baseline, mip levels 0 to 5, whole quads, without the shadow
+shader, without the lighting passes), waits `debug_sweep_settle_ms` (1500)
+after each step, saves the game's own frame as `NN_label.png` in
+`debug_sweep_dir` (the capture script uses `out/capture/sweep`) and then
+restores every cvar it touched. It uses the same guest output readback as
+the debug-build remote control `screenshot` command, without opening any
+port. `tools/mac_sweep_sheet.py` (run by the capture script, which opens the
+result) tiles them into one numbered `sheet.png` at half size and prints how
+much each step differs from the baseline.
+
 The analyzer lists the key presses the game logged, and the draws whose
 polygons the guest draws as lines or points (`PA_SU_SC_MODE_CNTL` dual
 polygon mode, now in the frame report as `polymode`).

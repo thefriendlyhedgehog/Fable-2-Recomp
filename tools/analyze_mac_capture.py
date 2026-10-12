@@ -207,12 +207,13 @@ def analyze_frame(log, top, find=(), report=-1):
     print(f"log: {os.path.basename(log)}"
           f"{f' and {len(parts) - 1} rotated parts' if len(parts) > 1 else ''}, {len(lines)} lines")
     # Debug key presses that reached the game (fn+F6 / F7 / F8 / F9).
-    keys = [line for line in lines if re.search(r"\[input\] F[5-9]", line)]
+    keys = [line for line in lines if re.search(r"\[input\] (F\d+|\d):|\[sweep\]", line)]
     if keys:
         print(f"  keys that reached the game: {len(keys)}")
-        for line in keys[-12:]:
+        for line in keys[-24:]:
             stamp = re.match(r"\[\d{4}-\d\d-\d\d ([\d:.]+)\]", line)
-            print(f"    {stamp.group(1) if stamp else ''} {line.split('[input] ', 1)[1][:150]}")
+            text = line.split("[input] ", 1)[1] if "[input] " in line else "[sweep]" + line.split("[sweep]", 1)[1]
+            print(f"    {stamp.group(1) if stamp else ''} {text[:150]}")
     begins = [i for i, line in enumerate(lines) if "[frame] begin" in line]
     if not begins:
         f9 = sum(1 for line in lines if "F9: logging" in line)

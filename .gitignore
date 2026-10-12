@@ -64,6 +64,7 @@ __pycache__/
 !tools/summarize_sample.py
 !tools/summarize_gputrace.py
 !tools/analyze_mac_capture.py
+!tools/mac_sweep_sheet.py
 !tools/mac_capture.sh
 
 # --- Fetched/external toolchain deps (created by tools/setup_sdk*.cmd). -------
