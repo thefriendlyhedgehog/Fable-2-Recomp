@@ -108,7 +108,19 @@ def summarize(name, columns, rows, top):
               + ", ".join(m for m, _ in columns) + ")")
         return
     total = sum(to_ns(r[duration_index][1]) for r in rows if duration_index < len(r))
-    print(f"    total GPU time {total / 1e6:.1f} ms")
+    print(f"    total GPU time {total / 1e6:.1f} ms (overlapping channels and lanes add up)")
+    # Per command buffer (MoltenVK submits about one per frame here).
+    for i, (mnemonic, _) in enumerate(columns):
+        if mnemonic in ("cmdbuffer-id", "command-buffer-id"):
+            per_cb = defaultdict(int)
+            for r in rows:
+                if i < len(r) and duration_index < len(r) and r[i][0]:
+                    per_cb[r[i][0]] += to_ns(r[duration_index][1])
+            if per_cb:
+                values = sorted(per_cb.values())
+                print(f"    {len(values)} command buffers: median {values[len(values) // 2] / 1e6:.1f} ms, "
+                      f"max {values[-1] / 1e6:.1f} ms of GPU time each")
+            break
     for i, (mnemonic, etype) in enumerate(columns):
         if i == duration_index or etype in NON_GROUP_TYPES:
             continue
@@ -121,6 +133,8 @@ def summarize(name, columns, rows, top):
             groups[key][1] += 1
         if len(groups) <= 1 and mnemonic not in ("channel", "channel-name"):
             continue  # one value for every row: nothing to compare
+        if len(groups) > max(1000, len(rows) // 2):
+            continue  # (nearly) unique per interval: ids and labels, noise
         print(f"  by {mnemonic} ({len(groups)} values):")
         for key, (ns, count) in sorted(groups.items(), key=lambda kv: kv[1][0], reverse=True)[:top]:
             pct = 100.0 * ns / total if total else 0.0
