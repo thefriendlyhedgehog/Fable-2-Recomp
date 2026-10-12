@@ -1,13 +1,11 @@
 # macOS port
 
-**Status:** builds and runs on an M4 Mac mini (macOS, Xcode beta toolchain,
-SDK v0.10.0 built from source with `thirdparty/sdk_mac_vulkan_fixes.patch`).
-With FSI render targets the game renders and plays; normal scenes run at the
-game's 30 fps cap. Open problems: some scenes (near fire, in snow) turn
-GPU-bound at about 300 ms per frame, thin lines along some triangle edges
-(rocks, snowflake quads), snowflakes drawn as framed squares, and an
-occasional black screen at launch. Current state, open problems with the
-evidence so far, and next steps: `plans/macos-port-handoff.md`.
+**Status:** builds and runs on an M4 Mac mini (macOS, full Xcode, SDK
+v0.10.0 built from source with `thirdparty/sdk_mac_vulkan_fixes.patch`).
+With FSI render targets the game renders and plays. Current state, open
+problems with the evidence so far, and next steps:
+`plans/macos-port-handoff.md` (this document explains why each change
+exists).
 
 ## Prior work
 
@@ -36,9 +34,14 @@ evidence so far, and next steps: `plans/macos-port-handoff.md`.
 
 ## Building on a Mac
 
-Requirements: macOS 13.3+ (the prebuilt SDK's minimum), Xcode 15+ command
-line tools, CMake >= 3.25, Ninja, and your own copy of the game content (see
-the README).
+The port uses the SDK built from source with the Mac patch
+(`tools/build_sdk_mac.sh && ./build.sh -release fable_2`, see "Building the
+SDK from source on macOS"); that needs a full Xcode install (it builds
+MoltenVK with xcodebuild). The prebuilt-SDK build below is the fallback: it
+lacks the Mac patch (render fixes, debug switches). Requirements for it:
+macOS 13.3+ (the prebuilt SDK's minimum), Xcode 15+ command line tools,
+CMake >= 3.25, Ninja, and your own copy of the game content (see the
+README).
 
 ```sh
 xcode-select --install          # clang, if not already installed
@@ -318,8 +321,8 @@ still (each press logs `[input] F6: <cvar> = true/false`):
 
 | Key (fn+) | cvar | Effect |
 |---|---|---|
-| F6 | `vulkan_debug_fsi_whole_quads` | Runs FSI pixel shaders for every 2x2 quad, also those where no pixel passed the early depth / stencil test. The skip checks the neighbors with derivatives and needs fine ones; artifacts along triangle edges that go away point at the GPU's derivatives. |
-| F7 | `vulkan_debug_force_mip` | Cycles the mip level every texture is sampled at: off, 0, 1, ... 6, off (`vulkan_debug_base_mip_only` is level 0 only). With level 0 only, the snowflakes (64x64 DXT1 point sprites) and the hero looked right and some edge lines went away, so smaller levels are loaded or selected wrong; forcing each level shows which. |
+| F6 | `vulkan_debug_fsi_whole_quads` | Runs FSI pixel shaders for every 2x2 quad, also those where no pixel passed the early depth / stencil test. The skip now uses subgroup quad operations (`vulkan_fsi_quad_skip_quad_ops`); with the old derivative check, this switch removed the edge lines and wrong mips, which is how that bug was found. |
+| F7 | `vulkan_debug_force_mip` | Cycles the mip level every texture is sampled at: off, 0, 1, ... 6, off (`vulkan_debug_base_mip_only` is level 0 only). Forcing each level showed the mip data is fine; the wrong levels came from the quad skip's derivatives (see "FSI early quad skip with quad operations"). |
 | F8 | `vulkan_debug_skip_ps_group` | Cycles through the groups of `vulkan_debug_skip_ps` (guest pixel shader hashes, comma-separated, groups separated by `;`), skipping the draws of one group at a time, then none. Each press logs the group. |
 
 **Debug sweep (key 0 or fn+F10).** Judging a setting live is hard, so the
@@ -481,9 +484,9 @@ What the Xenos emulation needs from the GPU and what Metal/MoltenVK gives it:
 
 Upstream's own Vulkan status: the Windows build ships D3D12 only; the
 Vulkan plugin is "Stage 2, in progress", and the local SDK patch still
-carries "TEMPDIAG" code from a Vulkan black-screen diagnosis. So this SDK's
-Vulkan backend has not been shown to render Fable 2 correctly on any
-platform by this project. Oery/fable-ii-recomp (Linux, therefore Vulkan on a
+carries "TEMPDIAG" code from a Vulkan black-screen diagnosis. (When this
+review was written, this SDK's Vulkan backend had not been shown to render
+Fable 2 correctly here; it does now, after the MSAA fix above.) Oery/fable-ii-recomp (Linux, therefore Vulkan on a
 native driver) reports the game playable, so the backend can render it.
 
 **Verdict: stay on Vulkan through MoltenVK.** Every hard requirement of the
@@ -498,8 +501,9 @@ MoltenVK. Metal-native EDRAM emulation (tile shaders / imageblocks) is a
 research project for the SDK, not a port task. Fixes belong in the SDK's
 Vulkan backend, built from source on macOS, where they also help Linux.
 
-What that leaves for the corruption: either a generic bug in this backend
-(never validated for this game) or a MoltenVK translation issue. Neither is
+What that left for the corruption at the time (since fixed: MSAA sample
+counts, raster order groups, the quad skip): either a generic bug in this
+backend or a MoltenVK translation issue. Neither is
 found by flag-flipping; the tools that find them, all usable with the
 prebuilt SDK:
 
@@ -598,14 +602,9 @@ grep -rhoE "// vpku[hw]us(128)? v[0-9]+, ?v[0-9]+, ?v[0-9]+" generated | awk -F'
   prebuilt one has no `readback_resolve_force_addresses`, and the app logs
   "cvar readback_resolve_force_addresses rejected" if
   `hero_dog_texture_readback` is turned on with it).
-- **Lines along triangle edges** (rocks, snowflake quad diagonals): still
-  there with `game_msaa = 0` and with MoltenVK fast math off (which also made
-  the GPU the bottleneck everywhere), so neither MSAA coverage nor fast math.
-  The `fbo` path is the next comparison.
-- **Snow:** snowflakes render as small framed squares (point sprites
-  expanded in the vertex shader, since Apple GPUs have no geometry shaders).
-  Not diagnosed yet.
-- **Keys:** the default `keyboard_gamepad_map` puts the d-pad on F1-F4, while
-  the SDK binds F3 (debug overlay) and F4 (settings overlay, mouse unlock).
-  Mac keyboards also need fn for F-keys unless "Use F1, F2, etc. keys as
-  standard function keys" is on.
+- **Flickering dark shadow areas:** open; evidence and candidates in
+  `plans/macos-port-handoff.md`.
+- **Keys:** the SDK binds F3 (debug overlay) and F4 (settings overlay, mouse
+  unlock); the default `keyboard_gamepad_map` puts the d-pad on the arrow
+  keys. Mac keyboards need fn for F-keys unless "Use F1, F2, etc. keys as
+  standard function keys" is on, so the debug keys are also on 6-9 and 0.

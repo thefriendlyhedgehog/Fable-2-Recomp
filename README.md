@@ -479,9 +479,12 @@ for code generation but is never published with this repository.
 **macOS / Linux:** `./build.sh` takes the same arguments as `build.cmd`
 (`./build.sh -release fable_2`) and fetches the matching prebuilt SDK
 (`mac-arm64`, `mac-amd64` or `linux-amd64`) via `tools/setup_sdk.sh`; stage
-content with `tools/stage_content.sh`. The macOS port is untested on hardware
-so far — see [docs/macos_port.md](docs/macos_port.md) for status and known
-graphics issues.
+content with `tools/stage_content.sh`. On macOS the port runs on Apple
+Silicon with the SDK built from source and the Mac patch
+(`tools/build_sdk_mac.sh && ./build.sh -release fable_2`, needs full Xcode);
+see [docs/macos_port.md](docs/macos_port.md) and
+[plans/macos-port-handoff.md](plans/macos-port-handoff.md) for status and
+open graphics issues.
 
 Manual/advanced setup (normally not needed):
 

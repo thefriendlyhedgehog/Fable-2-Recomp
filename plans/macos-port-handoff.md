@@ -19,41 +19,41 @@ with a sweep: snowflakes are round dots, the hero's face is right, no edge
 lines, and the whole-quads tile now differs from baseline by only 1.9% of
 pixels (before the fix, whole quads changed the picture a lot).
 
-**Black shadow areas: not narrowed down yet (2026-10-12).** The mask
-resolve at `0x12B17000` is a plausible sun-shadow mask (white lit, black
-shadowed); snow in its shadow still gets ambient light. Both shadow maps (t6
-`0x12BE1000`, t7 `0x12FE1000`, a near and a wider cascade) look sane in the
-dumps. A dark band with stepped edges on the ground next to the glowing trail
-went away without ps `401A01FD4E5F8757` (a general material / lighting
-shader, also the hero) in one sweep, but was there without it in the next,
-so that is not established; its outline looks like the shadow of the roof on
-the right. **It flickers** (the user confirms; flicker test 2026-10-12: 16 baseline
-shots 250 ms apart with `--debug_sweep_steps="f00;f01;...;f15"
---debug_sweep_settle_ms=250`, standing still; shots 12 and 15 have the dark
-area, the others not, 6% of pixels vs. under 2% for snowflakes). So some
-input of the ground / lighting draws changes between frames. Candidates:
-upload hoisting (`vulkan_hoist_shared_memory_uploads`, always on in these
-runs), a resolve sampled before it is complete or a stale copy (mask
-`0x12B17000`, shadow maps), the readback of a resolve.
+**Open: black / dark shadow areas that flicker.** What is known:
 
-**Older note: problem 1 below (black shadow areas).** With correct derivatives,
-shadowed areas are now plainly pitch black (a whole building side in the
-last sweep). On the 360 they are soft and lit by ambient light.
+- The mask resolve at `0x12B17000` (one channel, 1120x720, sampled as `t8`
+  by ~1100-1600 later draws) is a plausible sun-shadow mask: white lit,
+  black shadowed. Snow in its shadow still gets ambient light, so the mask
+  alone does not make areas black.
+- Both shadow maps (t6 `0x12BE1000`, t7 `0x12FE1000`: a near and a wider
+  cascade, 1024x1024 depth) look sane in the dumps.
+- A dark area with stepped edges on the ground next to the glowing trail
+  (its outline looks like the shadow of the roof on the right) **flickers**:
+  the user confirms, and a flicker test caught it (16 baseline shots 250 ms
+  apart while standing still, `--debug_sweep_steps="f00;f01;...;f15"
+  --debug_sweep_settle_ms=250`; shots 12 and 15 have it, the others not: 6%
+  of pixels vs. under 2% for snowflakes). So some input of the ground /
+  lighting draws differs between frames.
+- Skipping ps `401A01FD4E5F8757` (sweep tile 08) removed the dark area in
+  one sweep but not in the next; with the flicker that test says nothing.
+  That shader is a general material / lighting shader (base pass fmt 3,
+  lighting fmt 12, also the hero), not only screen-space shadows.
 
-In the last sweep, tile 08 (without the screen-space shadow shader
-`401A01FD4E5F8757`) still had the black building, so the black likely comes
-from elsewhere: the one-channel mask (resolve to `0x12B17000`) that ~1100
-base-pass and lighting draws sample, or the base pass's own lighting.
+Candidates, roughly by likelihood:
+1. Upload hoisting (`vulkan_hoist_shared_memory_uploads`, opt-in, on in
+   every run so far): a draw could see data uploaded for a later point in
+   the frame, or miss data. Next: the flicker test without it.
+2. A resolve sampled before it is complete, or a stale copy in the texture
+   cache (mask, shadow maps, scene depth). Next: dump the mask and shadow
+   maps over several consecutive frames and see which one changes.
+3. Resolve readback is unlikely: memexport readback is off on macOS and the
+   only forced resolve readback (`0x12704000`) needs `[patches]
+   hero_dog_texture_readback`, which is off. (Background:
+   `docs/macos_port.md`, "Readback defaults on macOS".)
 
-1. Run the capture, stand where a wall or building is in shadow, wait for a
-   frame report (every 20 s, or press 9), press **0**, quit.
-2. `tools/mac_capture.sh` dumps the mask, the scene depth (`0x1A02A000`) and
-   the first shadow map (`0x12BE1000`) at every frame report
-   (`vulkan_debug_dump_resolves`), to `out/capture/dumps/*.png`, with value
-   statistics at the end of `out/capture/summary.txt`
-   (`tools/mac_resolve_dumps.py`). Compare the mask with the screenshot: if
-   it is black (0) where the picture is black, find what draws it (the draws
-   before resolve 24 in the frame report); if not, the base pass is next.
+Resolve numbers differ between frames (the mask was resolve 15, 18, 23 or
+24 in different reports); the addresses stay the same, so refer to
+resolves by address.
 
 ## Building and running (on the Mac)
 
@@ -79,8 +79,8 @@ Repo: `/Volumes/MacMiniExternal/Games/fable2/Fable-2-Recomp`. Game content
 - Metal System Trace summary: `tools/summarize_gputrace.py <trace>` (see its
   docstring for the `xctrace record` line).
 
-The user's settings: `fable_2.toml` sets `render_target_path_vulkan =
-"fsi"`; `fable2_config.toml` has `[patches] game_msaa = 0` (forces the
+The user's settings (`render_target_path_vulkan = "fsi"` is already the
+app's default on macOS): `fable2_config.toml` has `[patches] game_msaa = 0` (forces the
 game's main scene to 1x MSAA; the game's own mode is 4x) and
 `merge_controllers` is passed on the command line (a Steam Controller shows up
 twice through SDL; without it the stick does not reach player 1).
@@ -89,7 +89,7 @@ twice through SDL; without it the stick does not reach player 1).
 
 The SDK tree is `thirdparty/rexglue-sdk-src` (v0.10.0 + the patch applied as
 working-tree changes; gitignored). The patch is
-`thirdparty/sdk_mac_vulkan_fixes.patch` (19 files, all under `src/` and
+`thirdparty/sdk_mac_vulkan_fixes.patch` (21 files, all under `src/` and
 `include/`).
 
 1. Edit files under `thirdparty/rexglue-sdk-src/src` or `/include`.
@@ -127,23 +127,23 @@ Done this way, the user only loads the save; Claude sends `report`, then
 `sweep`, waits for `[sweep] done` in the log, then `quit`. (The keys 9 / 0
 only work while the game window has focus; twice they did not register.)
 
-## Debug switches (all hot-reloadable SDK/app cvars)
+## Debug switches (SDK/app cvars; hot-reloadable unless marked restart)
 
 Keys work only while the game window is focused; every press is logged as
 `[input] ...` and listed at the top of the analyzer summary.
 
 | Key | cvar | What it does |
 |---|---|---|
-| 6 / fn+F6 | `vulkan_debug_fsi_whole_quads` | FSI pixel shaders run for every 2x2 quad (no early quad skip, which relies on fine derivatives) |
-| 7 / fn+F7 | `vulkan_debug_force_mip` | cycles the mip level all textures are sampled at: off, 0..6, off (`vulkan_debug_base_mip_only` = level 0) |
+| 6 / fn+F6 | `vulkan_debug_fsi_whole_quads` | FSI pixel shaders run for every 2x2 quad (no early quad skip) |
+| 7 / fn+F7 | `vulkan_debug_force_mip` | cycles the mip level all textures are sampled at: off, 0..6, off (`vulkan_debug_base_mip_only` = level 0); the mip data proved fine |
 | 8 / fn+F8 | `vulkan_debug_skip_ps_group` | cycles the `;`-separated groups of `vulkan_debug_skip_ps` (guest pixel shader hashes), skipping one group's draws at a time |
 | 9 / fn+F9 | `vulkan_frame_report` | logs every draw and resolve of the next frame (`[frame]` lines) |
 | 0 / fn+F10 | (app) | debug sweep: `debug_sweep_steps`, `debug_sweep_dir`, `debug_sweep_settle_ms` |
 | - | `vulkan_fsi_quad_skip_quad_ops` | quad-uniform early quad skip with subgroup quad ops (on; needs a restart; off = the old derivative check) |
 | - | `vulkan_snap_vertex_positions` | snap vertex screen positions to 1/16 pixel (did not help, off) |
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
-| - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS) |
-| - | `vulkan_invariant_position` | invariant vertex position (on) |
+| - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
+| - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; the user always passes it) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, read back the resolves to the listed addresses and write them untiled (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
@@ -158,24 +158,14 @@ running whole quads removed both symptoms. Kept for reference: snowflakes
 are point sprites (ps `718C12FF9E1B888B`, 64x64 DXT1, packed mips 0-6), the
 hero's textures are built by resolves (`plans/hero-dog-realtime-texture-morphing.md`).
 
-### 1. Large black shadow areas
+### 1. Black / dark shadow areas (flicker)
 
-- Shadows are screen-space: ps `401A01FD4E5F8757` (29-32 draws, depth test
-  greater, no write, blend src*1 + dst*(1-srcA) into the lighting buffer)
-  samples both 1024x1024 shadow maps (resolves 12 and 13: depth to
-  `0x12BE1000` / `0x12FE1000`) and the scene depth (resolve 17, 1120x720 to
-  `0x1A02A000`), all as `24_8_FLOAT` (float24 depth, decoded to R32 float by
-  the texture cache, same as Xenia).
-- The shadow maps are drawn with polygon offset (ps 0 draws with `poly
-  offset`), applied in the FSI shader the same way as Xenia's ROV path.
-- Resolve 18 writes a one-channel 1120x720 mask that ~1600 base-pass and
-  lighting draws then sample (`t8`, `0x12B17000`). If that mask is wrong
-  (black where it should be lit), whole areas go black: check what draws
-  into it before resolve 18 and what it contains (dump it).
-- Skipping the screen-space shadow shader (sweep tile 08) shows what it
-  contributes. If the black area goes away, compare its shadow-map reads
-  (format, filter `filt 001`, integer number format, swizzle) and the depth
-  resolve path.
+See "Resume here" for the evidence and candidates. Reference data:
+ps `401A01FD4E5F8757` samples both shadow maps (t6, t7) and the scene depth
+(t13, `0x1A02A000`), all as `24_8_FLOAT` (float24 depth, decoded to R32
+float by the texture cache, same as Xenia). The shadow maps are drawn with
+polygon offset (ps 0 draws with `poly offset`), applied in the FSI shader
+the same way as Xenia's ROV path.
 
 ### 2. Performance
 
@@ -200,22 +190,23 @@ About 4000 draws and 34-39 resolves per frame.
 | ~900 + ~190 | `8D900846800943C8`, `648B965C200A5113`, ... | base pass, fmt 3 (2_10_10_10_FLOAT), opaque |
 | ~150 + ~100 | none, polygon offset | shadow maps (surface pitch 1040, depth to 1024x1024) |
 | ~100 each | `9C2144E42E95A76F`, `4755A2E4A05BA678`, `578342593A37DD35`, `04F23292B2F44077`, `AF1E16EE57E4BB06`, `45243B758F9272AB` | lighting on the tessellated ground (prim 18 = quad patches, heightmap via vertex fetch), fmt 12, src*srcA + dst*1 |
-| ~30 | `401A01FD4E5F8757` | screen-space shadows (also some opaque and constant-blend draws) |
+| ~30 | `401A01FD4E5F8757` | material / lighting shader sampling both shadow maps (base pass, lighting, the hero) |
 | ~23 | `718C12FF9E1B888B` | snow point sprites |
 | ~130 | `8D900846800943C8` at 4x | a 256x256 4x render target (resolve 15) |
 
 Resolves: 0-11 hero/dog texture morph levels (256 down to 32, format
 1_5_5_5); 12-13 shadow maps; 17 scene depth (1120x720 to `0x1A02A000`); 18 a
 **one-channel** 1120x720 texture (format 8) to `0x12B17000`, sampled as `t8`
-by ~1600 later base-pass and lighting draws (a screen-space mask, likely
-shadows or ambient occlusion); 19-34 post-processing chain (bloom,
+by ~1100-1600 later base-pass and lighting draws (a sun-shadow mask, see
+the dumps); resolve numbers shift between frames; 19-34 post-processing chain (bloom,
 luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
 - FSI early quad skip with subgroup quad operations instead of fine
-  derivatives (`vulkan_fsi_quad_skip_quad_ops`): fixes the wrong mip levels
-  (framed snowflakes, the hero's face) and the white edge lines.
+  derivatives (`vulkan_fsi_quad_skip_quad_ops`, `016e929`): fixes the wrong
+  mip levels (framed snowflakes, the hero's face) and the white edge lines.
+- Debug tooling: resolve dumps (`06d2031`), debug command file (`cc0b118`).
 - Debug tooling: sweep (`620d151`), forced mip level (`b46bb90`), number-key
   aliases (`7a2c33a`), skip groups / whole quads / polymode (`214a560`),
   live switches (`4550081`), rotated-log analysis (`a57d5ce`), timed frame

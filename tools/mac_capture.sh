@@ -11,10 +11,12 @@
 # [ms], wait <ms>; write another name and rename it).
 #
 # Usage: tools/mac_capture.sh [extra game flags...]
+#   Usually: tools/mac_capture.sh --merge_controllers --vulkan_hoist_shared_memory_uploads
 #   In game: load the save, wait until the problem shows, then keep still for
-#   30 seconds (a frame is reported every 20 seconds by itself, and fn+F9
-#   reports the next one at once), then quit (Cmd+Q). The summary uses the
-#   last complete report.
+#   30 seconds (a frame is reported every 20 seconds by itself; 9 / fn+F9 or
+#   the command "report" reports the next one at once, 0 or "sweep" runs the
+#   debug sweep), then quit (Cmd+Q or the command "quit"). The summary uses
+#   the last complete report.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
