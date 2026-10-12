@@ -12,8 +12,29 @@ index da8e432..a5a9754 100644
    // Shared memexport readback enable state with backend legacy-flag override support.
    bool IsReadbackMemexportEnabled(bool legacy_backend_flag) const;
  
+diff --git a/include/rex/graphics/flags.h b/include/rex/graphics/flags.h
+index 2cf24c4..85ab717 100644
+--- a/include/rex/graphics/flags.h
++++ b/include/rex/graphics/flags.h
+@@ -18,6 +18,8 @@ REXCVAR_DECLARE(bool, vsync);
+ REXCVAR_DECLARE(bool, clear_memory_page_state);
+ REXCVAR_DECLARE(bool, half_pixel_offset);
+ REXCVAR_DECLARE(bool, async_shader_compilation);
++REXCVAR_DECLARE(bool, async_pipeline_wait);
++REXCVAR_DECLARE(int32_t, async_pipeline_wait_timeout_ms);
+ 
+ // GPU Resolution / Readback / Queries
+ REXCVAR_DECLARE(int32_t, resolution_scale);
+@@ -29,6 +31,7 @@ REXCVAR_DECLARE(std::string, readback_resolve);
+ REXCVAR_DECLARE(bool, readback_resolve_half_pixel_offset);
+ REXCVAR_DECLARE(bool, readback_memexport);
+ REXCVAR_DECLARE(bool, readback_memexport_fast);
++REXCVAR_DECLARE(bool, readback_memexport_fast_wait);
+ REXCVAR_DECLARE(bool, occlusion_query_enable);
+ REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
+ 
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..7c834fb 100644
+index 696ff48..adc9467 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -33,7 +54,17 @@ index 696ff48..7c834fb 100644
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
-@@ -801,6 +802,38 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -485,7 +486,8 @@ class VulkanCommandProcessor : public CommandProcessor {
+   void DestroySwapFxaaSourceImage();
+ 
+   void UpdateDynamicState(const draw_util::ViewportInfo& viewport_info, bool primitive_polygonal,
+-                          reg::RB_DEPTHCONTROL normalized_depth_control);
++                          reg::RB_DEPTHCONTROL normalized_depth_control,
++                          const Shader* pixel_shader);
+   void UpdateSystemConstantValues(
+       bool primitive_polygonal,
+       const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
+@@ -801,6 +803,38 @@ class VulkanCommandProcessor : public CommandProcessor {
    // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
    // TODO(Triang3l): Change to a deferred compilation handle.
    VkPipeline current_guest_graphics_pipeline_;
@@ -73,20 +104,27 @@ index 696ff48..7c834fb 100644
    VkPipeline current_external_compute_pipeline_;
  
 diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
-index 7b938b9..db73d7b 100644
+index 7b938b9..4bf9b18 100644
 --- a/include/rex/graphics/vulkan/pipeline_cache.h
 +++ b/include/rex/graphics/vulkan/pipeline_cache.h
-@@ -96,7 +96,8 @@ class VulkanPipelineCache {
+@@ -96,7 +96,15 @@ class VulkanPipelineCache {
    bool IsCreatingPipelines() const;
    void GetPipelineAndLayoutByHandle(void* handle, VkPipeline& pipeline_out,
                                      const PipelineLayoutProvider*& pipeline_layout_out,
 -                                    bool* is_placeholder_out = nullptr) const;
 +                                    bool* is_placeholder_out = nullptr,
 +                                    uint32_t* fsi_host_sample_count_log2_out = nullptr) const;
++  // Blocks until the pipeline behind handle, queued for background creation
++  // behind a placeholder, has been created or its creation has failed,
++  // creating queued pipelines on the calling thread (highest priority first)
++  // in the meantime. Used instead of skipping a draw whose pipeline is not
++  // ready yet. Gives up after timeout_ms. Returns whether the pipeline is no
++  // longer a placeholder.
++  bool WaitForPipeline(void* handle, uint32_t timeout_ms);
  
   private:
    REXPACKEDSTRUCT(ShaderStoredHeader, {
-@@ -232,19 +233,52 @@ class VulkanPipelineCache {
+@@ -232,19 +240,52 @@ class VulkanPipelineCache {
      PipelineDescription description;
    });
  
@@ -140,7 +178,7 @@ index 7b938b9..db73d7b 100644
      Pipeline& operator=(const Pipeline& other) {
        if (this == &other) {
          return *this;
-@@ -254,6 +288,8 @@ class VulkanPipelineCache {
+@@ -254,6 +295,8 @@ class VulkanPipelineCache {
                              std::memory_order_release);
        is_placeholder.store(other.is_placeholder.load(std::memory_order_acquire),
                             std::memory_order_release);
@@ -192,6 +230,30 @@ index 34f7033..57a6ffa 100644
    Framebuffer fsi_framebuffer_;
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..be34c10 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <memory>
++#include <mutex>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
+@@ -65,6 +66,11 @@ class InputSystem : public system::IInputSystem {
+   // does not renumber pad two.
+   std::vector<DeviceInfo> devices_;
+   std::vector<InputDriver*> device_owners_;
++
++  // Xam input entries execute on whatever guest thread made the call, and
++  // several guest threads can enter RefreshDevices concurrently. Recursive
++  // because the locked public methods re-enter through RefreshDevices.
++  mutable std::recursive_mutex mutex_;
+ };
+ 
+ /// Create a default InputSystem with SDL + NOP drivers.
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..2e0070a 100644
 --- a/src/codegen/builders/vector.cpp
@@ -257,7 +319,7 @@ index 9ac8d15..9c943b4 100644
    set_current_thread_name("");
  
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..6c2d630 100644
+index a744375..8cfd66d 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,9 +10,11 @@
@@ -272,10 +334,11 @@ index a744375..6c2d630 100644
  #include <string_view>
  
  #include <fmt/format.h>
-@@ -54,6 +56,14 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
+@@ -54,9 +56,22 @@ REXCVAR_DEFINE_STRING(readback_resolve, "none", "GPU",
      .allowed({"none", "fast", "some", "full"})
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
+-REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
 +REXCVAR_DEFINE_STRING(readback_resolve_force_addresses, "", "GPU",
 +                      "Comma-separated guest addresses (hex with 0x, or decimal). A resolve whose "
 +                      "destination base lies in [address, address + 64 KiB) of an entry is read "
@@ -284,10 +347,54 @@ index a744375..6c2d630 100644
 +                      "reading back every resolve")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +
- REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, false, "GPU",
++REXCVAR_DEFINE_BOOL(readback_resolve_half_pixel_offset, true, "GPU",
                      "When draw resolution scaling is active, sample from the center of each "
-                     "scaled block during resolve readback downscale")
-@@ -181,6 +191,61 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
+-                    "scaled block during resolve readback downscale")
++                    "scaled block during resolve readback downscale. With the D3D9-style "
++                    "half-pixel offset, the content of each guest pixel starts at host pixel "
++                    "(scale/2, scale/2) of its block, so the block's top-left host pixel "
++                    "belongs to the previous guest pixel, and the first row and column of "
++                    "the resolve read the uncovered edge (a line along the top of the "
++                    "screen at 2x in Fable II)")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
+ REXCVAR_DEFINE_BOOL(readback_memexport, true, "GPU",
+@@ -69,6 +84,14 @@ REXCVAR_DEFINE_BOOL(readback_memexport_fast, true, "GPU",
+                     "automatic fallback to full synchronous readback")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(readback_memexport_fast_wait, true, "GPU",
++                    "With readback_memexport_fast, wait for the previous memexport copy when "
++                    "the GPU has not finished it yet, instead of reading the current draw. "
++                    "The guest then always sees the data from one memexport draw back, at any "
++                    "frame rate, rather than alternating between the previous and the current "
++                    "draw depending on how far the GPU is behind.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_INT32(query_occlusion_fake_sample_count, 1000, "GPU",
+                      "Fake sample count for occlusion queries")
+     .range(1, 100000)
+@@ -80,6 +103,19 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+                     "pipelines are being prepared.")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++REXCVAR_DEFINE_BOOL(async_pipeline_wait, true, "GPU",
++                    "When a draw needs a pipeline that is still being created in the background, "
++                    "wait for it instead of skipping the draw. Skipped draws cause missing "
++                    "objects and corrupted textures, at the cost of a short stall the first time "
++                    "a pipeline is needed. Only used with async_shader_compilation.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
++REXCVAR_DEFINE_INT32(async_pipeline_wait_timeout_ms, 5000, "GPU",
++                     "Longest time, in milliseconds, to wait for one pipeline with "
++                     "async_pipeline_wait before skipping the draw anyway.")
++    .range(100, 60000)
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::graphics {
+ 
+ using namespace rex::graphics::xenos;
+@@ -181,6 +217,61 @@ ReadbackResolveMode CommandProcessor::GetReadbackResolveMode(
                                           : ReadbackResolveMode::kDisabled;
  }
  
@@ -349,7 +456,7 @@ index a744375..6c2d630 100644
  bool CommandProcessor::IsReadbackMemexportEnabled(bool legacy_backend_flag) const {
    if (legacy_readback_memexport_cvar_name_ &&
        rex::cvar::HasNonDefaultValue(legacy_readback_memexport_cvar_name_)) {
-@@ -197,6 +262,23 @@ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect)
+@@ -197,6 +288,23 @@ void CommandProcessor::SetDesiredSwapPostEffect(SwapPostEffect swap_post_effect)
    CallInThread([this, swap_post_effect]() { swap_post_effect_actual_ = swap_post_effect; });
  }
  
@@ -373,7 +480,7 @@ index a744375..6c2d630 100644
  void CommandProcessor::WorkerThreadMain() {
    if (!SetupContext()) {
      rex::FatalError("Unable to setup command processor internal state");
-@@ -216,6 +298,7 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -216,6 +324,7 @@ void CommandProcessor::WorkerThreadMain() {
        // We've run out of commands to execute.
        // We spin here waiting for new ones, as the overhead of waiting on our
        // event is too high.
@@ -381,7 +488,7 @@ index a744375..6c2d630 100644
        PrepareForWait();
        uint32_t loop_count = 0;
        do {
-@@ -232,6 +315,9 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -232,6 +341,9 @@ void CommandProcessor::WorkerThreadMain() {
        } while (worker_running_ && pending_fns_.empty() &&
                 (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
        ReturnFromWait();
@@ -391,7 +498,7 @@ index a744375..6c2d630 100644
        if (!worker_running_ || !pending_fns_.empty()) {
          continue;
        }
-@@ -771,7 +857,14 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+@@ -771,7 +883,14 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
        result = ExecutePacketType3_INDIRECT_BUFFER(reader, packet, count);
        break;
      case PM4_WAIT_REG_MEM:
@@ -407,7 +514,7 @@ index a744375..6c2d630 100644
        break;
      case PM4_REG_RMW:
        result = ExecutePacketType3_REG_RMW(reader, packet, count);
-@@ -1416,6 +1509,7 @@ bool CommandProcessor::ExecutePacketType3_DRAW_INDX(memory::RingBuffer* reader,
+@@ -1416,6 +1535,7 @@ bool CommandProcessor::ExecutePacketType3_DRAW_INDX(memory::RingBuffer* reader,
    }
    uint32_t viz_query_condition = reader->ReadAndSwap<uint32_t>();
    --count_remaining;
@@ -415,7 +522,7 @@ index a744375..6c2d630 100644
    return ExecutePacketType3Draw(reader, packet, "PM4_DRAW_INDX", viz_query_condition,
                                  count_remaining);
  }
-@@ -1425,7 +1519,10 @@ bool CommandProcessor::ExecutePacketType3_DRAW_INDX_2(memory::RingBuffer* reader
+@@ -1425,7 +1545,10 @@ bool CommandProcessor::ExecutePacketType3_DRAW_INDX_2(memory::RingBuffer* reader
    // "draw using supplied indices in packet"
    // Generally used by Xbox 360 Direct3D 9 for kAutoIndex source.
    // No viz query token.
@@ -497,18 +604,42 @@ index 8f2fcb0..241649b 100644
          return 0;
        }));
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..c961cb8 100644
+index 001f36b..5068c0b 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
-@@ -11,6 +11,7 @@
+@@ -11,7 +11,9 @@
  
  #include <algorithm>
  #include <array>
 +#include <chrono>
  #include <cstdint>
++#include <cstdlib>
  #include <cstring>
  #include <iterator>
-@@ -69,6 +70,15 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+ #include <mutex>
+@@ -60,6 +62,21 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+                     "used placeholder pipelines to avoid visible flashing")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ 
++// Same names as the Direct3D 12 renderer's in himdo/rexglue-sdk, which the app
++// seeds for the dog's fur in Fable II.
++REXCVAR_DEFINE_STRING(depth_bias_shader, "", "GPU/Vulkan",
++                      "Guest pixel shader ucode hash (hex) whose draws get "
++                      "depth_bias_shader_units of extra host depth bias, for geometry that "
++                      "relies on exact ties in the guest's 24-bit float depth (Z fighting on "
++                      "the host's 32-bit depth). Host render target path only (the fragment "
++                      "shader interlock path stores the guest's depth format, so ties stay "
++                      "exact there).")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_INT32(depth_bias_shader_units, 0, "GPU/Vulkan",
++                     "Extra depth bias constant factor (Direct3D 10 DepthBias units) for "
++                     "depth_bias_shader.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
+                     "Submit command buffer when PM4 primary buffer ends")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -69,6 +86,15 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
                      "device (falls back to render passes otherwise)")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -524,7 +655,7 @@ index 001f36b..c961cb8 100644
  namespace rex::graphics::vulkan {
  
  namespace {
-@@ -2272,6 +2282,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2272,6 +2298,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
@@ -532,7 +663,7 @@ index 001f36b..c961cb8 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -3593,6 +3604,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3593,6 +3620,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -544,7 +675,7 @@ index 001f36b..c961cb8 100644
  
    const RegisterFile& regs = *register_file_;
    (void)index_buffer_info;
-@@ -3612,7 +3628,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3612,7 +3644,17 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
    if (edram_mode == xenos::EdramMode::kCopy) {
@@ -563,7 +694,7 @@ index 001f36b..c961cb8 100644
      return IssueCopy();
    }
  
-@@ -3835,7 +3861,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,7 +3877,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -575,7 +706,7 @@ index 001f36b..c961cb8 100644
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
-@@ -3849,18 +3878,25 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3849,18 +3894,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // textures.
    VkPipeline pipeline;
    void* pipeline_handle = nullptr;
@@ -604,10 +735,34 @@ index 001f36b..c961cb8 100644
 -                                                &pipeline_is_placeholder);
 +                                                &pipeline_is_placeholder,
 +                                                &pipeline_fsi_host_sample_count_log2);
++  if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder &&
++      REXCVAR_GET(async_pipeline_wait)) {
++    // Skipping the draw leaves its object missing for the frame and corrupts
++    // any texture the skipped pass renders into (noise, streaks, flickering
++    // shadows when new effects first appear), so wait for the pipeline
++    // instead. Only the first use of a pipeline can stall.
++    ScopedNs ns(frame_ns_pipeline_);
++    if (pipeline_cache_->WaitForPipeline(
++            pipeline_handle, uint32_t(std::max(100, REXCVAR_GET(async_pipeline_wait_timeout_ms))))) {
++      pipeline_cache_->GetPipelineAndLayoutByHandle(pipeline_handle, pipeline,
++                                                    pipeline_layout_provider,
++                                                    &pipeline_is_placeholder,
++                                                    &pipeline_fsi_host_sample_count_log2);
++    }
++  }
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -4014,7 +4050,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3933,7 +4000,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
+ 
+   // Update dynamic graphics pipeline state.
+-  UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control);
++  UpdateDynamicState(viewport_info, primitive_polygonal, normalized_depth_control, pixel_shader);
+ 
+   auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
+ 
+@@ -4014,7 +4081,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
          continue;
        }
@@ -616,7 +771,7 @@ index 001f36b..c961cb8 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4032,7 +4068,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4099,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -625,7 +780,7 @@ index 001f36b..c961cb8 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4080,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4111,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -634,7 +789,7 @@ index 001f36b..c961cb8 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4111,9 +4147,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,9 +4178,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -665,7 +820,34 @@ index 001f36b..c961cb8 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4385,22 +4439,36 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4350,12 +4435,23 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+   readback.written_size[write_index] = total_size;
+ 
+   CheckSubmissionFenceAndDeviceLoss(0);
+-  bool previous_slot_ready =
++  bool previous_slot_written =
+       readback.buffers[read_index] != VK_NULL_HANDLE &&
+       readback.memories[read_index] != VK_NULL_HANDLE &&
+       readback.mapped_data[read_index] != nullptr && total_size <= readback.sizes[read_index] &&
+-      total_size <= readback.written_size[read_index] && readback.submission_written[read_index] &&
+-      readback.submission_written[read_index] <= submission_completed_;
++      total_size <= readback.written_size[read_index] && readback.submission_written[read_index] != 0;
++  if (previous_slot_written && REXCVAR_GET(readback_memexport_fast_wait) &&
++      readback.submission_written[read_index] > submission_completed_ &&
++      readback.submission_written[read_index] < GetCurrentSubmission()) {
++    // The previous copy was submitted but is still in flight. Wait for it
++    // instead of falling back to the current draw, so the data the guest reads
++    // is always one memexport draw old, whether or not the GPU has caught up.
++    // A copy recorded in the still-open submission is left to the full path
++    // below, as without this cvar, so the open submission is never ended here.
++    CheckSubmissionFenceAndDeviceLoss(readback.submission_written[read_index]);
++  }
++  bool previous_slot_ready =
++      previous_slot_written && readback.submission_written[read_index] <= submission_completed_;
+   if (!previous_slot_ready) {
+     IssueDraw_MemexportReadbackFullPath(total_size);
+     readback.current_index = read_index;
+@@ -4385,22 +4481,36 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -704,7 +886,7 @@ index 001f36b..c961cb8 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +4487,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +4529,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -712,7 +894,7 @@ index 001f36b..c961cb8 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4944,6 +5011,7 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5053,7 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -720,7 +902,7 @@ index 001f36b..c961cb8 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -5111,7 +5179,12 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5221,12 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -734,7 +916,7 @@ index 001f36b..c961cb8 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5165,6 +5238,52 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +5280,52 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -787,11 +969,48 @@ index 001f36b..c961cb8 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
+@@ -5654,7 +5815,8 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+ 
+ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& viewport_info,
+                                                 bool primitive_polygonal,
+-                                                reg::RB_DEPTHCONTROL normalized_depth_control) {
++                                                reg::RB_DEPTHCONTROL normalized_depth_control,
++                                                const Shader* pixel_shader) {
+ #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
+   SCOPE_profile_cpu_f("gpu");
+ #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
+@@ -5718,6 +5880,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+     // background is more likely.
+     depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
+                                float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
++    const std::string& bias_shader = REXCVAR_GET(depth_bias_shader);
++    if (pixel_shader && !bias_shader.empty() &&
++        std::strtoull(bias_shader.c_str(), nullptr, 16) == pixel_shader->ucode_data_hash()) {
++      depth_bias_constant_factor += float(REXCVAR_GET(depth_bias_shader_units));
++    }
+     // std::memcmp instead of != so in case of NaN, every draw won't be
+     // invalidating it.
+     dynamic_depth_bias_update_needed_ |=
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..7f0b3ee 100644
+index 91ac08f..56f181d 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
-@@ -91,7 +91,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
+@@ -12,12 +12,14 @@
+ #include <algorithm>
+ #include <array>
+ #include <atomic>
++#include <chrono>
+ #include <cstdint>
+ #include <cstring>
+ #include <memory>
+ #include <set>
+ #include <string>
+ #include <string_view>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -91,7 +93,18 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
  
  std::string GetTessellationSystemConstantsBlockGlsl() {
    std::string source;
@@ -811,7 +1030,7 @@ index 91ac08f..7f0b3ee 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -420,6 +431,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -420,6 +433,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
        shader_storage_shareable_root /
        fmt::format("{:08X}.{}.vk.xpso", title_id, edram_fragment_shader_interlock ? "fsi" : "fbo");
    pipeline_storage_file_ = rex::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
@@ -825,7 +1044,7 @@ index 91ac08f..7f0b3ee 100644
    if (!pipeline_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the Vulkan pipeline description storage file for "
-@@ -503,6 +521,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -503,6 +523,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
    auto shader_storage_file_path =
        shader_storage_shareable_root / fmt::format("{:08X}.xsh", title_id);
    shader_storage_file_ = rex::filesystem::OpenFile(shader_storage_file_path, "a+b");
@@ -836,7 +1055,7 @@ index 91ac08f..7f0b3ee 100644
    if (!shader_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the guest shader storage file for writing, persistent "
-@@ -1215,13 +1237,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -1215,13 +1239,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
  
  void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
      void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
@@ -854,7 +1073,7 @@ index 91ac08f..7f0b3ee 100644
      return;
    }
    const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
-@@ -1230,6 +1255,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -1230,6 +1257,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
    if (is_placeholder_out) {
      *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
    }
@@ -864,7 +1083,7 @@ index 91ac08f..7f0b3ee 100644
  }
  
  bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
-@@ -2964,11 +2992,23 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -2964,11 +2994,23 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    bool use_dynamic_rendering =
        REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
@@ -889,7 +1108,7 @@ index 91ac08f..7f0b3ee 100644
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3191,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3193,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -902,7 +1121,7 @@ index 91ac08f..7f0b3ee 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
-@@ -3268,9 +3314,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3268,9 +3316,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    VkSampleMask sample_mask = UINT32_MAX;
    VkPipelineMultisampleStateCreateInfo multisample_state = {};
    multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -917,6 +1136,65 @@ index 91ac08f..7f0b3ee 100644
      multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
    } else if (!edram_fragment_shader_interlock && !subpass_has_attachments) {
      // Keep parity with D3D12 host-render-target path, where draws without
+@@ -3588,6 +3639,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+   }
+ }
+ 
++bool VulkanPipelineCache::WaitForPipeline(void* handle, uint32_t timeout_ms) {
++  auto* target = reinterpret_cast<const Pipeline*>(handle);
++  if (!target) {
++    return false;
++  }
++  // Done once the real pipeline replaced the placeholder, or once creating it
++  // failed (the placeholder is then kept, or the pipeline cleared).
++  auto target_ready = [target]() {
++    return !target->is_placeholder.load(std::memory_order_acquire) ||
++           target->pipeline.load(std::memory_order_acquire) == VK_NULL_HANDLE;
++  };
++  if (target_ready()) {
++    return true;
++  }
++  if (creation_threads_.empty()) {
++    return false;
++  }
++  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
++  while (!target_ready() && std::chrono::steady_clock::now() < deadline) {
++    PipelineCreationArguments creation_arguments;
++    bool have_creation_arguments = false;
++    {
++      std::lock_guard<std::mutex> lock(creation_request_lock_);
++      if (!creation_queue_.empty()) {
++        creation_arguments = creation_queue_.top();
++        creation_queue_.pop();
++        have_creation_arguments = true;
++      }
++    }
++    if (!have_creation_arguments) {
++      // A creation thread has the pipeline; it clears is_placeholder when done
++      // (or when the creation fails).
++      std::this_thread::sleep_for(std::chrono::microseconds(250));
++      continue;
++    }
++    // Same as CreationThread.
++    if (!EnsurePipelineCreated(creation_arguments)) {
++      bool has_placeholder =
++          creation_arguments.pipeline->second.is_placeholder.load(std::memory_order_acquire);
++      VkPipeline pipeline =
++          creation_arguments.pipeline->second.pipeline.load(std::memory_order_acquire);
++      if (has_placeholder && pipeline != VK_NULL_HANDLE) {
++        creation_arguments.pipeline->second.is_placeholder.store(false, std::memory_order_release);
++      } else {
++        creation_arguments.pipeline->second.pipeline.store(VK_NULL_HANDLE,
++                                                           std::memory_order_release);
++      }
++    }
++  }
++  return target_ready();
++}
++
+ void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
+   std::vector<VkPipeline> pipelines_to_destroy;
+   uint64_t completed_submission = command_processor_.GetCompletedSubmission();
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
 index 0298f06..76b5d9f 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp
@@ -977,3 +1255,99 @@ index 0298f06..76b5d9f 100644
        last_update_framebuffer_ = &fsi_framebuffer_;
      } break;
  
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..4b46c83 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -48,6 +48,7 @@ X_STATUS InputSystem::Setup() {
+ }
+ 
+ void InputSystem::Shutdown() {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   // device_owners_ holds raw driver pointers.
+   devices_.clear();
+   device_owners_.clear();
+@@ -55,10 +56,12 @@ void InputSystem::Shutdown() {
+ }
+ 
+ void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   drivers_.push_back(std::move(driver));
+ }
+ 
+ void InputSystem::AttachWindow(rex::ui::Window* window) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   window_ = window;
+   for (auto& driver : drivers_) {
+     driver->OnWindowAvailable(window);
+@@ -66,12 +69,14 @@ void InputSystem::AttachWindow(rex::ui::Window* window) {
+ }
+ 
+ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   for (auto& driver : drivers_) {
+     driver->set_is_active_callback(callback);
+   }
+ }
+ 
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+     assignment_->OnDevicesChanged(devices_);
+@@ -79,6 +84,7 @@ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignme
+ }
+ 
+ void InputSystem::RefreshDevices() {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   std::vector<DeviceInfo> seen;
+   std::vector<InputDriver*> owners;
+   std::vector<DeviceInfo> enumerated;
+@@ -167,6 +173,7 @@ void InputSystem::RefreshDevices() {
+ }
+ 
+ InputDriver* InputSystem::DriverForDevice(DeviceId id) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   for (size_t i = 0; i < devices_.size(); i++) {
+     if (devices_[i].id == id) {
+       return device_owners_[i];
+@@ -176,6 +183,7 @@ InputDriver* InputSystem::DriverForDevice(DeviceId id) {
+ }
+ 
+ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   for (const auto& device : devices_) {
+     if (device.id == id) {
+       return &device;
+@@ -187,6 +195,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
+ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_CAPABILITIES* out_caps) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!out_caps || !assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -214,6 +223,7 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+ 
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -253,6 +263,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+ 
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -295,6 +306,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+                                    X_INPUT_KEYSTROKE* out_keystroke) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
