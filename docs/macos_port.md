@@ -315,9 +315,34 @@ still (each press logs `[input] F6: <cvar> = true/false`):
 
 | Key (fn+) | cvar | Effect |
 |---|---|---|
-| F6 | `vulkan_debug_skip_depth_only_draws` | Skips draws without pixel shader and color that write depth without polygon offset (the depth prepass). Lines along triangle edges that go away point at the later passes failing their depth test against the prepass. |
+| F6 | `vulkan_snap_vertex_positions` | Vertex position snapping (on by default on macOS, see below); off brings the edge lines back for comparison. |
 | F7 | `vulkan_debug_base_mip_only` | Samples only the base mip level. Wrong-looking small or distant textures (snowflakes as framed squares) that look right then point at the smaller mips (packed mip tails). |
 | F8 | `vulkan_debug_skip_ps_active` | Skips the draws of the pixel shaders listed in `vulkan_debug_skip_ps` (hex hashes, comma-separated, from the frame report), for example `401A01FD4E5F8757`, which samples both shadow maps and the scene depth. |
+
+`vulkan_debug_skip_depth_only_draws` (no key) skips the depth prepass, but
+Fable II's prepass also writes the stencil the later passes test, so the
+picture turns white (the bare color buffer) - which is also what the edge
+lines are: pixels the base pass did not draw.
+
+### Vertex position snapping (the white dashed lines along edges)
+
+Fable II draws the depth prepass with a position-only vertex shader and the
+base and lighting passes (greater-or-equal depth test, stencil test against
+the prepass) with other vertex shaders (401 of 404 meshes at the brazier).
+Their positions differ in the last bits. The Xbox 360 rasterizer converts
+screen positions to fixed point with 1/16 pixel precision (PA_SU_VTX_CNTL),
+which absorbs that; host GPUs use a finer grid (about 1/256 pixel), so
+pixels whose centers lie between the two slightly different edges are
+covered by the prepass but not by the base pass, or the other way around,
+and the base pass leaves them unpainted: white dashed lines along triangle
+edges that flicker with the slightest motion. `vulkan_snap_vertex_positions`
+(SDK patch, hot-reloadable, on by default on macOS, fn+F6) snaps the screen
+position of every vertex to the 1/16 pixel grid in the translated vertex
+shader (plus 1/512 pixel so the host's own quantization rounds it the same
+way everywhere), for vertices in front of the viewer and not far outside
+the viewport. SPIRV-Cross keeps the translator's no-contraction arithmetic
+exact in MSL (`fma(a, b, 0)` in `optnone` helpers), so the remaining
+difference between two shaders is the guest's own math.
 
 MoltenVK compiles shaders with Metal's fast math unless a shader asks for
 strict floating point. `MVK_CONFIG_FAST_MATH_ENABLED=0` (environment) turns

@@ -445,16 +445,16 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     }
     frame_report_down_prev_ = frame_report_down;
 
-    // F6 / F7 / F8 (host) -> flip a GPU debug switch of the macOS SDK patch,
-    // to compare the picture with and without it while standing still:
-    // F6 the depth prepass, F7 everything but the base mip level, F8 the
-    // pixel shaders listed in vulkan_debug_skip_ps.
+    // F6 / F7 / F8 (host) -> flip a GPU switch of the macOS SDK patch, to
+    // compare the picture with and without it while standing still: F6
+    // vertex position snapping (on by default), F7 everything but the base
+    // mip level, F8 the pixel shaders listed in vulkan_debug_skip_ps.
     static constexpr struct {
       uint16_t vk;
       const char* key;
       const char* cvar;
     } kDebugToggles[] = {
-        {0x75, "F6", "vulkan_debug_skip_depth_only_draws"},
+        {0x75, "F6", "vulkan_snap_vertex_positions"},
         {0x76, "F7", "vulkan_debug_base_mip_only"},
         {0x77, "F8", "vulkan_debug_skip_ps_active"},
     };
