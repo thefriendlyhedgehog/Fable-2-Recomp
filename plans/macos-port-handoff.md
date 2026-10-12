@@ -19,16 +19,17 @@ with a sweep: snowflakes are round dots, the hero's face is right, no edge
 lines, and the whole-quads tile now differs from baseline by only 1.9% of
 pixels (before the fix, whole quads changed the picture a lot).
 
-**Black shadow areas: narrowed down (2026-10-12).** The mask resolve at
-`0x12B17000` is a plausible sun-shadow mask (white lit, black shadowed); the
-snow in its shadow still gets ambient light. The pitch-black parts are a band
-with straight edges on the ground that disappears when ps `401A01FD4E5F8757`
-is skipped (sweep tile 08). That shader is a general material / lighting
-shader (base pass fmt 3 and lighting fmt 12, also the hero) sampling both
-shadow maps, t6 `0x12BE1000` and t7 `0x12FE1000`, and the scene depth. The
-first shadow map looks sane (dumped); the second is now dumped too. Next:
-check whether the band is where the second map is used (empty or wrong
-content), then the shader's comparison.
+**Black shadow areas: not narrowed down yet (2026-10-12).** The mask
+resolve at `0x12B17000` is a plausible sun-shadow mask (white lit, black
+shadowed); snow in its shadow still gets ambient light. Both shadow maps (t6
+`0x12BE1000`, t7 `0x12FE1000`, a near and a wider cascade) look sane in the
+dumps. A dark band with stepped edges on the ground next to the glowing trail
+went away without ps `401A01FD4E5F8757` (a general material / lighting
+shader, also the hero) in one sweep, but was there without it in the next,
+so that is not established; its outline looks like the shadow of the roof on
+the right. Next: decide whether it is wrong at all (a 360 reference of the
+same spot), and whether it flickers between frames (several baseline shots
+in a row).
 
 **Older note: problem 1 below (black shadow areas).** With correct derivatives,
 shadowed areas are now plainly pitch black (a whole building side in the
