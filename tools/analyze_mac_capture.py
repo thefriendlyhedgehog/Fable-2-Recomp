@@ -181,13 +181,27 @@ def analyze_frame(log, top, find=()):
         lines = f.read().splitlines()
     begins = [i for i, line in enumerate(lines) if "[frame] begin" in line]
     if not begins:
-        print(f"frame: no '[frame] begin' in {log} (press fn+F9 in game)")
+        f9 = sum(1 for line in lines if "F9: logging" in line)
+        print(f"frame: no '[frame] begin' in {log}; F9 presses that reached the game: {f9} "
+              f"(tools/mac_capture.sh also reports a frame every 20 s by itself)")
         return
-    start = begins[-1]
-    end = next((i for i in range(start, len(lines)) if "[frame] end" in lines[i]), len(lines))
+    # The newest complete report (the game may have quit in the middle of one).
+    complete = []
+    for start in begins:
+        end = next((i for i in range(start + 1, len(lines))
+                    if "[frame] end" in lines[i] or "[frame] begin" in lines[i]), None)
+        if end is not None and "[frame] end" in lines[end]:
+            complete.append((start, end))
+    if not complete:
+        start, end = begins[-1], len(lines) - 1
+        print(f"frame: {lines[start].split('[frame] ')[1]} ... (no end)")
+    else:
+        start, end = complete[-1]
+        stamp = re.match(r"\[(\d{4}-\d\d-\d\d [\d:.]+)\]", lines[start])
+        print(f"frame: {lines[start].split('[frame] ')[1]} ... {lines[end].split('[frame] ')[1]}"
+              f" (the last of {len(complete)} complete reports"
+              f"{', logged ' + stamp.group(1) if stamp else ''})")
     frame = lines[start:end + 1]
-    print(f"frame: {lines[start].split('[frame] ')[1]} ... "
-          f"{lines[end].split('[frame] ')[1] if end < len(lines) else '(no end)'}")
     groups = collections.Counter()
     msaa = collections.Counter()
     primitives = 0

@@ -289,8 +289,10 @@ and every draw of one frame, which can then be analyzed offline:
   read it as (how shadow maps and other render-to-texture results are used).
   `--find <guest shader hash>` lists one shader's draws and textures.
 
-`tools/mac_capture.sh` does the whole run: the game with both dumps, then
-the summary (copied to the clipboard).
+`tools/mac_capture.sh` does the whole run: the game with both dumps and
+`vulkan_frame_report_interval=20` (SDK patch: a frame report every 20
+seconds by itself, so the capture does not depend on F9 reaching the game),
+then the summary of the last complete report (copied to the clipboard).
 
 ### Raster order groups for every EDRAM shader
 

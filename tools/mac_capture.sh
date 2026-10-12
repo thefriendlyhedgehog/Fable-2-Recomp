@@ -6,8 +6,10 @@
 # clipboard.
 #
 # Usage: tools/mac_capture.sh [extra game flags...]
-#   In game: load the save, wait until the problem shows, press fn+F9 once,
-#   wait two seconds, quit (Cmd+Q).
+#   In game: load the save, wait until the problem shows, then keep still for
+#   30 seconds (a frame is reported every 20 seconds by itself, and fn+F9
+#   reports the next one at once), then quit (Cmd+Q). The summary uses the
+#   last complete report.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -20,10 +22,12 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT/mvk" "$OUT/rex"
 
-echo "Starting the game. Load the save, wait until the problem shows, press fn+F9 once,"
-echo "wait two seconds, then quit (Cmd+Q). The summary appears here afterwards."
+echo "Starting the game. Load the save, wait until the problem shows, then keep still for"
+echo "30 seconds (a frame is reported every 20 s; fn+F9 reports one at once) and quit (Cmd+Q)."
+echo "The summary appears here afterwards."
 MVK_CONFIG_SHADER_DUMP_DIR="$PWD/$OUT/mvk" "$EXE" --game_data_root="$PWD" \
-    --dump_shaders="$PWD/$OUT/rex" "$@" > "$OUT/stdout.log" 2>&1
+    --dump_shaders="$PWD/$OUT/rex" --vulkan_frame_report_interval=20 "$@" \
+    > "$OUT/stdout.log" 2>&1
 echo "Game exited ($?)."
 
 python3 tools/analyze_mac_capture.py --mvk "$OUT/mvk" --rex "$OUT/rex" > "$OUT/summary.txt" 2>&1
