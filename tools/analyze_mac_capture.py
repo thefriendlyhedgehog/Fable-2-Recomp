@@ -39,7 +39,7 @@ def guest_hashes_by_spirv(rex_dir):
     return result
 
 
-def analyze_shaders(mvk_dir, rex_dir, show):
+def analyze_shaders(mvk_dir, rex_dir, show, detail=False):
     metal_files = sorted(glob.glob(os.path.join(mvk_dir, "*.metal")))
     if not metal_files:
         print(f"shaders: no .metal files in {mvk_dir} (was MVK_CONFIG_SHADER_DUMP_DIR set?)")
@@ -47,6 +47,7 @@ def analyze_shaders(mvk_dir, rex_dir, show):
     by_spirv = guest_hashes_by_spirv(rex_dir) if rex_dir and os.path.isdir(rex_dir) else {}
     fsi = []
     vs_total = vs_invariant = 0
+    vs_not_invariant = []
     failed = 0
     for path in metal_files:
         with open(path, errors="replace") as f:
@@ -59,6 +60,13 @@ def analyze_shaders(mvk_dir, rex_dir, show):
             vs_total += 1
             if re.search(r"\[\[\s*position\s*,\s*invariant\s*\]\]", text):
                 vs_invariant += 1
+            else:
+                spv = path[:-len(".metal")] + ".spv"
+                guest = ""
+                if by_spirv and os.path.exists(spv):
+                    with open(spv, "rb") as f:
+                        guest = by_spirv.get(hashlib.sha1(f.read()).hexdigest(), "")
+                vs_not_invariant.append((name, guest or "not a guest shader (SDK internal)"))
             continue
         if "-fs-" not in name or "xe_edram" not in text:
             continue
@@ -74,6 +82,9 @@ def analyze_shaders(mvk_dir, rex_dir, show):
         fsi.append((name, rog, "sample_mask" in text, decls, guest, path))
     print(f"shaders: {len(metal_files)} Metal files, {failed} failed to convert")
     print(f"  vertex/tessellation: {vs_total}, with an invariant position: {vs_invariant}")
+    if detail:
+        for name, guest in vs_not_invariant:
+            print(f"    not invariant: {name}  <- {guest}")
     with_rog = sum(1 for s in fsi if s[1])
     print(f"  FSI (EDRAM) fragment shaders: {len(fsi)}, with raster_order_group on xe_edram: "
           f"{with_rog}, without: {len(fsi) - with_rog}")
@@ -86,6 +97,20 @@ def analyze_shaders(mvk_dir, rex_dir, show):
             print(f"      {d[:160]}")
     if fsi:
         print(f"  example FSI shader for a closer look: {(without or fsi)[0][5]}")
+    if detail and without:
+        # Every line of the shader that touches the EDRAM buffer, and the
+        # declarations of the other EDRAM shaders for comparison.
+        with open(without[0][5], errors="replace") as f:
+            lines = f.read().splitlines()
+        print(f"  {without[0][0]}: {len(lines)} lines; lines with xe_edram:")
+        for i, line in enumerate(lines):
+            if "xe_edram" in line:
+                print(f"    {i + 1:5d}: {line.strip()[:170]}")
+        with_rog = [s_ for s_ in fsi if s_[1]]
+        if with_rog:
+            print(f"  for comparison, {with_rog[0][0]}:")
+            for d in with_rog[0][3][:2]:
+                print(f"      {d[:170]}")
 
 
 DRAW_RE = re.compile(
@@ -95,7 +120,7 @@ DRAW_RE = re.compile(
     r"poly offset (\d)(\d)( \| new pass)?")
 
 
-def analyze_frame(log, top):
+def analyze_frame(log, top, find=()):
     with open(log, errors="replace") as f:
         lines = f.read().splitlines()
     begins = [i for i, line in enumerate(lines) if "[frame] begin" in line]
@@ -110,10 +135,14 @@ def analyze_frame(log, top):
     groups = collections.Counter()
     msaa = collections.Counter()
     primitives = 0
+    found = collections.Counter()
     for line in frame:
         m = DRAW_RE.search(line)
         if not m:
             continue
+        for h in find:
+            if h.upper() in (m.group(1).upper(), m.group(2).upper()):
+                found[re.sub(r"^draw \d+: ", "", line.split("[frame] ", 1)[1])] += 1
         (vs, ps, prim, count, packet, samples, pipeline_samples, pitch, targets, dfmt, dbase,
          ztest, zfunc, zwrite, stencil, atest, afunc, a2c, cull, po_f, po_b, new_pass) = m.groups()
         primitives += int(count)
@@ -128,6 +157,12 @@ def analyze_frame(log, top):
     print(f"  draws by guest MSAA: {dict(sorted(msaa.items()))}, indices/vertices: {primitives}")
     for key, n in groups.most_common(top):
         print(f"  {n:5d}x {key}")
+    for h in find:
+        hits = [(k, n) for k, n in found.items() if h.upper() in k.upper()]
+        print(f"  draws using {h}: {sum(n for _, n in hits)}")
+        for k, n in sorted(hits, key=lambda kv: -kv[1])[:10]:
+            shown = re.sub(r" count \d+", "", k)[:230]
+            print(f"    {n:4d}x {shown}")
     resolves = [line.split("[frame] ")[1] for line in frame if "[frame] resolve" in line]
     print(f"  resolves: {len(resolves)}")
     for r in resolves[:40]:
@@ -142,14 +177,19 @@ def main():
     parser.add_argument("--log", default=None, help="log file (default: the newest)")
     parser.add_argument("--top", type=int, default=40, help="draw groups shown")
     parser.add_argument("--show", type=int, default=5, help="shaders listed")
+    parser.add_argument("--detail", action="store_true",
+                        help="list non-invariant vertex shaders and the EDRAM lines of the "
+                             "fragment shader without a raster order group")
+    parser.add_argument("--find", action="append", default=[],
+                        help="guest shader hash: list the frame's draws that use it")
     args = parser.parse_args()
     log = args.log or newest_log(os.path.join(repo, "out/build/mac-arm64-release/logs"))
     if os.path.isdir(args.mvk):
-        analyze_shaders(args.mvk, args.rex, args.show)
+        analyze_shaders(args.mvk, args.rex, args.show, args.detail)
     else:
         print(f"shaders: {args.mvk} does not exist (was MVK_CONFIG_SHADER_DUMP_DIR set?)")
     if log:
-        analyze_frame(log, args.top)
+        analyze_frame(log, args.top, args.find)
     else:
         print("frame: no log found")
 
