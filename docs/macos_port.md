@@ -307,6 +307,24 @@ triangle edges (vertex shader, MSAA, polygon offset, culling), and lists the
 blended draws without depth write and the non-triangle primitives
 (particles such as snow) with their blend, alpha state and textures.
 
+### Live A/B switches
+
+Hot-reloadable debug switches (SDK patch) that the app flips on keys, so
+one run compares the picture with and without something while standing
+still (each press logs `[input] F6: <cvar> = true/false`):
+
+| Key (fn+) | cvar | Effect |
+|---|---|---|
+| F6 | `vulkan_debug_skip_depth_only_draws` | Skips draws without pixel shader and color that write depth without polygon offset (the depth prepass). Lines along triangle edges that go away point at the later passes failing their depth test against the prepass. |
+| F7 | `vulkan_debug_base_mip_only` | Samples only the base mip level. Wrong-looking small or distant textures (snowflakes as framed squares) that look right then point at the smaller mips (packed mip tails). |
+| F8 | `vulkan_debug_skip_ps_active` | Skips the draws of the pixel shaders listed in `vulkan_debug_skip_ps` (hex hashes, comma-separated, from the frame report), for example `401A01FD4E5F8757`, which samples both shadow maps and the scene depth. |
+
+MoltenVK compiles shaders with Metal's fast math unless a shader asks for
+strict floating point. `MVK_CONFIG_FAST_MATH_ENABLED=0` (environment) turns
+it off for a run, to check whether two vertex shaders computing the same
+position (Fable II's depth prepass and color passes use different ones)
+round it differently.
+
 ### Raster order groups for every EDRAM shader
 
 MoltenVK's SPIRV-Cross (and its upstream main) gives a fragment shader's

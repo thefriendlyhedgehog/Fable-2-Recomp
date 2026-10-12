@@ -445,6 +445,33 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     }
     frame_report_down_prev_ = frame_report_down;
 
+    // F6 / F7 / F8 (host) -> flip a GPU debug switch of the macOS SDK patch,
+    // to compare the picture with and without it while standing still:
+    // F6 the depth prepass, F7 everything but the base mip level, F8 the
+    // pixel shaders listed in vulkan_debug_skip_ps.
+    static constexpr struct {
+      uint16_t vk;
+      const char* key;
+      const char* cvar;
+    } kDebugToggles[] = {
+        {0x75, "F6", "vulkan_debug_skip_depth_only_draws"},
+        {0x76, "F7", "vulkan_debug_base_mip_only"},
+        {0x77, "F8", "vulkan_debug_skip_ps_active"},
+    };
+    for (size_t i = 0; i < std::size(kDebugToggles); ++i) {
+      bool down = focused && KeyDown(kDebugToggles[i].vk);
+      if (down && !debug_toggle_down_prev_[i]) {
+        bool on = !rex::cvar::Query<bool>(kDebugToggles[i].cvar);
+        if (rex::cvar::SetFlagByName(kDebugToggles[i].cvar, on ? "true" : "false")) {
+          REXSYS_INFO("[input] {}: {} = {}", kDebugToggles[i].key, kDebugToggles[i].cvar, on);
+        } else {
+          REXSYS_WARN("[input] {}: {} is not available in this SDK build",
+                      kDebugToggles[i].key, kDebugToggles[i].cvar);
+        }
+      }
+      debug_toggle_down_prev_[i] = down;
+    }
+
     // Debug-console toggle key (default F4); see the Windows path above.
     uint16_t unlock_vk = static_cast<uint16_t>(
         rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
@@ -562,6 +589,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
   [[maybe_unused]] bool frame_report_down_prev_ = false;  // F9 state (non-Windows)
   [[maybe_unused]] int32_t frame_report_requests_ = 0;  // F9 presses (vulkan_frame_report)
+  [[maybe_unused]] bool debug_toggle_down_prev_[3] = {};  // F6-F8 state (non-Windows)
 #ifndef _WIN32
   // Held-key table indexed by rex::ui::VirtualKey (Win32 VK numbering, so the
   // cvar mapping means the same thing on every platform). Written on the UI
