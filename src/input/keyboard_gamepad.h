@@ -434,6 +434,17 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // F5 (host) -> run the external Lua file (fable2_f5_lua.h).
     fable2::f5lua::poll_f5(focused && KeyDown(0x74 /* F5 */));
 
+    // F9 (host) -> log every draw of the next frame (macOS SDK patch cvar
+    // vulkan_frame_report; "[frame]" lines in the log).
+    bool frame_report_down = focused && KeyDown(0x78 /* F9 */);
+    if (frame_report_down && !frame_report_down_prev_) {
+      if (rex::cvar::SetFlagByName("vulkan_frame_report",
+                                   std::to_string(++frame_report_requests_))) {
+        REXSYS_INFO("[input] F9: logging the next frame's draws");
+      }
+    }
+    frame_report_down_prev_ = frame_report_down;
+
     // Debug-console toggle key (default F4); see the Windows path above.
     uint16_t unlock_vk = static_cast<uint16_t>(
         rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
@@ -549,6 +560,8 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   [[maybe_unused]] bool cursor_hidden_ = false;  // Windows: SDK window cursor hidden
   bool console_open_ = false;    // debug menu open -> mouse lock released
   bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
+  [[maybe_unused]] bool frame_report_down_prev_ = false;  // F9 state (non-Windows)
+  [[maybe_unused]] int32_t frame_report_requests_ = 0;  // F9 presses (vulkan_frame_report)
 #ifndef _WIN32
   // Held-key table indexed by rex::ui::VirtualKey (Win32 VK numbering, so the
   // cvar mapping means the same thing on every platform). Written on the UI

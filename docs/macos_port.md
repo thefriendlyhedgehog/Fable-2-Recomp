@@ -264,6 +264,25 @@ waits" are the other blocking fence waits (readbacks, resource reuse).
 next work, so the time went to the guest CPU side. The `FSI stats` line
 every 300 frames (fps, longest frame, frames over 40 ms) is always on.
 
+### Capturing a frame
+
+Instead of one flag per run, one capture gives the shaders Metal actually ran
+and every draw of one frame, which can then be analyzed offline:
+
+- `MVK_CONFIG_SHADER_DUMP_DIR=<dir>` (MoltenVK) writes the SPIR-V and the
+  converted Metal source of every shader it compiles.
+- `--dump_shaders=<dir>` (SDK) writes the guest ucode and, with the patch,
+  the translated SPIR-V named by guest shader hash, so the Metal files can be
+  matched to the game's shaders.
+- `vulkan_frame_report` (SDK patch): changing its value logs every draw and
+  resolve of the next frame as `[frame]` lines (shaders, render targets with
+  formats and blend state, guest MSAA, depth, alpha test and alpha to
+  coverage). The app changes it on F9 (fn+F9 on a Mac keyboard).
+- `tools/analyze_mac_capture.py` summarizes both: which EDRAM (FSI) fragment
+  shaders got Metal's raster order group (without it, overlapping fragments
+  race), whether vertex positions are invariant, and the frame's draws grouped
+  by pixel shader and state.
+
 ### Ported from himdo/rexglue-sdk
 
 Upstream's Windows build moved to the himdo/rexglue-sdk fork. Its fixes
