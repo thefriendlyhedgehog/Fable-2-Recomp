@@ -456,6 +456,15 @@ ordering holes:
   (both in `TRANSFER_DST`, so the usage did not change); now a
   transfer-write to transfer-write barrier orders them.
 
+With all three fixed, hoisting still flickers and turning it off does not,
+while the resolves the shadow draws sample barely change between frames
+(dumps of 24 consecutive frames). So hoisting still moves some upload ahead
+of something that needed the old data, most likely vertex or heightmap
+data the ground draws read from shared memory. It brought no measurable
+speed either (heavy scenes 12-14 fps both ways), so it stays opt-in and
+the tools no longer pass it. The fixes stay: they are correct without
+hoisting too.
+
 ### Ported from himdo/rexglue-sdk
 
 Upstream's Windows build moved to the himdo/rexglue-sdk fork. Its fixes

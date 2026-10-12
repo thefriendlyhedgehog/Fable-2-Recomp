@@ -39,21 +39,34 @@ pixels (before the fix, whole quads changed the picture a lot).
   That shader is a general material / lighting shader (base pass fmt 3,
   lighting fmt 12, also the hero), not only screen-space shadows.
 
-Candidates, roughly by likelihood (a review against upstream Xenia and
-xenia-edge, 2026-10-12, found and fixed three ordering holes; see
-`docs/macos_port.md`, "Shared memory and texture load ordering"):
+**Cause found (2026-10-12): upload hoisting.** The flicker test with
+`--vulkan_hoist_shared_memory_uploads` still flickers after the ordering
+fixes below; the same test without it does not (all 16 shots within
+1.3-1.8% of shot 00, snowflakes only, and the ground by the trail is soft
+and lit in every shot). The resolves are not the cause: dumps of 24
+consecutive frames (`dump 24`) change by 0.2% (mask), 1.4% / 0.6% (shadow
+maps) and 0.2% (scene depth) per frame. So hoisting still reorders some
+non-resolve data the ground draws read from shared memory (vertex or
+heightmap data most likely), even with only first uses of pages hoisted.
+Hoisting also brought no measurable speed: heavy scenes ran 12-14 fps with
+and without it (log 070 with, 071 without; not identical scenes). **Do not
+pass `--vulkan_hoist_shared_memory_uploads`**; the capture commands no
+longer do. Making it safe is only worth it if a profile shows the pass
+restarts it avoids matter; xenia-edge's zero-copy shared memory
+(`VK_EXT_external_memory_host`) would remove most uploads instead.
+
+Ordering holes found by a review against upstream Xenia and xenia-edge and
+fixed anyway (see `docs/macos_port.md`, "Shared memory and texture load
+ordering"):
 1. Upload hoisting could reorder uploads of the same page and overtake
-   earlier reads and GPU writes. Fixed: only first uses of pages in a
-   submission are hoisted. Next: the flicker test with the fix (hoisting on,
-   as usual); then, if it still flickers, without hoisting.
+   earlier reads and GPU writes. Now only first uses of pages in a
+   submission are hoisted; not enough, see above.
 2. Stale textures: a texture could be marked up to date with data the CPU
    had already changed again (xenia-edge 9781a75a), or two loads of one
    image in a submission could land in either order. Both fixed.
-3. A resolve sampled before it is complete. Next: dump the mask and shadow
-   maps over several consecutive frames and see which one changes.
-4. Resolve readback is unlikely: memexport readback is off on macOS and the
-   only forced resolve readback (`0x12704000`) needs `[patches]
-   hero_dog_texture_readback`, which is off. (Background:
+3. Resolve readback is unlikely to matter: memexport readback is off on
+   macOS and the only forced resolve readback (`0x12704000`) needs
+   `[patches] hero_dog_texture_readback`, which is off. (Background:
    `docs/macos_port.md`, "Readback defaults on macOS".)
 
 Resolve numbers differ between frames (the mask was resolve 15, 18, 23 or
@@ -148,7 +161,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
-| - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; the user always passes it) |
+| - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; **causes the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 
@@ -173,12 +186,14 @@ the same way as Xenia's ROV path.
 
 ### 2. Performance
 
-- GPU at 100%; ~29 fps at the brazier with upload hoisting; heavy scenes
-  were 130-400 ms per frame before the fixes. A Metal System Trace put
-  fragment work at 84% of GPU time (FSI: every pixel shader does the EDRAM
-  read-modify-write with interlock).
-- Done: pass restarts from mid-frame uploads (`vulkan_hoist_shared_memory_uploads`),
-  pipeline store loading, thread QoS, async pipeline waits.
+- GPU at 100%; ~28 fps in light scenes, 12-14 fps in heavy ones (with or
+  without upload hoisting); heavy scenes were 130-400 ms per frame before
+  the fixes. A Metal System Trace put fragment work at 84% of GPU time
+  (FSI: every pixel shader does the EDRAM read-modify-write with
+  interlock).
+- Done: pipeline store loading, thread QoS, async pipeline waits. Tried and
+  dropped: upload hoisting (`vulkan_hoist_shared_memory_uploads`; no
+  measurable gain, causes flicker).
 - Ideas not done: profile which passes cost most (Instruments with the
   frame report's pass list), the host render target path (`fbo`) for
   comparison, fewer FSI restarts, `game_msaa` effects on render targets that

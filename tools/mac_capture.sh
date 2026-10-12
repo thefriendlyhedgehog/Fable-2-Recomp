@@ -8,10 +8,10 @@
 # out/capture/dumps; tools/mac_resolve_dumps.py turns them into PNGs.
 # A script (or Claude) can drive the running game by writing commands to
 # out/capture/command (debug_command_file: report, sweep, quit, press <button>
-# [ms], wait <ms>; write another name and rename it).
+# [ms], wait <ms>, dump <frames>; write another name and rename it).
 #
 # Usage: tools/mac_capture.sh [extra game flags...]
-#   Usually: tools/mac_capture.sh --merge_controllers --vulkan_hoist_shared_memory_uploads
+#   Usually: tools/mac_capture.sh --merge_controllers
 #   In game: load the save, wait until the problem shows, then keep still for
 #   30 seconds (a frame is reported every 20 seconds by itself; 9 / fn+F9 or
 #   the command "report" reports the next one at once, 0 or "sweep" runs the

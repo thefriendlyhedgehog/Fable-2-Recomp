@@ -20,7 +20,7 @@ ReXGlue (Xenia-derived) static recompilation of Fable II. The app is in
 - Repo on the Mac: `/Volumes/MacMiniExternal/Games/fable2/Fable-2-Recomp`;
   game content in the repo root (`--game_data_root="$PWD"`).
 - Build: `tools/build_sdk_mac.sh && ./build.sh -release fable_2`.
-- Capture and summary: `tools/mac_capture.sh --merge_controllers --vulkan_hoist_shared_memory_uploads`
+- Capture and summary: `tools/mac_capture.sh --merge_controllers` (not `--vulkan_hoist_shared_memory_uploads`: it causes flicker)
   (summary in `out/capture/summary.txt`; analyzer `tools/analyze_mac_capture.py`).
 - SDK changes go into `thirdparty/sdk_mac_vulkan_fixes.patch`: edit
   `thirdparty/rexglue-sdk-src/{src,include}`, then `tools/sdk_patch_refresh.sh`,
