@@ -27,9 +27,14 @@ dumps. A dark band with stepped edges on the ground next to the glowing trail
 went away without ps `401A01FD4E5F8757` (a general material / lighting
 shader, also the hero) in one sweep, but was there without it in the next,
 so that is not established; its outline looks like the shadow of the roof on
-the right. Next: decide whether it is wrong at all (a 360 reference of the
-same spot), and whether it flickers between frames (several baseline shots
-in a row).
+the right. **It flickers** (the user confirms; flicker test 2026-10-12: 16 baseline
+shots 250 ms apart with `--debug_sweep_steps="f00;f01;...;f15"
+--debug_sweep_settle_ms=250`, standing still; shots 12 and 15 have the dark
+area, the others not, 6% of pixels vs. under 2% for snowflakes). So some
+input of the ground / lighting draws changes between frames. Candidates:
+upload hoisting (`vulkan_hoist_shared_memory_uploads`, always on in these
+runs), a resolve sampled before it is complete or a stale copy (mask
+`0x12B17000`, shadow maps), the readback of a resolve.
 
 **Older note: problem 1 below (black shadow areas).** With correct derivatives,
 shadowed areas are now plainly pitch black (a whole building side in the
