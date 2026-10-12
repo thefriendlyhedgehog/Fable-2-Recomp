@@ -152,8 +152,19 @@ class Fable2App : public rex::ReXApp {
     // the app and the SDK only knows "read back resolves to these addresses".
     {
       const fable2::config::Values& cfg = fable2::config::Get();
+#ifdef __APPLE__
+      // The macOS SDK patch (thirdparty/sdk_mac_vulkan_fixes.patch) takes the
+      // femtofork's filters as explicit qualifiers: only the color, 8_8_8_8,
+      // PM4_DRAW_INDX_2 3-index rectangle-list blit is read back. Another
+      // texture of a different format is resolved into the same window every
+      // frame and must not force a GPU sync each time. (himdo/rexglue-sdk
+      // applies the blit filter itself and reads the address only.)
+      constexpr std::string_view kHeroDogForceAddress = "0x12704000:color:fmt=8_8_8_8:blit";
+#else
+      constexpr std::string_view kHeroDogForceAddress = "0x12704000";
+#endif
       const std::string_view force_addr =
-          cfg.hero_dog_texture_readback ? "0x12704000" : "";
+          cfg.hero_dog_texture_readback ? kHeroDogForceAddress : "";
       if (rex::cvar::GetFlagSource("readback_resolve_force_addresses") ==
           rex::cvar::Source::kDefault) {
         if (rex::cvar::SetFlagByName("readback_resolve_force_addresses", force_addr)) {
