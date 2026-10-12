@@ -240,7 +240,7 @@ luminance at 280x180 / 560x360).
   control flow of the entry point; the translator now ends the interlock in
   a helper function (`ca65995`). Reproduced and verified offline
   (`tools/sdk_offline`).
-- Invariant vertex position (`31582b2`), upload hoisting (`ce9de4e`),
+- Invariant vertex position (`31582b2`), upload hoisting (`ce9de4e`; opt-in, not used since it causes flicker),
   `merge_controllers` (`9962d5c`), render pass end and FSI statistics
   (`2b93bfe`, `b537784`), himdo/rexglue-sdk fixes and async pipeline waits
   (`1882857`), exclusive long-frame timing, qualified forced readbacks and
