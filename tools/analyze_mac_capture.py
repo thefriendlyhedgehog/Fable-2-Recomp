@@ -2,11 +2,11 @@
 """Summarize a macOS capture: the Metal shaders MoltenVK compiled, and one
 frame's draws (vulkan_frame_report), short enough to paste.
 
-Capture (see docs/macos_port.md, "Capturing a frame"):
-    MVK_CONFIG_SHADER_DUMP_DIR=$PWD/out/capture/mvk ./run_and_watch.sh \\
-        --game_data_root="$PWD" --dump_shaders="$PWD/out/capture/rex"
-    (in game: fn+F9 once, wait a second, quit)
-    python3 tools/analyze_mac_capture.py
+Capture with tools/mac_capture.sh (see docs/macos_port.md, "Capturing a
+frame"); it runs this afterwards. To analyze the last capture again:
+    python3 tools/analyze_mac_capture.py --mvk out/capture/mvk --rex out/capture/rex
+The log is read with its rotated parts (fable_2_NNN.1.log, ...), since the
+SDK's log rotates every 5 MB by default.
 
 Shaders: for the fragment shaders that emulate EDRAM with fragment shader
 interlock (they use xe_edram), whether Metal got the raster order group that
@@ -28,8 +28,32 @@ import sys
 
 
 def newest_log(log_dir):
-    logs = sorted(glob.glob(os.path.join(log_dir, "fable_2_*.log")), key=os.path.getmtime)
+    # Base logs only (fable_2_056.log), not their rotated parts (fable_2_056.1.log).
+    logs = [p for p in glob.glob(os.path.join(log_dir, "fable_2_*.log"))
+            if re.search(r"fable_2_\d+\.log$", p)]
+    logs.sort(key=os.path.getmtime)
     return logs[-1] if logs else None
+
+
+def log_parts(path):
+    """The log and its rotated parts, oldest first. The SDK's log rotates at
+    log_max_file_size_mb (5 MB): the full file is renamed name.1.log (the
+    older ones move up to name.2.log, ...) and logging goes on in name.log."""
+    base, ext = os.path.splitext(path)
+    parts = []
+    for part in glob.glob(glob.escape(base) + ".*" + ext):
+        m = re.match(re.escape(base) + r"\.(\d+)" + re.escape(ext) + "$", part)
+        if m:
+            parts.append((int(m.group(1)), part))
+    return [part for _, part in sorted(parts, reverse=True)] + [path]
+
+
+def read_log(path):
+    lines = []
+    for part in log_parts(path):
+        with open(part, errors="replace") as f:
+            lines.extend(f.read().splitlines())
+    return lines
 
 
 def guest_hashes_by_spirv(rex_dir):
@@ -93,13 +117,14 @@ def analyze_shaders(mvk_dir, rex_dir, show, detail=False):
           f"{with_rog}, without: {len(fsi) - with_rog}")
     print(f"  FSI fragment shaders reading the sample mask: {sum(1 for s in fsi if s[2])}")
     without = [s for s in fsi if not s[1]]
-    for name, rog, sample_mask, decls, guest, path in (without or fsi)[:show]:
+    listed = without if (without or not detail) else fsi
+    for name, rog, sample_mask, decls, guest, path in listed[:show]:
         print(f"  {'WITHOUT' if not rog else 'with'} raster order group: {name}"
               f"{'  <- ' + guest if guest else ''}")
         for d in decls[:3]:
             print(f"      {d[:160]}")
-    if fsi:
-        print(f"  example FSI shader for a closer look: {(without or fsi)[0][5]}")
+    if listed:
+        print(f"  example FSI shader for a closer look: {listed[0][5]}")
     if detail and without:
         # Every line of the shader that touches the EDRAM buffer, and the
         # declarations of the other EDRAM shaders for comparison.
@@ -176,9 +201,11 @@ DRAW_RE = re.compile(
     r"poly offset (\d)(\d)( \| new pass)?")
 
 
-def analyze_frame(log, top, find=()):
-    with open(log, errors="replace") as f:
-        lines = f.read().splitlines()
+def analyze_frame(log, top, find=(), report=-1):
+    parts = log_parts(log)
+    lines = read_log(log)
+    print(f"log: {os.path.basename(log)}"
+          f"{f' and {len(parts) - 1} rotated parts' if len(parts) > 1 else ''}, {len(lines)} lines")
     begins = [i for i, line in enumerate(lines) if "[frame] begin" in line]
     if not begins:
         f9 = sum(1 for line in lines if "F9: logging" in line)
@@ -196,11 +223,12 @@ def analyze_frame(log, top, find=()):
         start, end = begins[-1], len(lines) - 1
         print(f"frame: {lines[start].split('[frame] ')[1]} ... (no end)")
     else:
-        start, end = complete[-1]
+        chosen = complete[max(-len(complete), min(report, len(complete) - 1))]
+        start, end = chosen
         stamp = re.match(r"\[(\d{4}-\d\d-\d\d [\d:.]+)\]", lines[start])
         print(f"frame: {lines[start].split('[frame] ')[1]} ... {lines[end].split('[frame] ')[1]}"
-              f" (the last of {len(complete)} complete reports"
-              f"{', logged ' + stamp.group(1) if stamp else ''})")
+              f" (report {complete.index(chosen) + 1} of {len(complete)} complete ones"
+              f"{', logged ' + stamp.group(1) if stamp else ''}; --report picks another)")
     frame = lines[start:end + 1]
     groups = collections.Counter()
     msaa = collections.Counter()
@@ -251,7 +279,129 @@ def analyze_frame(log, top, find=()):
     print(f"  resolves: {len(resolves)}")
     for r in resolves[:40]:
         print(f"    {r[:200]}")
+    draws = parse_draws(frame)
+    analyze_multipass(draws)
+    analyze_particles(draws)
     analyze_textures(frame, textures, sampled, top)
+
+
+PRIMITIVES = {1: "points", 2: "lines", 3: "line strip", 4: "triangles", 5: "fan", 6: "strip",
+              7: "triangles w", 8: "rectangles", 12: "line loop", 13: "quads", 14: "quad strip",
+              15: "polygon"}
+BLEND_FACTORS = {0: "0", 1: "1", 4: "src", 5: "1-src", 6: "srcA", 7: "1-srcA", 8: "dst",
+                 9: "1-dst", 10: "dstA", 11: "1-dstA", 12: "const", 13: "1-const",
+                 14: "constA", 15: "1-constA", 16: "srcAsat"}
+BLEND_OPS = {0: "+", 1: "-", 2: "min", 3: "max", 4: "rev-"}
+
+
+def blend_name(value):
+    """RB_BLENDCONTROL as 'src*F op dst*G' for color (alpha if different)."""
+    value = int(value, 16)
+
+    def part(shift):
+        src = BLEND_FACTORS.get(value >> shift & 0x1F, "?")
+        op = BLEND_OPS.get(value >> (shift + 5) & 0x7, "?")
+        dst = BLEND_FACTORS.get(value >> (shift + 8) & 0x1F, "?")
+        if (src, op, dst) == ("1", "+", "0"):
+            return "opaque"
+        return f"src*{src} {op} dst*{dst}"
+
+    color, alpha = part(0), part(16)
+    return color if color == alpha else f"{color}, alpha {alpha}"
+
+
+def parse_draws(frame):
+    draws = []
+    for position, line in enumerate(frame):
+        m = DRAW_RE.search(line)
+        if not m:
+            continue
+        (vs, ps, prim, count, packet, samples, pipeline_samples, pitch, targets, dfmt, dbase,
+         ztest, zfunc, zwrite, stencil, atest, afunc, a2c, cull, po_f, po_b, new_pass) = m.groups()
+        blends = re.findall(r"rt(\d) fmt (\d+) base \d+ mask ([0-9A-F]) blend ([0-9A-F]{8})", targets)
+        draws.append({
+            "index": len(draws), "vs": vs, "ps": ps, "prim": int(prim), "count": int(count),
+            "msaa": samples, "pitch": pitch, "dbase": dbase, "ztest": ztest == "1",
+            "zfunc": zfunc, "zwrite": zwrite == "1", "atest": atest == "1", "afunc": afunc,
+            "a2c": a2c == "1", "cull": cull or "none", "poly_offset": "1" in (po_f + po_b),
+            "color": bool(blends), "blends": blends, "textures": textures_of(line)})
+    return draws
+
+
+def analyze_multipass(draws):
+    """Meshes drawn in a depth-only pass and again with color on the same
+    surface (Fable II: a depth prepass, the base pass, then additive lighting
+    passes with a greater-or-equal depth test). The later passes only cover
+    the pixels where they compute exactly the depth the prepass stored, so
+    anything that differs between the passes (vertex shader, MSAA, polygon
+    offset, culling) can leave lines along triangle edges."""
+    meshes = collections.defaultdict(list)
+    for d in draws:
+        if d["count"] >= 30 and d["ztest"]:
+            meshes[(d["prim"], d["count"], d["pitch"], d["dbase"])].append(d)
+    multipass = {k: v for k, v in meshes.items()
+                 if any(not d["color"] for d in v) and any(d["color"] for d in v)}
+    print(f"  meshes drawn depth-only and again with color on the same surface "
+          f"(same primitive and index count): {len(multipass)}")
+    if not multipass:
+        return
+    checks = collections.Counter()
+    examples = collections.defaultdict(list)
+    for key, passes in multipass.items():
+        depth_vs = {d["vs"] for d in passes if not d["color"]}
+        color_vs = {d["vs"] for d in passes if d["color"]}
+        found = []
+        if depth_vs != color_vs:
+            found.append("depth-only and color passes use different vertex shaders")
+        if len({d["msaa"] for d in passes}) > 1:
+            found.append("MSAA differs between passes")
+        if len({d["poly_offset"] for d in passes}) > 1:
+            found.append("polygon offset in some passes only")
+        if len({d["cull"] for d in passes}) > 1:
+            found.append("culling differs between passes")
+        if not found:
+            found.append("all passes consistent")
+        for f in found:
+            checks[f] += 1
+            examples[f].append(passes)
+    for f, n in checks.most_common():
+        print(f"    {n:4d} meshes: {f}")
+    for f in checks:
+        if f == "all passes consistent":
+            continue
+        for passes in examples[f][:2]:
+            print(f"      e.g. {PRIMITIVES.get(passes[0]['prim'], passes[0]['prim'])} "
+                  f"x{passes[0]['count']} pitch {passes[0]['pitch']}:")
+            for d in passes[:6]:
+                what = (", ".join(f"rt{rt} fmt {fmt} {blend_name(b)}" for rt, fmt, _, b in d["blends"])
+                        or "depth only")
+                print(f"        draw {d['index']}: vs {d['vs']} ps {d['ps']} msaa {d['msaa']}x "
+                      f"f{d['zfunc']}{' write' if d['zwrite'] else ''}"
+                      f"{' poly offset' if d['poly_offset'] else ''} cull {d['cull']} | {what}")
+
+
+def analyze_particles(draws):
+    """Blended draws that do not write depth (particles such as snow, fire,
+    glows) and non-triangle primitives, by pixel shader, with what they
+    sample."""
+    groups = collections.OrderedDict()
+    for d in draws:
+        blended = [b for _, _, _, b in d["blends"] if blend_name(b) != "opaque"]
+        if not ((blended and not d["zwrite"]) or d["prim"] not in (4, 5, 6)):
+            continue
+        key = (PRIMITIVES.get(d["prim"], str(d["prim"])), d["ps"],
+               ", ".join(f"fmt {fmt} {blend_name(b)}" for _, fmt, _, b in d["blends"]) or "no color",
+               (" alpha test f" + d["afunc"] if d["atest"] else "") + (" A2C" if d["a2c"] else ""))
+        g = groups.setdefault(key, {"draws": 0, "count": 0, "textures": collections.Counter()})
+        g["draws"] += 1
+        g["count"] += d["count"]
+        for (address, description), fetch in d["textures"]:
+            g["textures"][f"t{fetch} {description}"] += 1
+    print(f"  blended draws without depth write, and non-triangle primitives: {len(groups)} groups")
+    for (prim, ps, target, alpha), g in sorted(groups.items(), key=lambda kv: -kv[1]["draws"])[:12]:
+        print(f"    {g['draws']:4d}x {prim} ({g['count']} indices) ps {ps} | {target}{alpha}")
+        for t, n in g["textures"].most_common(2):
+            print(f"          samples {t[:180]}")
 
 
 def analyze_textures(frame, textures, sampled, top):
@@ -311,6 +461,9 @@ def main():
                              "fragment shader without a raster order group")
     parser.add_argument("--find", action="append", default=[],
                         help="guest shader hash: list the frame's draws that use it")
+    parser.add_argument("--report", type=int, default=-1,
+                        help="which complete frame report of the log (default -1, the last; "
+                             "1 is the first, -2 the one before the last)")
     args = parser.parse_args()
     log = args.log or newest_log(os.path.join(repo, "out/build/mac-arm64-release/logs"))
     if os.path.isdir(args.mvk):
@@ -318,7 +471,7 @@ def main():
     else:
         print(f"shaders: {args.mvk} does not exist (was MVK_CONFIG_SHADER_DUMP_DIR set?)")
     if log:
-        analyze_frame(log, args.top, args.find)
+        analyze_frame(log, args.top, args.find, args.report - 1 if args.report > 0 else args.report)
     else:
         print("frame: no log found")
 

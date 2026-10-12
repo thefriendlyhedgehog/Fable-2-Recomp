@@ -293,6 +293,19 @@ and every draw of one frame, which can then be analyzed offline:
 `vulkan_frame_report_interval=20` (SDK patch: a frame report every 20
 seconds by itself, so the capture does not depend on F9 reaching the game),
 then the summary of the last complete report (copied to the clipboard).
+The SDK's log rotates at `log_max_file_size_mb` (5 MB by default: the full
+file becomes `fable_2_NNN.1.log`, and so on), and a frame report with
+textures is a few MB, so the analyzer reads a log together with its rotated
+parts, and the capture script raises the limit to 100 MB. To analyze the
+last capture again without running the game:
+`python3 tools/analyze_mac_capture.py --mvk out/capture/mvk --rex out/capture/rex`
+(`--report N` picks another of the log's reports). Besides the groups, the
+summary checks every mesh drawn depth-only and again with color on the same
+surface (Fable II's depth prepass, base pass and greater-or-equal lighting
+passes) for differences between the passes that can leave lines along
+triangle edges (vertex shader, MSAA, polygon offset, culling), and lists the
+blended draws without depth write and the non-triangle primitives
+(particles such as snow) with their blend, alpha state and textures.
 
 ### Raster order groups for every EDRAM shader
 
