@@ -65,6 +65,7 @@ __pycache__/
 !tools/summarize_gputrace.py
 !tools/analyze_mac_capture.py
 !tools/mac_sweep_sheet.py
+!tools/mac_resolve_dumps.py
 !tools/mac_capture.sh
 !tools/sdk_patch_refresh.sh
 

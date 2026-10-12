@@ -3,7 +3,9 @@
 # shaders MoltenVK compiles (MVK_CONFIG_SHADER_DUMP_DIR), the SDK's shader dump
 # (--dump_shaders) and one frame's draws (F9 -> vulkan_frame_report), then
 # prints a short summary (tools/analyze_mac_capture.py) and copies it to the
-# clipboard.
+# clipboard. Every frame report also dumps the resolves listed in DUMP_RESOLVES
+# (the shadow / AO mask, the scene depth and the first shadow map) to
+# out/capture/dumps; tools/mac_resolve_dumps.py turns them into PNGs.
 #
 # Usage: tools/mac_capture.sh [extra game flags...]
 #   In game: load the save, wait until the problem shows, then keep still for
@@ -20,7 +22,8 @@ if [ ! -x "$EXE" ]; then
     exit 1
 fi
 rm -rf "$OUT"
-mkdir -p "$OUT/mvk" "$OUT/rex"
+mkdir -p "$OUT/mvk" "$OUT/rex" "$OUT/dumps"
+DUMP_RESOLVES=0x12B17000,0x1A02A000,0x12BE1000
 
 echo "Starting the game. Load the save, wait until the problem shows, then keep still for"
 echo "30 seconds (a frame is reported every 20 s; 9 or fn+F9 reports one at once) and quit"
@@ -28,7 +31,8 @@ echo "(Cmd+Q). Debug keys: 6 / 7 / 8 (or fn+F6 / F7 / F8); 0 runs the debug swee
 echo "about 25 seconds: it saves a screenshot per setting). The summary appears here afterwards."
 MVK_CONFIG_SHADER_DUMP_DIR="$PWD/$OUT/mvk" "$EXE" --game_data_root="$PWD" \
     --dump_shaders="$PWD/$OUT/rex" --vulkan_frame_report_interval=20 \
-    --log_max_file_size_mb=100 --debug_sweep_dir="$PWD/$OUT/sweep" "$@" \
+    --log_max_file_size_mb=100 --debug_sweep_dir="$PWD/$OUT/sweep" \
+    --vulkan_debug_dump_dir="$PWD/$OUT/dumps" --vulkan_debug_dump_resolves="$DUMP_RESOLVES" "$@" \
     > "$OUT/stdout.log" 2>&1
 echo "Game exited ($?)."
 
@@ -38,6 +42,9 @@ if ls "$OUT"/sweep/[0-9][0-9]_*.png >/dev/null 2>&1; then
     if command -v open >/dev/null 2>&1 && [ -f "$OUT/sweep/sheet.png" ]; then
         open "$OUT/sweep/sheet.png"
     fi
+fi
+if ls "$OUT"/dumps/resolve_*.bin >/dev/null 2>&1; then
+    python3 tools/mac_resolve_dumps.py "$OUT/dumps" >> "$OUT/summary.txt" 2>&1
 fi
 cat "$OUT/summary.txt"
 if command -v pbcopy >/dev/null 2>&1; then

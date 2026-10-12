@@ -23,11 +23,20 @@ pixels (before the fix, whole quads changed the picture a lot).
 shadowed areas are now plainly pitch black (a whole building side in the
 last sweep). On the 360 they are soft and lit by ambient light.
 
-1. Run the capture, stand where a wall or building is in shadow, press **0**.
-2. Compare tile 00 with tile 08 (without the screen-space shadow shader
-   `401A01FD4E5F8757`). If 08 removes the black, the shadow shader's inputs
-   are wrong (shadow maps, scene depth, the comparison); if not, look at the
-   one-channel mask (resolve to `0x12B17000`) that the base pass samples.
+In the last sweep, tile 08 (without the screen-space shadow shader
+`401A01FD4E5F8757`) still had the black building, so the black likely comes
+from elsewhere: the one-channel mask (resolve to `0x12B17000`) that ~1100
+base-pass and lighting draws sample, or the base pass's own lighting.
+
+1. Run the capture, stand where a wall or building is in shadow, wait for a
+   frame report (every 20 s, or press 9), press **0**, quit.
+2. `tools/mac_capture.sh` dumps the mask, the scene depth (`0x1A02A000`) and
+   the first shadow map (`0x12BE1000`) at every frame report
+   (`vulkan_debug_dump_resolves`), to `out/capture/dumps/*.png`, with value
+   statistics at the end of `out/capture/summary.txt`
+   (`tools/mac_resolve_dumps.py`). Compare the mask with the screenshot: if
+   it is black (0) where the picture is black, find what draws it (the draws
+   before resolve 24 in the frame report); if not, the base pass is next.
 
 ## Building and running (on the Mac)
 
@@ -108,6 +117,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS) |
 | - | `vulkan_invariant_position` | invariant vertex position (on) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; the user always passes it) |
+| - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, read back the resolves to the listed addresses and write them untiled (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 
 ## Open problems, with evidence
