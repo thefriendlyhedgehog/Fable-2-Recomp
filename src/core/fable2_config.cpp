@@ -80,6 +80,14 @@ mouse_look = true
 # Default: 256
 mouse_look_scale = 256
 
+# Every connected controller drives player 1 (macOS/Linux). For a controller
+# that shows up as two devices, such as the Steam Controller on macOS without
+# Steam (Valve's driver and Apple's GameController framework each report it,
+# and the stick may only arrive on the second, which would be player 2).
+# A second player's controller then also drives player 1.
+# Default: false
+merge_controllers = false
+
 [patches]
 # Toggles for the recomp-level (mid-asm hook) patches, consulted at runtime
 # by the hook bodies (src/core/fable2_hooks.cpp) - no rebuild needed.
@@ -267,6 +275,9 @@ bool Load(const std::filesystem::path& path) {
     values.mouse_look_scale = static_cast<int32_t>(Read<int64_t>(
         input_table, "input", "mouse_look_scale", "integer",
         values.mouse_look_scale));
+    values.merge_controllers =
+        Read<bool>(input_table, "input", "merge_controllers", "boolean",
+                   values.merge_controllers);
   }
   const toml::path patches_path{"patches"};
   const auto patches = root[patches_path];

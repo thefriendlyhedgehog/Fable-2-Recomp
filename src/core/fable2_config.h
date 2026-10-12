@@ -42,6 +42,8 @@ struct Values {
   // an empty/missing config can never wedge input.
   bool mouse_look = true;
   int32_t mouse_look_scale = 256;  // range 1..4096 (cvar constraint)
+  // Route every controller to player 1 (cvar merge_controllers, macOS/Linux).
+  bool merge_controllers = false;
   // [patches] - toggles for the recomp-level (mid-asm hook) patches. The
   // hook bodies consult these at runtime (src/core/fable2_hooks.cpp), so a patch
   // can be A/B'd with no rebuild. high_tick_rate / higher_hf_tick_rate also

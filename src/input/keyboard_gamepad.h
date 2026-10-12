@@ -48,6 +48,7 @@
 #include <rex/cvar.h>
 #include <rex/input/input.h>
 #include <rex/input/input_driver.h>
+#include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
 #include <rex/runtime.h>
 #include <rex/ui/virtual_key.h>
@@ -74,6 +75,7 @@
 REXCVAR_DECLARE(std::string, keyboard_gamepad_map);
 REXCVAR_DECLARE(bool, mouse_look);
 REXCVAR_DECLARE(int32_t, mouse_look_scale);
+REXCVAR_DECLARE(bool, merge_controllers);
 REXCVAR_DECLARE(std::string, mouse_unlock_key);
 
 namespace fable2 {

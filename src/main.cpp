@@ -56,6 +56,12 @@ REXCVAR_DEFINE_INT32(mouse_look_scale, 256, "Input",
                      "mouse movement (larger = more sensitive). Default comes "
                      "from fable2_config.toml [input] mouse_look_scale.")
     .range(1, 4096);
+REXCVAR_DEFINE_BOOL(merge_controllers, false, "Input",
+                    "Every connected controller drives player 1 (macOS/Linux), for a "
+                    "controller that shows up as two devices, such as the Steam "
+                    "Controller on macOS without Steam. A second player's controller "
+                    "then also drives player 1. Read when the input system starts. "
+                    "Default comes from fable2_config.toml [input] merge_controllers.");
 
 // Key that toggles the debug menu (F4). While the menu is open the mouse lock
 // is released (free cursor); closing it re-locks. This key is excluded from

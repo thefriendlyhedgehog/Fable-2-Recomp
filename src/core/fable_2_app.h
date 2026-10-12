@@ -127,6 +127,16 @@ class Fable2App : public rex::ReXApp {
     config.input_factory = [this](bool tool_mode) ->
         std::unique_ptr<rex::system::IInputSystem> {
       auto system = rex::input::CreateDefaultInputSystem(tool_mode);
+#ifndef _WIN32
+      // A controller that shows up as two devices gets two player slots, and
+      // its stick may only arrive on the second (the Steam Controller on
+      // macOS without Steam: Valve's HID driver and Apple's GameController
+      // framework each report it). merge_controllers routes all to player 1.
+      if (REXCVAR_GET(merge_controllers)) {
+        system->SetDeviceAssignment(std::make_unique<rex::input::SharedAssignment>());
+        REXSYS_INFO("[input] merge_controllers: every controller drives player 1");
+      }
+#endif
       system->AddDriver(
           std::make_unique<fable2::KeyboardGamepadDriver>(system->window(), 0));
 #ifdef FABLE2_REMOTE_CONTROL
@@ -406,6 +416,7 @@ class Fable2App : public rex::ReXApp {
     seed_cvar("keyboard_gamepad_map", cfg.keyboard_gamepad_map);
     seed_cvar("mouse_look", cfg.mouse_look ? "true" : "false");
     seed_cvar("mouse_look_scale", std::to_string(cfg.mouse_look_scale));
+    seed_cvar("merge_controllers", cfg.merge_controllers ? "true" : "false");
 #ifdef __APPLE__
     // MoltenVK also reports its per-draw "Metal does not support disabling
     // primitive restart" warning through VK_EXT_debug_utils, which
