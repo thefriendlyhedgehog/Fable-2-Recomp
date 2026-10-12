@@ -41,7 +41,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -76,6 +81,7 @@
 
 // Declared here, defined in main.cpp (REXCVAR_DEFINE_* must live in a .cpp).
 REXCVAR_DECLARE(std::string, keyboard_gamepad_map);
+REXCVAR_DECLARE(std::string, debug_command_file);
 REXCVAR_DECLARE(bool, mouse_look);
 REXCVAR_DECLARE(int32_t, mouse_look_scale);
 REXCVAR_DECLARE(bool, merge_controllers);
@@ -528,6 +534,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     }
     debug_toggle_down_prev_[3] = sweep_down;
 
+    // Commands from debug_command_file (a script driving a capture), also
+    // without focus.
+    PollCommandFile(&buttons);
+
     // Debug-console toggle key (default F4); see the Windows path above.
     uint16_t unlock_vk = static_cast<uint16_t>(
         rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
@@ -647,6 +657,89 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   [[maybe_unused]] int32_t frame_report_requests_ = 0;  // F9 presses (vulkan_frame_report)
   [[maybe_unused]] bool debug_toggle_down_prev_[4] = {};  // F6-F8, F10 state (non-Windows)
 #ifndef _WIN32
+  // debug_command_file state (guest input poll thread only). A press with
+  // mask 0 is a wait.
+  struct CommandPress {
+    uint16_t mask;
+    int32_t ms;
+  };
+  std::deque<CommandPress> command_presses_;
+  bool command_press_active_ = false;
+  uint16_t command_press_mask_ = 0;
+  std::chrono::steady_clock::time_point command_press_end_{};
+  std::chrono::steady_clock::time_point next_command_poll_{};
+
+  void PollCommandFile(uint16_t* buttons) {
+    auto now = std::chrono::steady_clock::now();
+    if (now >= next_command_poll_) {
+      next_command_poll_ = now + std::chrono::milliseconds(250);
+      const std::string& path = REXCVAR_GET(debug_command_file);
+      std::error_code ec;
+      if (!path.empty() && std::filesystem::exists(path, ec)) {
+        std::vector<std::string> lines;
+        {
+          std::ifstream file(path);
+          std::string line;
+          while (std::getline(file, line)) lines.push_back(line);
+        }
+        std::filesystem::remove(path, ec);
+        for (const std::string& line : lines) RunCommand(line);
+      }
+    }
+    // One press (or wait) at a time, with a gap after a press so the game
+    // sees the release.
+    if (command_press_active_ && now >= command_press_end_) {
+      command_press_active_ = false;
+      if (command_press_mask_) {
+        command_presses_.push_front({0, 100});
+      }
+    }
+    if (!command_press_active_ && !command_presses_.empty()) {
+      CommandPress press = command_presses_.front();
+      command_presses_.pop_front();
+      command_press_active_ = true;
+      command_press_mask_ = press.mask;
+      command_press_end_ = now + std::chrono::milliseconds(press.ms);
+    }
+    if (command_press_active_) *buttons |= command_press_mask_;
+  }
+
+  void RunCommand(const std::string& line) {
+    std::istringstream words(line);
+    std::string command;
+    if (!(words >> command)) return;
+    REXSYS_INFO("[input] command file: {}", line);
+    if (command == "report") {
+      rex::cvar::SetFlagByName("vulkan_frame_report", std::to_string(++frame_report_requests_));
+    } else if (command == "sweep") {
+      fable2::debugsweep::Instance().Start();
+    } else if (command == "quit") {
+      rex::ui::WindowedAppContext* ctx = ui_context_.load(std::memory_order_acquire);
+      std::shared_ptr<UiState> ui = ui_;
+      if (ctx) {
+        ctx->CallInUIThreadDeferred([ui] {
+          if (ui->ui_window) ui->ui_window->RequestClose();
+        });
+      }
+    } else if (command == "press") {
+      std::string name;
+      int32_t ms = 150;
+      words >> name >> ms;
+      input_detail::Mapping m;
+      input_detail::FillGuestTarget(m, name);
+      if (!m.button) {
+        REXSYS_WARN("[input] command file: unknown button '{}'", name);
+        return;
+      }
+      command_presses_.push_back({m.button, std::max(ms, 16)});
+    } else if (command == "wait") {
+      int32_t ms = 0;
+      words >> ms;
+      command_presses_.push_back({0, std::max(ms, 0)});
+    } else {
+      REXSYS_WARN("[input] command file: unknown command '{}'", command);
+    }
+  }
   // Held-key table indexed by rex::ui::VirtualKey (Win32 VK numbering, so the
   // cvar mapping means the same thing on every platform). Written on the UI
   // thread by the listener callbacks, read by the guest input poll.

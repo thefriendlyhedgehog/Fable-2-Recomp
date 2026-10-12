@@ -19,7 +19,18 @@ with a sweep: snowflakes are round dots, the hero's face is right, no edge
 lines, and the whole-quads tile now differs from baseline by only 1.9% of
 pixels (before the fix, whole quads changed the picture a lot).
 
-**Next: problem 1 below (black shadow areas).** With correct derivatives,
+**Black shadow areas: narrowed down (2026-10-12).** The mask resolve at
+`0x12B17000` is a plausible sun-shadow mask (white lit, black shadowed); the
+snow in its shadow still gets ambient light. The pitch-black parts are a band
+with straight edges on the ground that disappears when ps `401A01FD4E5F8757`
+is skipped (sweep tile 08). That shader is a general material / lighting
+shader (base pass fmt 3 and lighting fmt 12, also the hero) sampling both
+shadow maps, t6 `0x12BE1000` and t7 `0x12FE1000`, and the scene depth. The
+first shadow map looks sane (dumped); the second is now dumped too. Next:
+check whether the band is where the second map is used (empty or wrong
+content), then the shader's comparison.
+
+**Older note: problem 1 below (black shadow areas).** With correct derivatives,
 shadowed areas are now plainly pitch black (a whole building side in the
 last sweep). On the 360 they are soft and lit by ambient light.
 
@@ -98,6 +109,17 @@ commands that belong together joined with `&&`, output commands ending in
 short outputs. Always show the exact command before asking them to run it.
 On their keyboard F-keys need fn; the debug keys are therefore also on the
 number keys.
+
+## Driving the game without the keyboard
+
+`tools/mac_capture.sh` passes `--debug_command_file=out/capture/command`.
+The input poll reads and deletes that file every 250 ms (no window focus
+needed), one command per line: `report` (= 9), `sweep` (= 0), `quit`,
+`press <button> [ms]`, `wait <ms>`. Write it atomically, e.g.
+`printf 'sweep\n' > out/capture/command.tmp && mv out/capture/command.tmp out/capture/command`.
+Done this way, the user only loads the save; Claude sends `report`, then
+`sweep`, waits for `[sweep] done` in the log, then `quit`. (The keys 9 / 0
+only work while the game window has focus; twice they did not register.)
 
 ## Debug switches (all hot-reloadable SDK/app cvars)
 

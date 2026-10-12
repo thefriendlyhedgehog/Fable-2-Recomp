@@ -79,6 +79,13 @@ REXCVAR_DEFINE_STRING(debug_sweep_dir, "debug_sweep", "Debug",
 REXCVAR_DEFINE_INT32(debug_sweep_settle_ms, 1500, "Debug",
                      "Debug sweep: time between applying a step and its screenshot.")
     .range(100, 20000);
+REXCVAR_DEFINE_STRING(debug_command_file, "", "Debug",
+                      "macOS/Linux: a file the input poll checks every 250 ms; when it "
+                      "exists it is read and deleted, one command per line: report (as 9 / "
+                      "F9), sweep (as 0 / F10), quit (closes the window), press <button> [ms] "
+                      "(gamepad button for player 1, names as in keyboard_gamepad_map, "
+                      "default 150 ms), wait <ms>. Presses and waits run in order. Write it "
+                      "to another name and rename it, so it is never read half-written.");
 REXCVAR_DEFINE_BOOL(merge_controllers, false, "Input",
                     "Every connected controller drives player 1 (macOS/Linux), for a "
                     "controller that shows up as two devices, such as the Steam "

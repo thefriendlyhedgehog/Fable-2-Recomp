@@ -4,8 +4,11 @@
 # (--dump_shaders) and one frame's draws (F9 -> vulkan_frame_report), then
 # prints a short summary (tools/analyze_mac_capture.py) and copies it to the
 # clipboard. Every frame report also dumps the resolves listed in DUMP_RESOLVES
-# (the shadow / AO mask, the scene depth and the first shadow map) to
+# (the shadow mask, the scene depth and both shadow maps) to
 # out/capture/dumps; tools/mac_resolve_dumps.py turns them into PNGs.
+# A script (or Claude) can drive the running game by writing commands to
+# out/capture/command (debug_command_file: report, sweep, quit, press <button>
+# [ms], wait <ms>; write another name and rename it).
 #
 # Usage: tools/mac_capture.sh [extra game flags...]
 #   In game: load the save, wait until the problem shows, then keep still for
@@ -23,7 +26,7 @@ if [ ! -x "$EXE" ]; then
 fi
 rm -rf "$OUT"
 mkdir -p "$OUT/mvk" "$OUT/rex" "$OUT/dumps"
-DUMP_RESOLVES=0x12B17000,0x1A02A000,0x12BE1000
+DUMP_RESOLVES=0x12B17000,0x1A02A000,0x12BE1000,0x12FE1000
 
 echo "Starting the game. Load the save, wait until the problem shows, then keep still for"
 echo "30 seconds (a frame is reported every 20 s; 9 or fn+F9 reports one at once) and quit"
@@ -32,7 +35,8 @@ echo "about 25 seconds: it saves a screenshot per setting). The summary appears 
 MVK_CONFIG_SHADER_DUMP_DIR="$PWD/$OUT/mvk" "$EXE" --game_data_root="$PWD" \
     --dump_shaders="$PWD/$OUT/rex" --vulkan_frame_report_interval=20 \
     --log_max_file_size_mb=100 --debug_sweep_dir="$PWD/$OUT/sweep" \
-    --vulkan_debug_dump_dir="$PWD/$OUT/dumps" --vulkan_debug_dump_resolves="$DUMP_RESOLVES" "$@" \
+    --vulkan_debug_dump_dir="$PWD/$OUT/dumps" --vulkan_debug_dump_resolves="$DUMP_RESOLVES" \
+    --debug_command_file="$PWD/$OUT/command" "$@" \
     > "$OUT/stdout.log" 2>&1
 echo "Game exited ($?)."
 
