@@ -134,7 +134,7 @@ index 2cf24c4..85ab717 100644
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..9d780ed 100644
+index 696ff48..826a8c0 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -164,7 +164,7 @@ index 696ff48..9d780ed 100644
    void UpdateSystemConstantValues(
        bool primitive_polygonal,
        const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
-@@ -801,6 +803,25 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -801,6 +803,30 @@ class VulkanCommandProcessor : public CommandProcessor {
    // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
    // TODO(Triang3l): Change to a deferred compilation handle.
    VkPipeline current_guest_graphics_pipeline_;
@@ -173,6 +173,11 @@ index 696ff48..9d780ed 100644
 +  uint32_t fsi_stats_draws_ = 0;
 +  uint32_t fsi_stats_pass_switches_ = 0;
 +  uint32_t fsi_stats_pipeline_pass_mismatches_ = 0;
++  // Draws by the guest render target's MSAA mode (1x, 2x, 4x), and render
++  // pass (re)starts after the pass had been ended (barriers, copies, resolves,
++  // uploads) rather than for a switch between sample counts.
++  uint32_t fsi_stats_draws_by_msaa_[3] = {};
++  uint32_t fsi_stats_pass_restarts_after_end_ = 0;
 +  std::chrono::steady_clock::time_point fsi_stats_start_;
 +  std::chrono::steady_clock::time_point fsi_stats_last_frame_;
 +  double fsi_stats_max_frame_ms_ = 0.0;
@@ -841,7 +846,7 @@ index 8f2fcb0..c7f886a 100644
          return 0;
        }));
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..35616a1 100644
+index 001f36b..6d11c36 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,7 +11,9 @@
@@ -1018,7 +1023,7 @@ index 001f36b..35616a1 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4111,9 +4172,27 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,9 +4172,31 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -1034,8 +1039,12 @@ index 001f36b..35616a1 100644
 +    uint32_t update_log2 = render_target_cache_->GetFsiHostSampleCountLog2(
 +        render_target_cache_->last_update_render_pass_key().msaa_samples);
 +    ++fsi_stats_draws_;
++    ++fsi_stats_draws_by_msaa_[std::min(update_log2, uint32_t(2))];
 +    if (draw_render_pass != current_render_pass_) {
 +      ++fsi_stats_pass_switches_;
++      if (current_render_pass_ == VK_NULL_HANDLE) {
++        ++fsi_stats_pass_restarts_after_end_;
++      }
 +    }
 +    if (pipeline_fsi_host_sample_count_log2 != update_log2) {
 +      ++fsi_stats_pipeline_pass_mismatches_;
@@ -1048,7 +1057,7 @@ index 001f36b..35616a1 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4350,12 +4429,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +4433,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -1078,7 +1087,7 @@ index 001f36b..35616a1 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,22 +4476,58 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +4480,58 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -1139,7 +1148,7 @@ index 001f36b..35616a1 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +4546,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +4550,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -1147,7 +1156,7 @@ index 001f36b..35616a1 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4944,6 +5070,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5074,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -1157,7 +1166,7 @@ index 001f36b..35616a1 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +5099,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +5103,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -1173,7 +1182,7 @@ index 001f36b..35616a1 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5111,7 +5243,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5247,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -1185,7 +1194,7 @@ index 001f36b..35616a1 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5165,6 +5301,60 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +5305,68 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -1225,16 +1234,24 @@ index 001f36b..35616a1 100644
 +        double seconds = std::chrono::duration<double>(frame_now - fsi_stats_start_).count();
 +        REXGPU_INFO(
 +            "FSI stats over {} frames ({:.1f} s, {:.1f} fps, longest frame {:.0f} ms, "
-+            "{} frames over 40 ms): {} draws/frame, {} render pass (re)starts/frame, "
-+            "{} draws with a pipeline sample count differing from the guest MSAA mode",
++            "{} frames over 40 ms): {} draws/frame ({}/{}/{} at 1x/2x/4x MSAA), {} render "
++            "pass (re)starts/frame ({} after a barrier, copy or upload), {} draws with a "
++            "pipeline sample count differing from the guest MSAA mode",
 +            fsi_stats_frames_, seconds, seconds > 0.0 ? fsi_stats_frames_ / seconds : 0.0,
 +            fsi_stats_max_frame_ms_, fsi_stats_long_frames_, fsi_stats_draws_ / fsi_stats_frames_,
-+            fsi_stats_pass_switches_ / fsi_stats_frames_, fsi_stats_pipeline_pass_mismatches_);
++            fsi_stats_draws_by_msaa_[0] / fsi_stats_frames_,
++            fsi_stats_draws_by_msaa_[1] / fsi_stats_frames_,
++            fsi_stats_draws_by_msaa_[2] / fsi_stats_frames_,
++            fsi_stats_pass_switches_ / fsi_stats_frames_,
++            fsi_stats_pass_restarts_after_end_ / fsi_stats_frames_,
++            fsi_stats_pipeline_pass_mismatches_);
 +        fsi_stats_start_ = frame_now;
 +        fsi_stats_frames_ = 0;
 +        fsi_stats_draws_ = 0;
 +        fsi_stats_pass_switches_ = 0;
 +        fsi_stats_pipeline_pass_mismatches_ = 0;
++        std::fill(std::begin(fsi_stats_draws_by_msaa_), std::end(fsi_stats_draws_by_msaa_), 0u);
++        fsi_stats_pass_restarts_after_end_ = 0;
 +        fsi_stats_max_frame_ms_ = 0.0;
 +        fsi_stats_long_frames_ = 0;
 +      }
@@ -1246,7 +1263,7 @@ index 001f36b..35616a1 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +5420,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +5432,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -1254,7 +1271,7 @@ index 001f36b..35616a1 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5310,7 +5501,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5310,7 +5513,11 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
  
      EndRenderPass();
  
@@ -1267,7 +1284,7 @@ index 001f36b..35616a1 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5654,7 +5849,8 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5654,7 +5861,8 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
  
  void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& viewport_info,
                                                  bool primitive_polygonal,
@@ -1277,7 +1294,7 @@ index 001f36b..35616a1 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5718,6 +5914,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +5926,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
