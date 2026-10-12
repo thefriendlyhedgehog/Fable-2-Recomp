@@ -713,6 +713,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       rex::cvar::SetFlagByName("vulkan_frame_report", std::to_string(++frame_report_requests_));
     } else if (command == "sweep") {
       fable2::debugsweep::Instance().Start();
+    } else if (command == "dump") {
+      int32_t frames = 16;
+      words >> frames;
+      rex::cvar::SetFlagByName("vulkan_debug_dump_frames", std::to_string(std::max(frames, 1)));
     } else if (command == "quit") {
       rex::ui::WindowedAppContext* ctx = ui_context_.load(std::memory_order_acquire);
       std::shared_ptr<UiState> ui = ui_;

@@ -16,6 +16,13 @@ mean and the share of zero and of full-scale values per channel:
   of a depth resolve is in the upper bits).
 Other sizes are only summarized. Pure Python (no Pillow).
 
+Dumps of consecutive frames (vulkan_debug_dump_frames, the command file's
+"dump N") are compared per address: for each dump, the share of bytes that
+differ from the previous dump of the same address. PNGs and statistics are
+written only for the first dump of each address and for dumps that differ
+from the previous one (by more than 0.01% of bytes), which keeps long runs
+fast.
+
 Usage: python3 tools/mac_resolve_dumps.py [dump_dir]   (default out/capture/dumps)
 """
 import glob
@@ -95,15 +102,48 @@ def convert(path):
     return "\n".join(lines)
 
 
+def differing_share(a, b):
+    if len(a) != len(b):
+        return 1.0
+    if a == b:
+        return 0.0
+    step = 4096
+    differing = 0
+    for i in range(0, len(a), step):
+        x, y = a[i:i + step], b[i:i + step]
+        if x != y:
+            differing += sum(1 for p, q in zip(x, y) if p != q)
+    return differing / max(len(a), 1)
+
+
 def main():
     dump_dir = sys.argv[1] if len(sys.argv) > 1 else "out/capture/dumps"
-    paths = sorted(glob.glob(os.path.join(dump_dir, "resolve_*.bin")))
+    paths = sorted(glob.glob(os.path.join(dump_dir, "resolve_*.bin")),
+                   key=lambda p: int(NAME.search(os.path.basename(p)).group(1))
+                   if NAME.search(os.path.basename(p)) else 0)
     if not paths:
         print(f"resolve dumps: none in {dump_dir}")
         return 0
-    print(f"resolve dumps: {len(paths)} in {dump_dir} (PNGs written next to them)")
+    print(f"resolve dumps: {len(paths)} in {dump_dir} (PNGs written next to the first and"
+          f" the changed ones)")
+    previous = {}
+    changes = {}
     for path in paths:
-        print(convert(path))
+        m = NAME.search(os.path.basename(path))
+        address = m.group(3) if m else path
+        with open(path, "rb") as f:
+            data = f.read()
+        share = differing_share(previous[address], data) if address in previous else None
+        previous[address] = data
+        changes.setdefault(address, []).append(share)
+        if share is None or share > 0.0001:
+            print(convert(path) + ("" if share is None else
+                                   f"\n  {100.0 * share:.2f}% of bytes differ from the previous"
+                                   " dump of this address"))
+    print("changes between consecutive dumps, per address (% of bytes):")
+    for address, shares in changes.items():
+        print(f"  0x{address}: " + " ".join("-" if s is None else f"{100.0 * s:.1f}"
+                                             for s in shares))
     return 0
 
 
