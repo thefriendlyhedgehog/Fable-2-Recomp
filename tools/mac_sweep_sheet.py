@@ -25,6 +25,35 @@ DIGITS = {
 }
 
 
+def inflate_stored(stream):
+    """Decode a zlib stream made only of stored (uncompressed) deflate blocks.
+
+    Screenshots from builds before the PNG writer fix carry LEN/NLEN
+    big-endian (deflate wants little-endian), which zlib rejects. Swapping
+    both keeps NLEN the complement of LEN, so the order is told apart by
+    where the block ends: the final block must end right before the 4-byte
+    Adler-32 that closes the stream.
+    """
+    out = bytearray()
+    pos = 2  # zlib header
+    while True:
+        header = stream[pos]
+        final = header & 1
+        if (header >> 1) & 3:
+            raise ValueError("compressed deflate block in a stored-only stream")
+        for order in ("<", ">"):
+            length, inverse = struct.unpack(order + "HH", stream[pos + 1:pos + 5])
+            end = pos + 5 + length
+            if length ^ inverse == 0xFFFF and (end == len(stream) - 4 if final else end < len(stream)):
+                break
+        else:
+            raise ValueError("corrupt stored deflate block")
+        out += stream[pos + 5:end]
+        pos = end
+        if final:
+            return bytes(out)
+
+
 def read_png(path):
     """(width, height, rows of RGB bytes) for 8-bit RGB / RGBA, non-interlaced PNGs."""
     with open(path, "rb") as f:
@@ -47,7 +76,11 @@ def read_png(path):
         elif kind == b"IEND":
             break
     channels = 3 if color_type == 2 else 4
-    raw = zlib.decompress(b"".join(idat))
+    stream = b"".join(idat)
+    try:
+        raw = zlib.decompress(stream)
+    except zlib.error:
+        raw = inflate_stored(stream)
     stride = width * channels
     rows = []
     previous = bytearray(stride)

@@ -9,8 +9,22 @@ shader checks: `tools/sdk_offline/README.md`.
 
 ## Resume here
 
-The last build added a **debug sweep** (key 0, see below) and nobody has run
-it yet. Next step:
+The **debug sweep** (key 0, see below) ran once (capture 2026-10-12): all
+10 steps saved. Average brightness per step (0-255) from the log: 00
+baseline 80, 01-06 mip 0-5 forced 76 / 78 / 80 / 77 / 70 / 78, 07 whole FSI
+quads 47, 08 without the shadow shader 78, 09 without the lighting passes 94.
+Two things stand out: whole quads darkens the picture a lot (80 to 47;
+running the FSI shader on helper lanes changes what is written, so a
+helper-lane or quad-coverage difference is in play), and the brightness
+alone does not show which mip level breaks.
+
+The contact sheet was not made that time: the game's PNG writer wrote the
+deflate block lengths big-endian (fixed, they are little-endian), which
+zlib rejects. `tools/mac_sweep_sheet.py` now reads those older shots too,
+so the sheet can be made from an existing sweep folder without rerunning:
+`python3 tools/mac_sweep_sheet.py out/capture/sweep`.
+
+Next step (or rerun the sweep):
 
 1. Build (see "Building and running") and run `tools/mac_capture.sh
    --merge_controllers --vulkan_hoist_shared_memory_uploads`.
@@ -155,8 +169,17 @@ Keys work only while the game window is focused; every press is logged as
 - Some lines went away with the base-mip-only switch, which points at edge
   pixels selecting a wrong (broken) mip level: quads straddling an edge
   have helper lanes, and the FSI early quad skip uses fine derivatives
-  (`DPdxFine`), which Metal may implement coarsely. The whole-quads switch
-  (key 6, sweep tile 07) tests that and has not been looked at yet.
+  (`DPdxFine`), which Metal may implement coarsely. Confirmed half of that:
+  SPIRV-Cross (adec7ac, `spirv_msl.cpp` "Derivatives") emits plain `dfdx` /
+  `dfdy` for the fine, coarse and default ops alike, so whether the skip is
+  quad-uniform depends on what Apple's `dfdx` does. If it is coarse, a quad
+  with one passing pixel in the bottom row runs that pixel alone and its
+  texture derivatives (mip selection) are undefined. A derivative-free skip
+  would use quad operations (the SDK's own TODO there: "Use
+  GroupNonUniformQuad operations where supported"). The whole-quads switch
+  (key 6, sweep tile 07) changed the picture a lot (brightness 80 to 47),
+  which a pure skip removal should not do; look at tile 07 before
+  concluding.
 - Guest polygon mode is fill for every draw (frame report `polymode`), so
   not a wireframe pass.
 
