@@ -309,7 +309,9 @@ blended draws without depth write and the non-triangle primitives
 
 ### Live A/B switches
 
-Hot-reloadable debug switches (SDK patch) that the app flips on keys, so
+Hot-reloadable debug switches (SDK patch) that the app flips on keys (the
+number keys 6 / 7 / 8 / 9 or fn+F6 ... fn+F9: without fn, a Mac keyboard's
+F keys are system and media keys that macOS does not pass to the game), so
 one run compares the picture with and without something while standing
 still (each press logs `[input] F6: <cvar> = true/false`):
 

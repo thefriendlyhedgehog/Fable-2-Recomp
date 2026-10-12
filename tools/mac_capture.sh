@@ -23,8 +23,8 @@ rm -rf "$OUT"
 mkdir -p "$OUT/mvk" "$OUT/rex"
 
 echo "Starting the game. Load the save, wait until the problem shows, then keep still for"
-echo "30 seconds (a frame is reported every 20 s; fn+F9 reports one at once) and quit (Cmd+Q)."
-echo "The summary appears here afterwards."
+echo "30 seconds (a frame is reported every 20 s; 9 or fn+F9 reports one at once) and quit"
+echo "(Cmd+Q). Debug keys: 6 / 7 / 8 (or fn+F6 / F7 / F8). The summary appears here afterwards."
 MVK_CONFIG_SHADER_DUMP_DIR="$PWD/$OUT/mvk" "$EXE" --game_data_root="$PWD" \
     --dump_shaders="$PWD/$OUT/rex" --vulkan_frame_report_interval=20 \
     --log_max_file_size_mb=100 "$@" \

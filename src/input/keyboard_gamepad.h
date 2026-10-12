@@ -437,7 +437,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
 
     // F9 (host) -> log every draw of the next frame (macOS SDK patch cvar
     // vulkan_frame_report; "[frame]" lines in the log).
-    bool frame_report_down = focused && KeyDown(0x78 /* F9 */);
+    // The number keys 6-9 do the same as F6-F9: on a Mac keyboard the F keys
+    // are media and system keys unless fn is held, and macOS never passes
+    // those to the game.
+    bool frame_report_down = focused && (KeyDown(0x78 /* F9 */) || KeyDown(0x39 /* 9 */));
     if (frame_report_down && !frame_report_down_prev_) {
       if (rex::cvar::SetFlagByName("vulkan_frame_report",
                                    std::to_string(++frame_report_requests_))) {
@@ -454,14 +457,16 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // skipping the draws of one group at a time, then none.
     static constexpr struct {
       uint16_t vk;
+      uint16_t digit_vk;
       const char* key;
       const char* cvar;
     } kDebugToggles[] = {
-        {0x75, "F6", "vulkan_debug_fsi_whole_quads"},
-        {0x76, "F7", "vulkan_debug_base_mip_only"},
+        {0x75, 0x36, "F6", "vulkan_debug_fsi_whole_quads"},
+        {0x76, 0x37, "F7", "vulkan_debug_base_mip_only"},
     };
     for (size_t i = 0; i < std::size(kDebugToggles); ++i) {
-      bool down = focused && KeyDown(kDebugToggles[i].vk);
+      bool down =
+          focused && (KeyDown(kDebugToggles[i].vk) || KeyDown(kDebugToggles[i].digit_vk));
       if (down && !debug_toggle_down_prev_[i]) {
         bool on = !rex::cvar::Query<bool>(kDebugToggles[i].cvar);
         if (rex::cvar::SetFlagByName(kDebugToggles[i].cvar, on ? "true" : "false")) {
@@ -473,7 +478,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       }
       debug_toggle_down_prev_[i] = down;
     }
-    bool skip_group_down = focused && KeyDown(0x77 /* F8 */);
+    bool skip_group_down = focused && (KeyDown(0x77 /* F8 */) || KeyDown(0x38 /* 8 */));
     if (skip_group_down && !debug_toggle_down_prev_[2]) {
       std::string groups = rex::cvar::Query<std::string>("vulkan_debug_skip_ps");
       int32_t group_count =
