@@ -162,10 +162,11 @@ dog_fur_depth_bias = true
 # Game MSAA mode, as a mid-asm hook at 0x8238DF3C where the game's render
 # setup picks its multisample type (Xenia's "Disable MSAA" patch by Margen67
 # sets it to 1). 0 = none, 1 = 2x, 2 = 4x (the game's own setting), -1 =
-# leave the game's value. MSAA is expensive on the Mac's rendering path
-# (fragment shader interlock). Changing it may move where the game places
-# render-to-texture results in memory, which hero_dog_texture_readback relies
-# on; 0 has been played on macOS without visible problems, 1 is Xenia's value.
+# leave the game's value; other values are rejected with a warning. MSAA is
+# expensive on the Mac's rendering path (fragment shader interlock). Changing
+# it may move where the game places render-to-texture results in memory, which
+# hero_dog_texture_readback (off by default) relies on; 0 has been played on
+# macOS without visible problems, 1 is Xenia's value.
 # Default: -1
 game_msaa = -1
 
@@ -274,8 +275,19 @@ bool Load(const std::filesystem::path& path) {
     values.unlock_website = Read<bool>(patches_table, "patches",
                                        "unlock_website", "boolean",
                                        values.unlock_website);
-    values.game_msaa = static_cast<int32_t>(Read<int64_t>(
-        patches_table, "patches", "game_msaa", "integer", values.game_msaa));
+    {
+      const int64_t game_msaa = Read<int64_t>(patches_table, "patches", "game_msaa",
+                                              "integer", values.game_msaa);
+      if (game_msaa >= -1 && game_msaa <= 2) {
+        values.game_msaa = static_cast<int32_t>(game_msaa);
+      } else {
+        REXSYS_WARN(
+            "[fable2-config] [patches] game_msaa = {} is not -1 (game's value), 0 (none), "
+            "1 (2x) or 2 (4x); using -1",
+            game_msaa);
+        values.game_msaa = -1;
+      }
+    }
     values.unlock_ce = Read<bool>(patches_table, "patches", "unlock_ce",
                                   "boolean", values.unlock_ce);
     values.skip_intro_videos =
