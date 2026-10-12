@@ -13,7 +13,10 @@ interlock (they use xe_edram), whether Metal got the raster order group that
 serializes overlapping fragments (without it, overlapping fragments race and
 flicker), whether they read the sample mask, and whether vertex shaders have
 an invariant position. Draws: the "[frame]" lines of the newest log, grouped
-by pixel shader and render state with counts, and every resolve.
+by pixel shader and render state with counts, and every resolve. Textures:
+the textures the frame's draws sample (address, format, size, layout), and
+for every resolve, the draws that then sample what it wrote and as which
+format (how shadow maps and other render-to-texture results are read back).
 """
 import argparse
 import collections
@@ -113,6 +116,59 @@ def analyze_shaders(mvk_dir, rex_dir, show, detail=False):
                 print(f"      {d[:170]}")
 
 
+# Xenos texture formats (TextureFormat; resolve destination formats use the
+# same numbers).
+TEXTURE_FORMATS = (
+    "1_REVERSE 1 8 1_5_5_5 5_6_5 6_5_5 8_8_8_8 2_10_10_10 8_A 8_B 8_8 Cr_Y1_Cb_Y0_REP "
+    "Y1_Cr_Y0_Cb_REP 16_16_EDRAM 8_8_8_8_A 4_4_4_4 10_11_11 11_11_10 DXT1 DXT2_3 DXT4_5 "
+    "16_16_16_16_EDRAM 24_8 24_8_FLOAT 16 16_16 16_16_16_16 16_EXPAND 16_16_EXPAND "
+    "16_16_16_16_EXPAND 16_FLOAT 16_16_FLOAT 16_16_16_16_FLOAT 32 32_32 32_32_32_32 32_FLOAT "
+    "32_32_FLOAT 32_32_32_32_FLOAT 32_AS_8 32_AS_8_8 16_MPEG 16_16_MPEG 8_INTERLACED "
+    "32_AS_8_INTERLACED 32_AS_8_8_INTERLACED 16_INTERLACED 16_MPEG_INTERLACED "
+    "16_16_MPEG_INTERLACED DXN 8_8_8_8_AS_16_16_16_16 DXT1_AS_16_16_16_16 "
+    "DXT2_3_AS_16_16_16_16 DXT4_5_AS_16_16_16_16 2_10_10_10_AS_16_16_16_16 "
+    "10_11_11_AS_16_16_16_16 11_11_10_AS_16_16_16_16 32_32_32_FLOAT DXT3A DXT5A CTX1 "
+    "DXT3A_AS_1_1_1_1 8_8_8_8_GAMMA_EDRAM 2_10_10_10_FLOAT_EDRAM").split()
+BYTES_PER_PIXEL = {"8_8_8_8": 4, "2_10_10_10": 4, "16_16": 4, "16_16_FLOAT": 4, "32_FLOAT": 4,
+                   "24_8": 4, "24_8_FLOAT": 4, "10_11_11": 4, "11_11_10": 4,
+                   "16_16_16_16": 8, "16_16_16_16_FLOAT": 8, "32_32_FLOAT": 8, "8": 1,
+                   "8_8": 2, "5_6_5": 2, "16": 2, "16_FLOAT": 2,
+                   "32_32_32_32_FLOAT": 16}
+
+
+def format_name(number):
+    number = int(number)
+    return TEXTURE_FORMATS[number] if number < len(TEXTURE_FORMATS) else str(number)
+
+
+TEX_RE = re.compile(
+    r"(v?)t(\d+): 0x([0-9A-F]+) fmt (\d+) (\d+)x(\d+)x(\d+) dim (\d) (\w+) sign (\d+) "
+    r"num (\d) swz ([0-9A-F]+) exp (-?\d+) filt (\d+) endian (\d) pitch (\d+) "
+    r"mips (\d+)-(\d+)( packed)? mipaddr 0x([0-9A-F]+) clamp (\d+) border (\d)")
+RESOLVE_RE = re.compile(
+    r"resolve (\d+): dest 0x([0-9A-F]+) format (\d+) pitch/height 0x([0-9A-F]+), source (\d+) "
+    r"\(sample select (\d+)\), msaa (\d+)x")
+
+
+def textures_of(line):
+    """[(key, description)] for the textures listed on a draw line."""
+    if "| tex" not in line:
+        return []
+    result = []
+    for m in TEX_RE.finditer(line.split("| tex", 1)[1]):
+        (vertex, fetch, address, fmt, width, height, depth, dim, layout, sign, num, swizzle,
+         exp_adjust, filters, endian, pitch, mip_min, mip_max, packed, mip_address, clamp,
+         border) = m.groups()
+        description = (f"{'vertex ' if vertex else ''}0x{address} {format_name(fmt)} "
+                       f"{width}x{height}{'x' + depth if depth != '1' else ''} {layout}"
+                       f"{' sign ' + sign if sign != '0000' else ''}{' int' if num == '1' else ''}"
+                       f" swz {swizzle}{' exp ' + exp_adjust if exp_adjust != '0' else ''}"
+                       f" endian {endian} mips {mip_min}-{mip_max}{' packed' if packed else ''}"
+                       f" filt {filters} clamp {clamp}")
+        result.append(((int(address, 16), description), int(fetch)))
+    return result
+
+
 DRAW_RE = re.compile(
     r"\[frame\] draw \d+: vs (\w+) ps (\w+) prim (\d+) count (\d+) \((\w+)\) \| msaa (\d+)x "
     r"\(pipeline (\d+)x\) pitch (\d+) \|(.*?) depth fmt (\d+) base (\d+) test (\d+) func (\d+) "
@@ -136,13 +192,25 @@ def analyze_frame(log, top, find=()):
     msaa = collections.Counter()
     primitives = 0
     found = collections.Counter()
-    for line in frame:
+    found_textures = collections.defaultdict(collections.Counter)
+    # Texture -> [draw count, set of pixel shaders]; and every draw's position
+    # in the frame with the addresses it samples, for the resolves.
+    textures = collections.defaultdict(lambda: [0, set()])
+    sampled = []
+    for position, line in enumerate(frame):
         m = DRAW_RE.search(line)
         if not m:
             continue
+        draw_textures = textures_of(line)
+        for key, _ in draw_textures:
+            textures[key][0] += 1
+            textures[key][1].add(m.group(2))
+        sampled.append((position, m.group(2), draw_textures))
         for h in find:
             if h.upper() in (m.group(1).upper(), m.group(2).upper()):
-                found[re.sub(r"^draw \d+: ", "", line.split("[frame] ", 1)[1])] += 1
+                found[re.sub(r" \| tex.*$", "", re.sub(r"^draw \d+: ", "", line.split("[frame] ", 1)[1]))] += 1
+                for key, fetch in draw_textures:
+                    found_textures[h][f"t{fetch} {key[1]}"] += 1
         (vs, ps, prim, count, packet, samples, pipeline_samples, pitch, targets, dfmt, dbase,
          ztest, zfunc, zwrite, stencil, atest, afunc, a2c, cull, po_f, po_b, new_pass) = m.groups()
         primitives += int(count)
@@ -163,10 +231,57 @@ def analyze_frame(log, top, find=()):
         for k, n in sorted(hits, key=lambda kv: -kv[1])[:10]:
             shown = re.sub(r" count \d+", "", k)[:230]
             print(f"    {n:4d}x {shown}")
+        for k, n in found_textures[h].most_common(12):
+            print(f"      samples {n:4d}x {k[:200]}")
     resolves = [line.split("[frame] ")[1] for line in frame if "[frame] resolve" in line]
     print(f"  resolves: {len(resolves)}")
     for r in resolves[:40]:
         print(f"    {r[:200]}")
+    analyze_textures(frame, textures, sampled, top)
+
+
+def analyze_textures(frame, textures, sampled, top):
+    if not textures:
+        print("  textures: none listed (the build predates texture info in the frame report)")
+        return
+    print(f"  textures: {len(textures)} distinct; by draws:")
+    for (address, description), (count, shaders) in sorted(
+            textures.items(), key=lambda kv: -kv[1][0])[:min(top, 25)]:
+        shown = ", ".join(sorted(shaders)[:3]) + (" ..." if len(shaders) > 3 else "")
+        print(f"    {count:5d}x {description} | ps {shown}")
+    # Every resolve, and what samples the memory it wrote afterwards (until
+    # the next resolve to the same place), with the format it is read as.
+    print("  resolve -> sampled later in the frame as:")
+    resolves = []
+    for position, line in enumerate(frame):
+        m = RESOLVE_RE.search(line)
+        if m:
+            resolves.append((position, m))
+    not_sampled = []
+    for i, (position, m) in enumerate(resolves):
+        index, dest, fmt, pitch_height, source, sample_select, samples = m.groups()
+        dest = int(dest, 16)
+        pitch_height = int(pitch_height, 16)
+        pitch, height = pitch_height & 0x3FFF, (pitch_height >> 16) & 0x3FFF
+        size = max(pitch, 1) * max(height, 1) * BYTES_PER_PIXEL.get(format_name(fmt), 4)
+        end = next((p for p, n in resolves[i + 1:] if int(n.group(2), 16) == dest), len(frame))
+        readers = collections.Counter()
+        for draw_position, ps, draw_textures in sampled:
+            if not position < draw_position < end:
+                continue
+            for (address, description), fetch in draw_textures:
+                if dest <= address < dest + size:
+                    readers[f"t{fetch} {description} | ps {ps}"] += 1
+        if not readers:
+            not_sampled.append(index)
+            continue
+        what = "depth" if source == "4" else f"color {source}"
+        print(f"    resolve {index}: {what} {samples}x -> 0x{dest:08X} {format_name(fmt)} "
+              f"{pitch}x{height}: {sum(readers.values())} draws")
+        for reader, n in readers.most_common(2):
+            print(f"        {n:4d}x {reader[:190]}")
+    if not_sampled:
+        print(f"    not sampled later in this frame: resolves {', '.join(not_sampled)}")
 
 
 def main():

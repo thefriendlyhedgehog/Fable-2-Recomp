@@ -277,11 +277,38 @@ and every draw of one frame, which can then be analyzed offline:
 - `vulkan_frame_report` (SDK patch): changing its value logs every draw and
   resolve of the next frame as `[frame]` lines (shaders, render targets with
   formats and blend state, guest MSAA, depth, alpha test and alpha to
-  coverage). The app changes it on F9 (fn+F9 on a Mac keyboard).
+  coverage, and every texture the shaders sample: guest address, format,
+  size, tiling, signedness, swizzle, endianness, mip levels with packed
+  mips, filters and clamping). The app changes it on F9 (fn+F9 on a Mac
+  keyboard).
 - `tools/analyze_mac_capture.py` summarizes both: which EDRAM (FSI) fragment
   shaders got Metal's raster order group (without it, overlapping fragments
-  race), whether vertex positions are invariant, and the frame's draws grouped
-  by pixel shader and state.
+  race), whether vertex positions are invariant, the frame's draws grouped
+  by pixel shader and state, the textures sampled most, and for every
+  resolve the later draws that sample what it wrote, with the format they
+  read it as (how shadow maps and other render-to-texture results are used).
+  `--find <guest shader hash>` lists one shader's draws and textures.
+
+`tools/mac_capture.sh` does the whole run: the game with both dumps, then
+the summary (copied to the clipboard).
+
+### Raster order groups for every EDRAM shader
+
+MoltenVK's SPIRV-Cross (and its upstream main) gives a fragment shader's
+interlock section a Metal raster order group by finding the storage buffers
+accessed between the begin and the end. When the begin is inside control
+flow of the entry point, the analysis marks nothing, so `xe_edram` got no
+raster order group and overlapping fragments raced (1 of 118 FSI shaders at
+the brazier load point). It can happen when the shader tests depth late
+(it writes depth or exports to memory) and has ucode jumps, loops or calls,
+since the main loop's exits then hide the begin's position. With
+`vulkan_fsi_end_interlock_in_function` (SDK patch, on by default on macOS,
+needs a restart) the translator ends the section in a separate function,
+which makes SPIRV-Cross take its conservative path and put every storage
+buffer the shader accesses in the group. The begin and the end compile to
+nothing in MSL. Checked offline with SPIRV-Cross at MoltenVK's commit on a
+hand-built shader of that kind: no raster order group without the option,
+`raster_order_group(0)` on `xe_edram` with it, and spirv-val accepts both.
 
 ### Ported from himdo/rexglue-sdk
 
