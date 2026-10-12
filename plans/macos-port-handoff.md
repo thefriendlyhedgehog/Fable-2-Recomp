@@ -39,14 +39,19 @@ pixels (before the fix, whole quads changed the picture a lot).
   That shader is a general material / lighting shader (base pass fmt 3,
   lighting fmt 12, also the hero), not only screen-space shadows.
 
-Candidates, roughly by likelihood:
-1. Upload hoisting (`vulkan_hoist_shared_memory_uploads`, opt-in, on in
-   every run so far): a draw could see data uploaded for a later point in
-   the frame, or miss data. Next: the flicker test without it.
-2. A resolve sampled before it is complete, or a stale copy in the texture
-   cache (mask, shadow maps, scene depth). Next: dump the mask and shadow
+Candidates, roughly by likelihood (a review against upstream Xenia and
+xenia-edge, 2026-10-12, found and fixed three ordering holes; see
+`docs/macos_port.md`, "Shared memory and texture load ordering"):
+1. Upload hoisting could reorder uploads of the same page and overtake
+   earlier reads and GPU writes. Fixed: only first uses of pages in a
+   submission are hoisted. Next: the flicker test with the fix (hoisting on,
+   as usual); then, if it still flickers, without hoisting.
+2. Stale textures: a texture could be marked up to date with data the CPU
+   had already changed again (xenia-edge 9781a75a), or two loads of one
+   image in a submission could land in either order. Both fixed.
+3. A resolve sampled before it is complete. Next: dump the mask and shadow
    maps over several consecutive frames and see which one changes.
-3. Resolve readback is unlikely: memexport readback is off on macOS and the
+4. Resolve readback is unlikely: memexport readback is off on macOS and the
    only forced resolve readback (`0x12704000`) needs `[patches]
    hero_dog_texture_readback`, which is off. (Background:
    `docs/macos_port.md`, "Readback defaults on macOS".)
@@ -89,7 +94,7 @@ twice through SDL; without it the stick does not reach player 1).
 
 The SDK tree is `thirdparty/rexglue-sdk-src` (v0.10.0 + the patch applied as
 working-tree changes; gitignored). The patch is
-`thirdparty/sdk_mac_vulkan_fixes.patch` (21 files, all under `src/` and
+`thirdparty/sdk_mac_vulkan_fixes.patch` (26 files, all under `src/` and
 `include/`).
 
 1. Edit files under `thirdparty/rexglue-sdk-src/src` or `/include`.
@@ -140,12 +145,11 @@ Keys work only while the game window is focused; every press is logged as
 | 9 / fn+F9 | `vulkan_frame_report` | logs every draw and resolve of the next frame (`[frame]` lines) |
 | 0 / fn+F10 | (app) | debug sweep: `debug_sweep_steps`, `debug_sweep_dir`, `debug_sweep_settle_ms` |
 | - | `vulkan_fsi_quad_skip_quad_ops` | quad-uniform early quad skip with subgroup quad ops (on; needs a restart; off = the old derivative check) |
-| - | `vulkan_snap_vertex_positions` | snap vertex screen positions to 1/16 pixel (did not help, off) |
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; the user always passes it) |
-| - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, read back the resolves to the listed addresses and write them untiled (the capture script sets both) |
+| - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 
 ## Open problems, with evidence
@@ -203,6 +207,11 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- Ordering fixes from a review against upstream Xenia and xenia-edge:
+  hoisted uploads only for first uses of pages in a submission, texture
+  validity checked before watching, same-image load barrier; pipelines
+  created right away when draws wait for them; resolve dumps no longer
+  drain the queue or write guest memory; vertex snapping removed.
 - FSI early quad skip with subgroup quad operations instead of fine
   derivatives (`vulkan_fsi_quad_skip_quad_ops`, `016e929`): fixes the wrong
   mip levels (framed snowflakes, the hero's face) and the white edge lines.
@@ -231,6 +240,7 @@ luminance at 280x180 / 560x360).
 - Fast math rounding: SPIRV-Cross emits no-contraction ops as `optnone`
   helpers (`fma(a, b, 0)`), and turning fast math off did not remove the lines.
 - Sub-pixel position differences between the prepass and color vertex
-  shaders: snapping to the guest's 1/16 pixel grid did not change the lines.
+  shaders: snapping to the guest's 1/16 pixel grid did not change the lines
+  (the switch has since been removed).
 - The point sprite expansion and its point coordinates (code read).
 - Shadow map decode format (matches Xenia).

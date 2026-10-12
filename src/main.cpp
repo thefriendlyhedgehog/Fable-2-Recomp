@@ -61,7 +61,7 @@ REXCVAR_DEFINE_INT32(mouse_look_scale, 256, "Input",
 REXCVAR_DEFINE_STRING(
     debug_sweep_steps,
     "baseline:vulkan_debug_force_mip=-1,vulkan_debug_fsi_whole_quads=false,"
-    "vulkan_debug_skip_ps_group=0,vulkan_snap_vertex_positions=false;"
+    "vulkan_debug_skip_ps_group=0;"
     "mip0:vulkan_debug_force_mip=0;mip1:vulkan_debug_force_mip=1;"
     "mip2:vulkan_debug_force_mip=2;mip3:vulkan_debug_force_mip=3;"
     "mip4:vulkan_debug_force_mip=4;mip5:vulkan_debug_force_mip=5;"

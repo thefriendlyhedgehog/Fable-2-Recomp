@@ -134,18 +134,13 @@ index 2cf24c4..85ab717 100644
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..2384138 100644
+index dce3dbf..50dce39 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
-@@ -151,6 +151,15 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -151,6 +151,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
      // taking into account the potential relation with occlusion queries (but
      // should be safe at least temporarily).
      kSysFlag_FSIDepthStencilEarlyWrite_Shift,
-+    // Snap the host screen position of vertices to the guest rasterizer's
-+    // 1/16 pixel grid (PA_SU_VTX_CNTL quantization), so different vertex
-+    // shaders computing nearly the same position (a depth prepass and the
-+    // color passes) cover exactly the same pixels, as on the guest.
-+    kSysFlag_SnapVertexPositions_Shift,
 +    // Debug: with fragment shader interlock and early depth / stencil, run
 +    // the shader for the whole 2x2 quad even if none of its pixels passed
 +    // (no early quad skip, which relies on fine derivatives).
@@ -153,16 +148,15 @@ index dce3dbf..2384138 100644
  
      kSysFlag_Count,
  
-@@ -199,6 +208,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -199,6 +203,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSysFlag_FSIDepthWrite = 1u << kSysFlag_FSIDepthWrite_Shift,
      kSysFlag_FSIStencilTest = 1u << kSysFlag_FSIStencilTest_Shift,
      kSysFlag_FSIDepthStencilEarlyWrite = 1u << kSysFlag_FSIDepthStencilEarlyWrite_Shift,
-+    kSysFlag_SnapVertexPositions = 1u << kSysFlag_SnapVertexPositions_Shift,
 +    kSysFlag_FSIExecuteWholeQuads = 1u << kSysFlag_FSIExecuteWholeQuads_Shift,
    };
    static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
  
-@@ -399,6 +410,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -399,6 +404,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
      bool demote_to_helper_invocation;
      bool sample_rate_shading;
@@ -172,8 +166,50 @@ index dce3dbf..2384138 100644
    };
  
    SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
+diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
+index d26cd4f..1b6bdc9 100644
+--- a/include/rex/graphics/pipeline/texture/cache.h
++++ b/include/rex/graphics/pipeline/texture/cache.h
+@@ -226,7 +226,9 @@ class TextureCache {
+     bool mips_outdated(const std::unique_lock<std::recursive_mutex>& global_lock) const {
+       return mips_outdated_;
+     }
+-    void MakeUpToDateAndWatch(const std::unique_lock<std::recursive_mutex>& global_lock);
++    // False (and the texture stays outdated) if the guest memory was changed
++    // again after the data for this load was requested.
++    bool MakeUpToDateAndWatch(const std::unique_lock<std::recursive_mutex>& global_lock);
+ 
+     void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip);
+ 
+diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
+index 4d85a2b..a902a06 100644
+--- a/include/rex/graphics/shared_memory.h
++++ b/include/rex/graphics/shared_memory.h
+@@ -78,6 +78,10 @@ class SharedMemory {
+   // the range has been fully updated and is usable.
+   bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
+   bool RequestRange(uint32_t start, uint32_t length);
++  // Whether every page of the range is currently valid in the host GPU copy.
++  // Hold the global critical region when relying on it for state transitions
++  // such as installing a watch.
++  bool IsRangeValid(uint32_t start, uint32_t length) const;
+ 
+   // Marks the range and, if not exact_range, potentially its surroundings
+   // (to up to the first GPU-written page, as an access violation exception
+@@ -140,6 +144,11 @@ class SharedMemory {
+   virtual bool UploadRanges(
+       const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
+ 
++  // Called at the end of every RequestRanges with the requested ranges (byte
++  // ranges, sorted and merged), after any uploads for them were issued.
++  virtual void OnRangesRequested(
++      const std::vector<std::pair<uint32_t, uint32_t>>& /* ranges */) {}
++
+  private:
+   memory::Memory& memory_;
+ 
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..abf4451 100644
+index 696ff48..6a017e2 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -226,16 +262,19 @@ index 696ff48..abf4451 100644
    VkDescriptorSetLayout GetSingleTransientDescriptorLayout(
        SingleTransientDescriptorLayout transient_descriptor_layout) const {
      return descriptor_set_layouts_single_transient_[size_t(transient_descriptor_layout)];
-@@ -425,7 +454,7 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -425,7 +454,10 @@ class VulkanCommandProcessor : public CommandProcessor {
    bool CanEndSubmissionImmediately() const;
  
    void ClearTransientDescriptorPools();
 -  bool IssueCopy_ReadbackResolvePath();
++  // vulkan_debug_dump_resolves: copies the resolve's written range for a file.
++  void QueueResolveDump(uint32_t resolve_index, uint32_t written_address,
++                        uint32_t written_length);
 +  bool IssueCopy_ReadbackResolvePath(ReadbackResolveMode readback_mode);
    bool IssueDraw_MemexportReadbackFullPath(uint32_t total_size);
    bool IssueDraw_MemexportReadbackFastPath(uint32_t total_size);
  
-@@ -484,8 +513,15 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -484,8 +516,15 @@ class VulkanCommandProcessor : public CommandProcessor {
    bool EnsureSwapFxaaSourceImage(uint32_t width, uint32_t height);
    void DestroySwapFxaaSourceImage();
  
@@ -252,7 +291,7 @@ index 696ff48..abf4451 100644
    void UpdateSystemConstantValues(
        bool primitive_polygonal,
        const PrimitiveProcessor::ProcessingResult& primitive_processing_result,
-@@ -552,6 +588,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -552,6 +591,9 @@ class VulkanCommandProcessor : public CommandProcessor {
    std::vector<CommandBuffer> command_buffers_writable_;
    std::deque<std::pair<uint64_t, CommandBuffer>> command_buffers_submitted_;
    DeferredCommandBuffer deferred_command_buffer_;
@@ -262,7 +301,7 @@ index 696ff48..abf4451 100644
  
    std::vector<VkSparseMemoryBind> sparse_memory_binds_;
    std::vector<SparseBufferBind> sparse_buffer_binds_;
-@@ -801,6 +840,44 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -801,6 +843,44 @@ class VulkanCommandProcessor : public CommandProcessor {
    // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
    // TODO(Triang3l): Change to a deferred compilation handle.
    VkPipeline current_guest_graphics_pipeline_;
@@ -434,6 +473,32 @@ index 34f7033..57a6ffa 100644
    Framebuffer fsi_framebuffer_;
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
+diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
+index 104bdad..6fdc573 100644
+--- a/include/rex/graphics/vulkan/shared_memory.h
++++ b/include/rex/graphics/vulkan/shared_memory.h
+@@ -54,8 +54,21 @@ class VulkanSharedMemory : public SharedMemory {
+                                         uint32_t length_allocations) override;
+ 
+   bool UploadRanges(const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) override;
++  void OnRangesRequested(const std::vector<std::pair<uint32_t, uint32_t>>& ranges) override;
+ 
+  private:
++  // Pages used in the current submission (requested for reading, written by
++  // the GPU, or uploaded), for vulkan_hoist_shared_memory_uploads: an upload
++  // may only be moved to the start of the submission if nothing earlier in
++  // the submission used its pages, otherwise it would overtake a read or a
++  // GPU write (or another upload of the same page) recorded before it.
++  void MarkPagesUsedInSubmission(uint32_t page_first, uint32_t page_count);
++  void MarkBytesUsedInSubmission(uint32_t start, uint32_t length);
++  bool ArePagesUsedInSubmission(uint32_t page_first, uint32_t page_count);
++  void UpdatePagesUsedSubmission();
++  std::vector<uint64_t> pages_used_in_submission_;
++  uint64_t pages_used_submission_ = 0;
++
+   void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
+                      VkAccessFlags& access_mask) const;
+ 
 diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
 index 1cb3faa..be34c10 100644
 --- a/include/rex/input/input_system.h
@@ -974,7 +1039,7 @@ index 8f2fcb0..c7f886a 100644
          return 0;
        }));
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..7775637 100644
+index 1774f97..dca9eb8 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
 @@ -21,11 +21,44 @@
@@ -1069,98 +1134,7 @@ index 1774f97..7775637 100644
    if (output_per_vertex_member_clip_distance_ != UINT32_MAX) {
      builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_clip_distance_,
                              "gl_ClipDistance");
-@@ -2574,6 +2622,90 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
-   position_xyz =
-       builder_->createNoContractionBinOp(spv::OpFAdd, type_float3_, position_xyz, ndc_offset_mul_w);
- 
-+  // With kSysFlag_SnapVertexPositions, quantize the screen position like the
-+  // guest rasterizer does (1/16 pixel), so a depth prepass and the color
-+  // passes drawn with different vertex shaders, whose positions may differ in
-+  // the last bits, cover the same pixels (otherwise the later passes miss
-+  // pixels along triangle edges). point_screen_diameter_to_ndc_radius is the
-+  // NDC distance of one guest pixel divided by 2, so the grid step is 1/8 of
-+  // it. The snapped position is put 1/32 of a step (1/512 pixel) past the
-+  // grid point, in the middle of a host subpixel, so the host's own
-+  // quantization of x/w rounds it the same way in every shader. Only vertices
-+  // in front of the viewer and not far outside the viewport are snapped.
-+  {
-+    spv::Id snap_enabled = builder_->createBinOp(
-+        spv::OpINotEqual, type_bool_,
-+        builder_->createBinOp(spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
-+                              builder_->makeUintConstant(kSysFlag_SnapVertexPositions)),
-+        const_uint_0_);
-+    id_vector_temp_.clear();
-+    id_vector_temp_.push_back(
-+        builder_->makeIntConstant(kSystemConstantPointScreenDiameterToNdcRadius));
-+    spv::Id snap_step = builder_->createNoContractionBinOp(
-+        spv::OpVectorTimesScalar, type_float2_,
-+        builder_->createLoad(builder_->createAccessChain(spv::StorageClassUniform,
-+                                                         uniform_system_constants_, id_vector_temp_),
-+                             spv::NoPrecision),
-+        builder_->makeFloatConstant(1.0f / 8.0f));
-+    uint_vector_temp_.clear();
-+    uint_vector_temp_.push_back(0);
-+    uint_vector_temp_.push_back(1);
-+    spv::Id position_xy =
-+        builder_->createRvalueSwizzle(spv::NoPrecision, type_float2_, position_xyz,
-+                                      uint_vector_temp_);
-+    spv::Id position_w_xy = builder_->smearScalar(spv::NoPrecision, position_w, type_float2_);
-+    spv::Id snap_ndc = builder_->createNoContractionBinOp(spv::OpFDiv, type_float2_, position_xy,
-+                                                          position_w_xy);
-+    spv::Id const_float2_1 = SpirvSmearScalarResultOrConstant(const_float_1_, type_float2_);
-+    spv::Id snap_cells = builder_->createUnaryBuiltinCall(
-+        type_float2_, ext_inst_glsl_std_450_, GLSLstd450Floor,
-+        builder_->createNoContractionBinOp(
-+            spv::OpFAdd, type_float2_,
-+            builder_->createNoContractionBinOp(
-+                spv::OpFDiv, type_float2_,
-+                builder_->createNoContractionBinOp(spv::OpFAdd, type_float2_, snap_ndc,
-+                                                   const_float2_1),
-+                snap_step),
-+            SpirvSmearScalarResultOrConstant(builder_->makeFloatConstant(0.5f), type_float2_)));
-+    spv::Id snapped_ndc = builder_->createNoContractionBinOp(
-+        spv::OpFSub, type_float2_,
-+        builder_->createNoContractionBinOp(
-+            spv::OpFMul, type_float2_,
-+            builder_->createNoContractionBinOp(
-+                spv::OpFAdd, type_float2_, snap_cells,
-+                SpirvSmearScalarResultOrConstant(builder_->makeFloatConstant(1.0f / 32.0f),
-+                                                 type_float2_)),
-+            snap_step),
-+        const_float2_1);
-+    spv::Id snapped_xy = builder_->createNoContractionBinOp(spv::OpFMul, type_float2_,
-+                                                            snapped_ndc, position_w_xy);
-+    spv::Id snap_ndc_abs = builder_->createUnaryBuiltinCall(type_float2_, ext_inst_glsl_std_450_,
-+                                                            GLSLstd450FAbs, snap_ndc);
-+    spv::Id snap_applicable = builder_->createBinOp(
-+        spv::OpLogicalAnd, type_bool_, snap_enabled,
-+        builder_->createBinOp(
-+            spv::OpLogicalAnd, type_bool_,
-+            builder_->createBinOp(spv::OpFOrdGreaterThan, type_bool_, position_w,
-+                                  const_float_0_),
-+            builder_->createUnaryOp(
-+                spv::OpAll, type_bool_,
-+                builder_->createBinOp(
-+                    spv::OpFOrdLessThan, type_bool2_, snap_ndc_abs,
-+                    SpirvSmearScalarResultOrConstant(builder_->makeFloatConstant(64.0f),
-+                                                     type_float2_)))));
-+    position_xy = builder_->createTriOp(
-+        spv::OpSelect, type_float2_,
-+        builder_->smearScalar(spv::NoPrecision, snap_applicable, type_bool2_), snapped_xy,
-+        position_xy);
-+    std::unique_ptr<spv::Instruction> composite_construct_op = std::make_unique<spv::Instruction>(
-+        builder_->getUniqueId(), type_float3_, spv::OpCompositeConstruct);
-+    composite_construct_op->addIdOperand(position_xy);
-+    composite_construct_op->addIdOperand(
-+        builder_->createCompositeExtract(position_xyz, type_float_, 2));
-+    position_xyz = composite_construct_op->getResultId();
-+    builder_->getBuildPoint()->addInstruction(std::move(composite_construct_op));
-+  }
-+
-   spv::Id kill_vertex = spv::NoResult;
-   if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b100) {
-     assert_true(var_main_point_size_edge_flag_kill_vertex_ != spv::NoResult);
-@@ -3052,34 +3184,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+@@ -3052,34 +3100,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
        // failed the depth / stencil test, and there are no depth and stencil
        // values to conditionally write after running the shader to check if
        // samples don't additionally need to be discarded.
@@ -1303,8 +1277,98 @@ index 765c141..3dfd11a 100644
    }
  }
  
+diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
+index 76f5600..7b6953e 100644
+--- a/src/graphics/pipeline/texture/cache.cpp
++++ b/src/graphics/pipeline/texture/cache.cpp
+@@ -444,7 +444,9 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+   // resolves as well to detect when the CPU wants to reuse the memory for a
+   // regular texture or a vertex buffer, and thus the scaled resolve version is
+   // not up to date anymore.
+-  texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
++  if (!texture.MakeUpToDateAndWatch(global_critical_region_.Acquire())) {
++    return false;
++  }
+   texture.LogAction("Loaded");
+ 
+   return true;
+@@ -686,9 +688,22 @@ TextureCache::Texture::~Texture() {
+   texture_cache_.UpdateTexturesTotalHostMemoryUsage(0, host_memory_usage_);
+ }
+ 
+-void TextureCache::Texture::MakeUpToDateAndWatch(
++bool TextureCache::Texture::MakeUpToDateAndWatch(
+     const std::unique_lock<std::recursive_mutex>& global_lock) {
+   SharedMemory& shared_memory = texture_cache().shared_memory();
++  // The shared memory ranges were requested (uploaded) before the texture
++  // was loaded from them; if the CPU wrote the memory in between, the loaded
++  // data is already stale, and watching now would never see that write
++  // (xenia-edge 9781a75a). Keep the texture outdated so it is loaded again.
++  if ((base_outdated_ &&
++       !shared_memory.IsRangeValid(key().base_page << 12,
++                                   uint32_t(rex::align(GetGuestBaseSize(), UINT32_C(16))))) ||
++      (mips_outdated_ &&
++       !shared_memory.IsRangeValid(key().mip_page << 12,
++                                   uint32_t(rex::align(GetGuestMipsSize(), UINT32_C(16)))))) {
++    texture_cache().texture_became_outdated_.store(true, std::memory_order_release);
++    return false;
++  }
+   if (base_outdated_) {
+     assert_not_zero(GetGuestBaseSize());
+     base_outdated_ = false;
+@@ -703,6 +718,7 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
+         key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
+     outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
+   }
++  return true;
+ }
+ 
+ void TextureCache::Texture::MarkAsUsed() {
+diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
+index ec0df7c..7730c5b 100644
+--- a/src/graphics/shared_memory.cpp
++++ b/src/graphics/shared_memory.cpp
+@@ -461,11 +461,35 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+   COUNT_profile_set("gpu/shared_memory/request_ranges_upload_count",
+                     uint32_t(upload_ranges_.size()));
+ 
+-  if (upload_ranges_.empty()) {
++  bool result = upload_ranges_.empty() || UploadRanges(upload_ranges_);
++  OnRangesRequested(merged_ranges);
++  return result;
++}
++
++bool SharedMemory::IsRangeValid(uint32_t start, uint32_t length) const {
++  if (!length) {
+     return true;
+   }
+-
+-  return UploadRanges(upload_ranges_);
++  if (start > kBufferSize || (kBufferSize - start) < length) {
++    return false;
++  }
++  uint32_t page_first = start >> page_size_log2_;
++  uint32_t page_last = (start + length - 1) >> page_size_log2_;
++  uint32_t block_first = page_first >> 6;
++  uint32_t block_last = page_last >> 6;
++  for (uint32_t i = block_first; i <= block_last; ++i) {
++    uint64_t valid_mask = UINT64_MAX;
++    if (i == block_first) {
++      valid_mask &= ~((uint64_t(1) << (page_first & 63)) - 1);
++    }
++    if (i == block_last && (page_last & 63) != 63) {
++      valid_mask &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
++    }
++    if ((system_page_flags_valid_[i] & valid_mask) != valid_mask) {
++      return false;
++    }
++  }
++  return true;
+ }
+ 
+ bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..c419aa9 100644
+index 001f36b..8492056 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,8 +11,11 @@
@@ -1328,7 +1392,7 @@ index 001f36b..c419aa9 100644
  #include <rex/graphics/registers.h>
  #include <rex/graphics/vulkan/command_processor.h>
  #include <rex/graphics/vulkan/pipeline_cache.h>
-@@ -60,6 +65,87 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+@@ -60,6 +65,81 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                      "used placeholder pipelines to avoid visible flashing")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -1356,12 +1420,6 @@ index 001f36b..c419aa9 100644
 +// Debug switches for comparing the picture with and without some draws or
 +// mip levels while the game runs (the Fable II app toggles them on fn+F6 /
 +// fn+F7 / fn+F8 on macOS).
-+REXCVAR_DEFINE_BOOL(vulkan_snap_vertex_positions, false, "GPU/Vulkan",
-+                    "Snap vertex screen positions to the guest rasterizer's 1/16 pixel grid, so "
-+                    "a depth prepass and color passes drawn with different vertex shaders cover "
-+                    "the same pixels (host GPUs use a finer grid, and the later passes then "
-+                    "miss pixels along triangle edges).")
-+    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DEFINE_BOOL(vulkan_debug_fsi_whole_quads, false, "GPU/Vulkan",
 +                    "Debug: with fragment shader interlock, run the pixel shader for every 2x2 "
 +                    "quad, also those where no pixel passed the early depth / stencil test (the "
@@ -1416,7 +1474,7 @@ index 001f36b..c419aa9 100644
  REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                      "Submit command buffer when PM4 primary buffer ends")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -69,6 +155,11 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+@@ -69,6 +149,11 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
                      "device (falls back to render passes otherwise)")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -1428,7 +1486,7 @@ index 001f36b..c419aa9 100644
  namespace rex::graphics::vulkan {
  
  namespace {
-@@ -547,6 +638,76 @@ bool CompileGlslToSpirvInternal(EShLanguage stage, std::string_view source,
+@@ -547,6 +632,124 @@ bool CompileGlslToSpirvInternal(EShLanguage stage, std::string_view source,
    return true;
  }
  
@@ -1457,55 +1515,103 @@ index 001f36b..c419aa9 100644
 +  return false;
 +}
 +
-+// Writes the resolve destination described by the copy registers, read from
-+// guest memory (after a synchronous readback), untiled.
-+void DumpResolve(const RegisterFile& regs, const uint8_t* guest, uint32_t resolve_index) {
-+  static uint32_t dump_count = 0;
-+  auto copy_dest_info = regs.Get<reg::RB_COPY_DEST_INFO>();
-+  auto copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
-+  uint32_t dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
-+  uint32_t width = copy_dest_pitch.copy_dest_pitch;
-+  uint32_t height = copy_dest_pitch.copy_dest_height;
-+  uint32_t format = uint32_t(copy_dest_info.copy_dest_format);
-+  const FormatInfo* format_info = FormatInfo::Get(format);
++// vulkan_debug_dump_resolves: a resolve's written range copied out of the
++// shared memory into a host-visible buffer in the command stream, written to
++// a file once its submission has completed (no queue drain, guest memory
++// untouched). Command processor thread only.
++struct PendingResolveDump {
++  uint64_t submission;
++  VkBuffer buffer;
++  VkDeviceMemory memory;
++  void* mapping;
++  uint32_t written_address;
++  uint32_t written_length;
++  uint32_t dest_base;
++  uint32_t width;
++  uint32_t height;
++  uint32_t format;
++  uint32_t endian;
++  uint32_t resolve_index;
++};
++std::vector<PendingResolveDump> pending_resolve_dumps;
++uint32_t resolve_dump_count = 0;
++
++// Untiles the destination (pitch x height from the copy registers) out of the
++// written range; texels outside it are written as zero.
++void WriteResolveDump(const PendingResolveDump& dump) {
++  const FormatInfo* format_info = FormatInfo::Get(dump.format);
 +  uint32_t bits_per_pixel = format_info ? format_info->bits_per_pixel : 0;
 +  uint32_t bytes_per_pixel_log2;
-+  if (!guest || !width || !height ||
++  if (!dump.width || !dump.height ||
 +      (bits_per_pixel != 8 && bits_per_pixel != 16 && bits_per_pixel != 32 &&
 +       bits_per_pixel != 64) ||
 +      !rex::bit_scan_forward(bits_per_pixel >> 3, &bytes_per_pixel_log2)) {
 +    REXGPU_WARN("[frame] resolve {} to 0x{:08X} not dumped: format {} ({} bpp), {}x{}",
-+                resolve_index, dest_base, format, bits_per_pixel, width, height);
++                dump.resolve_index, dump.dest_base, dump.format, bits_per_pixel, dump.width,
++                dump.height);
 +    return;
 +  }
 +  uint32_t bytes_per_pixel = bits_per_pixel >> 3;
-+  std::vector<uint8_t> pixels(size_t(width) * height * bytes_per_pixel);
-+  for (uint32_t y = 0; y < height; ++y) {
-+    for (uint32_t x = 0; x < width; ++x) {
-+      int32_t offset = texture_util::GetTiledOffset2D(int32_t(x), int32_t(y), width,
-+                                                       bytes_per_pixel_log2);
-+      std::memcpy(&pixels[(size_t(y) * width + x) * bytes_per_pixel], guest + offset,
++  const uint8_t* source = static_cast<const uint8_t*>(dump.mapping);
++  std::vector<uint8_t> pixels(size_t(dump.width) * dump.height * bytes_per_pixel, 0);
++  for (uint32_t y = 0; y < dump.height; ++y) {
++    for (uint32_t x = 0; x < dump.width; ++x) {
++      int64_t address = int64_t(dump.dest_base) +
++                        texture_util::GetTiledOffset2D(int32_t(x), int32_t(y), dump.width,
++                                                       bytes_per_pixel_log2) -
++                        int64_t(dump.written_address);
++      if (address < 0 || address + bytes_per_pixel > int64_t(dump.written_length)) {
++        continue;
++      }
++      std::memcpy(&pixels[(size_t(y) * dump.width + x) * bytes_per_pixel], source + address,
 +                  bytes_per_pixel);
 +    }
 +  }
 +  std::string path = fmt::format(
 +      "{}/resolve_{:03}_r{}_{:08X}_f{}_e{}_{}x{}_{}bpp.bin", REXCVAR_GET(vulkan_debug_dump_dir),
-+      dump_count++, resolve_index, dest_base, format, uint32_t(copy_dest_info.copy_dest_endian),
-+      width, height, bits_per_pixel);
++      resolve_dump_count++, dump.resolve_index, dump.dest_base, dump.format, dump.endian,
++      dump.width, dump.height, bits_per_pixel);
 +  FILE* file = std::fopen(path.c_str(), "wb");
 +  if (!file) {
-+    REXGPU_WARN("[frame] resolve {}: could not write {}", resolve_index, path);
++    REXGPU_WARN("[frame] resolve {}: could not write {}", dump.resolve_index, path);
 +    return;
 +  }
 +  std::fwrite(pixels.data(), 1, pixels.size(), file);
 +  std::fclose(file);
-+  REXGPU_INFO("[frame] resolve {} dumped to {}", resolve_index, path);
++  REXGPU_INFO("[frame] resolve {} dumped to {}", dump.resolve_index, path);
++}
++
++// Writes the dumps whose submissions have completed (all of them with
++// destroy_all, after the queue has been drained) and frees their buffers.
++void ProcessPendingResolveDumps(const ui::vulkan::VulkanDevice* vulkan_device,
++                                uint64_t completed_submission, bool destroy_all) {
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  for (auto it = pending_resolve_dumps.begin(); it != pending_resolve_dumps.end();) {
++    if (!destroy_all && it->submission > completed_submission) {
++      ++it;
++      continue;
++    }
++    if (it->submission <= completed_submission) {
++      VkMappedMemoryRange range = {};
++      range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
++      range.memory = it->memory;
++      range.offset = 0;
++      range.size = VK_WHOLE_SIZE;
++      dfn.vkInvalidateMappedMemoryRanges(device, 1, &range);
++      WriteResolveDump(*it);
++    }
++    dfn.vkUnmapMemory(device, it->memory);
++    dfn.vkDestroyBuffer(device, it->buffer, nullptr);
++    dfn.vkFreeMemory(device, it->memory, nullptr);
++    it = pending_resolve_dumps.erase(it);
++  }
 +}
 +
  }  // namespace
  
  // Generated with `xb buildshaders`.
-@@ -580,6 +741,7 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
+@@ -580,6 +783,7 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
                                                 system::KernelState* kernel_state)
      : CommandProcessor(graphics_system, kernel_state),
        deferred_command_buffer_(*this),
@@ -1513,7 +1619,15 @@ index 001f36b..c419aa9 100644
        transient_descriptor_allocator_uniform_buffer_(
            static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
                ->vulkan_device(),
-@@ -2272,6 +2434,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -1898,6 +2102,7 @@ bool VulkanCommandProcessor::SetupContext() {
+ 
+ void VulkanCommandProcessor::ShutdownContext() {
+   AwaitAllQueueOperationsCompletion();
++  ProcessPendingResolveDumps(GetVulkanDevice(), GetCompletedSubmission(), true);
+   InvalidateAllVertexBufferResidency();
+   ShutdownOcclusionQueryResources();
+ 
+@@ -2272,6 +2477,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
@@ -1521,7 +1635,7 @@ index 001f36b..c419aa9 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -3058,8 +3221,12 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+@@ -3058,8 +3264,12 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
      if (force_end_render_pass) {
        EndRenderPass();
      }
@@ -1534,7 +1648,7 @@ index 001f36b..c419aa9 100644
    EndRenderPass();
    for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
      auto it_next = std::next(it);
-@@ -3255,9 +3422,12 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3255,9 +3465,12 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
  
  void VulkanCommandProcessor::EndRenderPass() {
    assert_true(submission_open_);
@@ -1547,7 +1661,7 @@ index 001f36b..c419aa9 100644
    if (current_render_pass_ == VK_NULL_HANDLE) {
      deferred_command_buffer_.CmdVkEndRendering();
    } else {
-@@ -3593,6 +3763,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3593,6 +3806,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -1559,7 +1673,7 @@ index 001f36b..c419aa9 100644
  
    const RegisterFile& regs = *register_file_;
    (void)index_buffer_info;
-@@ -3613,6 +3788,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3613,6 +3831,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
    if (edram_mode == xenos::EdramMode::kCopy) {
      // Special copy handling.
@@ -1569,7 +1683,7 @@ index 001f36b..c419aa9 100644
      return IssueCopy();
    }
  
-@@ -3681,6 +3859,49 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3681,6 +3902,49 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
  
@@ -1619,7 +1733,7 @@ index 001f36b..c419aa9 100644
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
        pixel_shader ? (vertex_shader->writes_interpolators() &
-@@ -3835,7 +4056,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,7 +4099,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -1631,7 +1745,7 @@ index 001f36b..c419aa9 100644
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
-@@ -3849,18 +4073,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3849,18 +4116,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // textures.
    VkPipeline pipeline;
    void* pipeline_handle = nullptr;
@@ -1678,7 +1792,7 @@ index 001f36b..c419aa9 100644
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -3933,7 +4179,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3933,7 +4222,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
  
    // Update dynamic graphics pipeline state.
@@ -1687,7 +1801,7 @@ index 001f36b..c419aa9 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -4014,7 +4260,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4014,7 +4303,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
          continue;
        }
@@ -1696,7 +1810,7 @@ index 001f36b..c419aa9 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4032,7 +4278,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4321,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -1705,7 +1819,7 @@ index 001f36b..c419aa9 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4290,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4333,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -1714,7 +1828,7 @@ index 001f36b..c419aa9 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4072,6 +4318,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4072,6 +4361,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
  
        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1722,7 +1836,7 @@ index 001f36b..c419aa9 100644
        SubmitBarriers(true);
  
        VkBufferCopy guest_dma_index_copy_region = {};
-@@ -4111,9 +4358,37 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,9 +4401,37 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -1762,7 +1876,7 @@ index 001f36b..c419aa9 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4206,6 +4481,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
+@@ -4206,6 +4524,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1770,7 +1884,7 @@ index 001f36b..c419aa9 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4331,6 +4607,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4331,6 +4650,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1778,7 +1892,7 @@ index 001f36b..c419aa9 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4350,12 +4627,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +4670,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -1808,7 +1922,7 @@ index 001f36b..c419aa9 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,22 +4674,96 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +4717,140 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -1821,7 +1935,10 @@ index 001f36b..c419aa9 100644
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
 +  // vulkan_debug_dump_resolves: index of the resolve in the frame report.
 +  int64_t dump_resolve_index = -1;
-+  if (readback_mode == ReadbackResolveMode::kDisabled) {
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+-    uint32_t written_address, written_length;
+-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                         written_address, written_length);
 +    const RegisterFile& regs = *register_file_;
 +    if (frame_report_active_ && !REXCVAR_GET(vulkan_debug_dump_dir).empty() &&
 +        IsResolveDumpRequested(regs[XE_GPU_REG_RB_COPY_DEST_BASE])) {
@@ -1882,32 +1999,76 @@ index 001f36b..c419aa9 100644
 +        break;
 +    }
 +  }
-+  if (dump_resolve_index >= 0) {
-+    // Synchronous, so guest memory holds the result right after.
-+    readback_mode = ReadbackResolveMode::kFull;
-+  }
-   if (readback_mode == ReadbackResolveMode::kDisabled) {
-     uint32_t written_address, written_length;
-     return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
-                                          written_address, written_length);
++  if (readback_mode == ReadbackResolveMode::kDisabled) {
++    uint32_t written_address = 0, written_length = 0;
++    bool result = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
++                                                written_address, written_length);
++    if (result && dump_resolve_index >= 0) {
++      QueueResolveDump(uint32_t(dump_resolve_index), written_address, written_length);
++    }
++    return result;
    }
  
 -  return IssueCopy_ReadbackResolvePath();
-+  bool result = IssueCopy_ReadbackResolvePath(readback_mode);
-+  if (dump_resolve_index >= 0) {
-+    const RegisterFile& regs = *register_file_;
-+    DumpResolve(regs, memory_->TranslatePhysical(regs[XE_GPU_REG_RB_COPY_DEST_BASE]),
-+                uint32_t(dump_resolve_index));
-+  }
-+  return result;
++  return IssueCopy_ReadbackResolvePath(readback_mode);
  }
  
 -bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
++void VulkanCommandProcessor::QueueResolveDump(uint32_t resolve_index, uint32_t written_address,
++                                              uint32_t written_length) {
++  if (!written_length || texture_cache_->IsDrawResolutionScaled()) {
++    REXGPU_WARN("[frame] resolve {} not dumped: {}", resolve_index,
++                written_length ? "resolution scaling is not supported" : "nothing written");
++    return;
++  }
++  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  PendingResolveDump dump = {};
++  if (!ui::vulkan::util::CreateDedicatedAllocationBuffer(
++          vulkan_device, written_length, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
++          ui::vulkan::util::MemoryPurpose::kReadback, dump.buffer, dump.memory)) {
++    REXGPU_WARN("[frame] resolve {}: could not create a dump buffer", resolve_index);
++    return;
++  }
++  if (dfn.vkMapMemory(device, dump.memory, 0, VK_WHOLE_SIZE, 0, &dump.mapping) != VK_SUCCESS) {
++    dfn.vkDestroyBuffer(device, dump.buffer, nullptr);
++    dfn.vkFreeMemory(device, dump.memory, nullptr);
++    REXGPU_WARN("[frame] resolve {}: could not map a dump buffer", resolve_index);
++    return;
++  }
++  const RegisterFile& regs = *register_file_;
++  auto copy_dest_info = regs.Get<reg::RB_COPY_DEST_INFO>();
++  auto copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
++  dump.written_address = written_address;
++  dump.written_length = written_length;
++  dump.dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE] & 0x1FFFFFFF;
++  dump.width = copy_dest_pitch.copy_dest_pitch;
++  dump.height = copy_dest_pitch.copy_dest_height;
++  dump.format = uint32_t(copy_dest_info.copy_dest_format);
++  dump.endian = uint32_t(copy_dest_info.copy_dest_endian);
++  dump.resolve_index = resolve_index;
++
++  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
++  SetRenderPassEndReason(RenderPassEndReason::kReadback);
++  SubmitBarriers(true);
++  VkBufferCopy region = {};
++  region.srcOffset = written_address;
++  region.dstOffset = 0;
++  region.size = written_length;
++  deferred_command_buffer_.CmdVkCopyBuffer(shared_memory_->buffer(), dump.buffer, 1, &region);
++  PushBufferMemoryBarrier(dump.buffer, 0, written_length, VK_PIPELINE_STAGE_TRANSFER_BIT,
++                          VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
++                          VK_ACCESS_HOST_READ_BIT);
++  dump.submission = GetCurrentSubmission();
++  pending_resolve_dumps.push_back(dump);
++}
++
 +bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath(ReadbackResolveMode readback_mode) {
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +4782,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +4869,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -1915,7 +2076,7 @@ index 001f36b..c419aa9 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4579,6 +4941,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4579,6 +5028,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
  
      texture_cache_->UseScaledResolveBufferForRead();
@@ -1923,7 +2084,7 @@ index 001f36b..c419aa9 100644
      SubmitBarriers(true);
  
      VkBufferMemoryBarrier pre_barrier = {};
-@@ -4635,6 +4998,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4635,6 +5085,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                               readback.buffers[write_index], 1, &readback_region);
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1931,7 +2092,7 @@ index 001f36b..c419aa9 100644
      SubmitBarriers(true);
  
      VkBufferCopy readback_region = {};
-@@ -4849,6 +5213,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4849,6 +5300,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -1939,7 +2100,7 @@ index 001f36b..c419aa9 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4874,6 +5239,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -4874,6 +5326,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
      return false;
    }
  
@@ -1947,7 +2108,7 @@ index 001f36b..c419aa9 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4944,6 +5310,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5397,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -1957,7 +2118,7 @@ index 001f36b..c419aa9 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +5339,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +5426,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -1973,7 +2134,7 @@ index 001f36b..c419aa9 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5111,7 +5483,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5570,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -1985,7 +2146,7 @@ index 001f36b..c419aa9 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5136,6 +5512,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +5599,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -2001,10 +2162,13 @@ index 001f36b..c419aa9 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5165,6 +5550,118 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +5637,121 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
++    if (!pending_resolve_dumps.empty()) {
++      ProcessPendingResolveDumps(GetVulkanDevice(), GetCompletedSubmission(), false);
++    }
 +    // Frame report (vulkan_frame_report): ends with the frame it started on.
 +    if (frame_report_active_) {
 +      frame_report_active_ = false;
@@ -2120,7 +2284,7 @@ index 001f36b..c419aa9 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +5727,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +5817,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -2128,7 +2292,7 @@ index 001f36b..c419aa9 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5308,9 +5806,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5308,9 +5896,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -2145,7 +2309,7 @@ index 001f36b..c419aa9 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5368,6 +5872,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5368,6 +5962,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        sparse_memory_binds_.clear();
      }
  
@@ -2154,7 +2318,7 @@ index 001f36b..c419aa9 100644
      SubmitBarriers(true);
  
      assert_false(command_buffers_writable_.empty());
-@@ -5385,6 +5891,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,6 +5981,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -2180,7 +2344,7 @@ index 001f36b..c419aa9 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5652,9 +6177,105 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5652,9 +6267,105 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
    swap_fxaa_source_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
  }
  
@@ -2287,7 +2451,7 @@ index 001f36b..c419aa9 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5718,6 +6339,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +6429,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
@@ -2299,38 +2463,18 @@ index 001f36b..c419aa9 100644
      // std::memcmp instead of != so in case of NaN, every draw won't be
      // invalidating it.
      dynamic_depth_bias_update_needed_ |=
-@@ -5990,6 +6616,12 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -5990,6 +6706,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (pa_cl_vte_cntl.vtx_w0_fmt) {
      flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
    }
-+  if (REXCVAR_GET(vulkan_snap_vertex_positions)) {
-+    flags |= SpirvShaderTranslator::kSysFlag_SnapVertexPositions;
-+  }
 +  if (REXCVAR_GET(vulkan_debug_fsi_whole_quads)) {
 +    flags |= SpirvShaderTranslator::kSysFlag_FSIExecuteWholeQuads;
 +  }
    // Whether the primitive is polygonal, and gl_FrontFacing matters.
    if (primitive_polygonal) {
      flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
-@@ -6146,9 +6778,13 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
-     system_constants_.point_vertex_diameter_max = point_vertex_diameter_max;
-     system_constants_.point_constant_diameter[0] = point_constant_diameter_x;
-     system_constants_.point_constant_diameter[1] = point_constant_diameter_y;
--    // 2 because 1 in the NDC is half of the viewport's axis, 0.5 for diameter
--    // to radius conversion to avoid multiplying the per-vertex diameter by an
--    // additional constant in the shader.
-+  }
-+  // 2 because 1 in the NDC is half of the viewport's axis, 0.5 for diameter
-+  // to radius conversion to avoid multiplying the per-vertex diameter by an
-+  // additional constant in the shader. Needed for every draw, not only
-+  // points: vertex position snapping (vulkan_snap_vertex_positions) derives
-+  // the size of a guest pixel from it.
-+  {
-     float point_screen_diameter_to_ndc_radius_x =
-         (/* 0.5f * 2.0f * */ float(draw_resolution_scale_x)) /
-         std::max(viewport_info.xy_extent[0], uint32_t(1));
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..4efeb88 100644
+index 91ac08f..bde1394 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -12,12 +12,14 @@
@@ -2392,7 +2536,23 @@ index 91ac08f..4efeb88 100644
    if (!shader_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the guest shader storage file for writing, persistent "
-@@ -1215,13 +1238,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -1111,8 +1134,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
+     }
+   }
+ 
+-  bool use_async = REXCVAR_GET(async_shader_compilation) && !creation_threads_.empty() &&
+-                   pixel_shader && placeholder_pixel_shader_ != VK_NULL_HANDLE;
++  // With async_pipeline_wait, the draw waits for the real pipeline anyway, so
++  // create it here: a placeholder would be one more full compile, and waiting
++  // on the creation queue can build other pipelines first (and time out,
++  // which drops the draw).
++  bool use_async = REXCVAR_GET(async_shader_compilation) && !REXCVAR_GET(async_pipeline_wait) &&
++                   !creation_threads_.empty() && pixel_shader &&
++                   placeholder_pixel_shader_ != VK_NULL_HANDLE;
+   uint8_t async_priority = pipeline_util::kPriorityLowest;
+   if (use_async) {
+     uint32_t bound_rts =
+@@ -1215,13 +1243,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
  
  void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
      void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
@@ -2410,7 +2570,7 @@ index 91ac08f..4efeb88 100644
      return;
    }
    const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
-@@ -1230,6 +1256,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -1230,6 +1261,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
    if (is_placeholder_out) {
      *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
    }
@@ -2420,7 +2580,7 @@ index 91ac08f..4efeb88 100644
  }
  
  bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
-@@ -1246,6 +1275,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
+@@ -1246,6 +1280,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
      return false;
    }
  
@@ -2436,7 +2596,7 @@ index 91ac08f..4efeb88 100644
    // TODO(Triang3l): Log that the shader has been successfully translated in
    // common code.
  
-@@ -2964,11 +3002,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -2964,11 +3007,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    bool use_dynamic_rendering =
        REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
@@ -2460,7 +2620,7 @@ index 91ac08f..4efeb88 100644
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3200,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3205,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -2473,7 +2633,7 @@ index 91ac08f..4efeb88 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
-@@ -3268,9 +3323,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3268,9 +3328,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    VkSampleMask sample_mask = UINT32_MAX;
    VkPipelineMultisampleStateCreateInfo multisample_state = {};
    multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -2488,7 +2648,7 @@ index 91ac08f..4efeb88 100644
      multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
    } else if (!edram_fragment_shader_interlock && !subpass_has_attachments) {
      // Keep parity with D3D12 host-render-target path, where draws without
-@@ -3588,6 +3646,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3588,6 +3651,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
    }
  }
  
@@ -2644,10 +2804,81 @@ index 0298f06..55a8c73 100644
          command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
          MarkEdramBufferModified();
 diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
-index 6788214..4822d49 100644
+index 6788214..44c048f 100644
 --- a/src/graphics/vulkan/shared_memory.cpp
 +++ b/src/graphics/vulkan/shared_memory.cpp
-@@ -273,15 +273,26 @@ bool VulkanSharedMemory::UploadRanges(
+@@ -197,10 +197,70 @@ void VulkanSharedMemory::EndSubmission() {
+   upload_buffer_pool_->FlushWrites();
+ }
+ 
++void VulkanSharedMemory::UpdatePagesUsedSubmission() {
++  uint64_t submission = command_processor_.GetCurrentSubmission();
++  if (pages_used_submission_ == submission) {
++    return;
++  }
++  pages_used_submission_ = submission;
++  size_t word_count = ((kBufferSize >> page_size_log2()) + 63) / 64;
++  if (pages_used_in_submission_.size() != word_count) {
++    pages_used_in_submission_.assign(word_count, 0);
++  } else {
++    std::fill(pages_used_in_submission_.begin(), pages_used_in_submission_.end(), 0);
++  }
++}
++
++void VulkanSharedMemory::MarkPagesUsedInSubmission(uint32_t page_first, uint32_t page_count) {
++  UpdatePagesUsedSubmission();
++  uint32_t page_end = std::min(page_first + page_count, kBufferSize >> page_size_log2());
++  for (uint32_t page = page_first; page < page_end;) {
++    uint32_t bit = page & 63;
++    uint32_t count = std::min(64 - bit, page_end - page);
++    uint64_t mask = count == 64 ? ~uint64_t(0) : ((uint64_t(1) << count) - 1) << bit;
++    pages_used_in_submission_[page >> 6] |= mask;
++    page += count;
++  }
++}
++
++void VulkanSharedMemory::MarkBytesUsedInSubmission(uint32_t start, uint32_t length) {
++  if (!length) {
++    return;
++  }
++  uint32_t page_first = start >> page_size_log2();
++  uint32_t page_last = uint32_t((uint64_t(start) + length - 1) >> page_size_log2());
++  MarkPagesUsedInSubmission(page_first, page_last - page_first + 1);
++}
++
++bool VulkanSharedMemory::ArePagesUsedInSubmission(uint32_t page_first, uint32_t page_count) {
++  UpdatePagesUsedSubmission();
++  uint32_t page_end = std::min(page_first + page_count, kBufferSize >> page_size_log2());
++  for (uint32_t page = page_first; page < page_end;) {
++    uint32_t bit = page & 63;
++    uint32_t count = std::min(64 - bit, page_end - page);
++    uint64_t mask = count == 64 ? ~uint64_t(0) : ((uint64_t(1) << count) - 1) << bit;
++    if (pages_used_in_submission_[page >> 6] & mask) {
++      return true;
++    }
++    page += count;
++  }
++  return false;
++}
++
++void VulkanSharedMemory::OnRangesRequested(
++    const std::vector<std::pair<uint32_t, uint32_t>>& ranges) {
++  for (const std::pair<uint32_t, uint32_t>& range : ranges) {
++    MarkBytesUsedInSubmission(range.first, range.second);
++  }
++}
++
+ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_range) {
+   written_range.first = std::min(written_range.first, kBufferSize);
+   written_range.second = std::min(written_range.second, kBufferSize - written_range.first);
+   assert_true(usage != Usage::kRead || !written_range.second);
++  // GPU writes (resolves, memexport, in-stream uploads) recorded so far in
++  // this submission.
++  MarkBytesUsedInSubmission(written_range.first, written_range.second);
+   if (last_usage_ != usage || last_written_range_.second) {
+     VkPipelineStageFlags src_stage_mask, dst_stage_mask;
+     VkAccessFlags src_access_mask, dst_access_mask;
+@@ -273,15 +333,40 @@ bool VulkanSharedMemory::UploadRanges(
    if (upload_page_ranges.empty()) {
      return true;
    }
@@ -2662,10 +2893,24 @@ index 6788214..4822d49 100644
 -  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
 +  // Hoisted uploads (vulkan_hoist_shared_memory_uploads) run at the start of
 +  // the submission, ordered by barriers around them there, so they need no
-+  // barrier and no render pass end here.
++  // barrier and no render pass end here. Only uploads whose pages nothing
++  // earlier in the submission used can move there; the others stay in the
++  // command stream, ordered with what came before them.
 +  DeferredCommandBuffer* hoisted_command_buffer =
 +      command_processor_.hoisted_shared_memory_upload_command_buffer();
-+  if (!hoisted_command_buffer) {
++  if (hoisted_command_buffer) {
++    for (const std::pair<uint32_t, uint32_t>& upload_range : upload_page_ranges) {
++      if (ArePagesUsedInSubmission(upload_range.first, upload_range.second)) {
++        hoisted_command_buffer = nullptr;
++        break;
++      }
++    }
++  }
++  if (hoisted_command_buffer) {
++    for (const std::pair<uint32_t, uint32_t>& upload_range : upload_page_ranges) {
++      MarkPagesUsedInSubmission(upload_range.first, upload_range.second);
++    }
++  } else {
 +    // upload_page_ranges are sorted, use them to determine the range for the
 +    // ordering barrier.
 +    Use(Usage::kTransferDestination,
@@ -2684,7 +2929,7 @@ index 6788214..4822d49 100644
    bool successful = true;
    upload_regions_.clear();
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index ecbd940..9c7b6da 100644
+index ecbd940..afe8796 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
 @@ -34,6 +34,15 @@
@@ -2741,9 +2986,20 @@ index ecbd940..9c7b6da 100644
          command_processor_.SubmitBarriers(true);
          command_buffer.CmdVkDispatch(group_count_x, group_count_y,
                                       load_constants_float_convert.size_blocks[2]);
-@@ -1740,6 +1760,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1739,7 +1759,19 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+         vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
          texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
          texture_dst_access_mask, texture_old_layout, texture_new_layout);
++  } else {
++    // Another load may have written the image earlier in this submission:
++    // order this copy after it (xenia-edge 3087c4c5, c8f214e2). The masks are
++    // equal, so the barrier must not be skipped as a no-op.
++    command_processor_.PushImageMemoryBarrier(
++        vulkan_texture.image(), ui::vulkan::util::InitializeSubresourceRange(),
++        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
++        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
++        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
++        VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
    }
 +  command_processor_.SetRenderPassEndReason(
 +      VulkanCommandProcessor::RenderPassEndReason::kTextureLoad);

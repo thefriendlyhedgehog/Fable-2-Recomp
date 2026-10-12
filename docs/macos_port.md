@@ -207,6 +207,10 @@ are late by several milliseconds there. The patch gives every runtime
 thread `QOS_CLASS_USER_INTERACTIVE`, puts the vblank thread under a Mach
 time-constraint policy and sleeps it until just before the next vblank is
 due, converting the remaining guest ticks with the guest time scalar.
+(The class is set for every runtime thread, guest threads included: the
+game's main logic thread is as latency-sensitive as the GPU thread. A
+guest `SetPriority` that ends in `pthread_setschedparam` takes that thread
+out of the QoS system.)
 
 The presenter picks Vulkan immediate mode when the driver offers it, and
 MoltenVK does (`presentation mode 0` in the log): frames are shown as soon
@@ -358,13 +362,12 @@ which absorbs that; host GPUs use a finer grid (about 1/256 pixel), so
 pixels whose centers lie between the two slightly different edges are
 covered by the prepass but not by the base pass, or the other way around,
 and the base pass leaves them unpainted: white dashed lines along triangle
-edges that flicker with the slightest motion. `vulkan_snap_vertex_positions`
-(SDK patch, hot-reloadable, off by default: it did not remove the lines on
-the Mac, so their cause is elsewhere) snaps the screen
-position of every vertex to the 1/16 pixel grid in the translated vertex
-shader (plus 1/512 pixel so the host's own quantization rounds it the same
-way everywhere), for vertices in front of the viewer and not far outside
-the viewport. SPIRV-Cross keeps the translator's no-contraction arithmetic
+edges that flicker with the slightest motion. A `vulkan_snap_vertex_positions`
+switch snapped the screen position of every vertex to the 1/16 pixel grid
+in the translated vertex shader (plus 1/512 pixel so the host's own
+quantization rounds it the same way everywhere). It did not remove the
+lines (their cause was the quad skip, below) and added work to every vertex
+shader even when off, so it was removed again. SPIRV-Cross keeps the translator's no-contraction arithmetic
 exact in MSL (`fma(a, b, 0)` in `optnone` helpers), so the remaining
 difference between two shaders is the guest's own math.
 
@@ -421,6 +424,38 @@ game (M4, MoltenVK reports subgroup size 32 with quad operations in fragment
 shaders) the snowflakes, the hero and the edges look right, and the
 whole-quads switch changes only 1.9% of pixels.
 
+### Shared memory and texture load ordering (flickering data)
+
+Dark shadow areas flicker between frames while standing still (flicker
+test in the handoff), so some input of the draws differs between frames.
+A review of the patch against upstream Xenia and xenia-edge found three
+ordering holes:
+
+- **Upload hoisting** (`vulkan_hoist_shared_memory_uploads`, opt-in) records
+  shared memory uploads in a separate list that runs at the start of the
+  submission, so a mid-frame upload does not end the render pass. Without
+  further care that list could hold two copies of the same page with no
+  barrier between them (undefined order, so the older copy can win and the
+  page stays stale until the CPU writes it again), and an upload could
+  overtake a read, a resolve or a memexport recorded before it in the
+  submission. Now `VulkanSharedMemory` keeps a bitmap of the pages used in
+  the current submission (requested by draws through a new
+  `SharedMemory::OnRangesRequested` hook, written through `Use()`, or
+  uploaded); an upload is hoisted only if none of its pages were used
+  earlier in the submission, otherwise it goes into the command stream as
+  upstream does.
+- **Texture validity after the request** (xenia-edge 9781a75a). The texture
+  cache requests the shared memory of all of a draw's textures first, then
+  loads and watches each texture. If the CPU writes a texture's memory in
+  between, the texture was marked up to date and watched, with data that
+  was already stale, and nothing would reload it until the next CPU write.
+  `MakeUpToDateAndWatch` now checks `SharedMemory::IsRangeValid` under the
+  global lock and leaves the texture outdated (reloaded on the next use).
+- **Same image loaded twice in a submission** (xenia-edge 3087c4c5,
+  c8f214e2): the second copy into the image had no barrier after the first
+  (both in `TRANSFER_DST`, so the usage did not change); now a
+  transfer-write to transfer-write barrier orders them.
+
 ### Ported from himdo/rexglue-sdk
 
 Upstream's Windows build moved to the himdo/rexglue-sdk fork. Its fixes
@@ -432,7 +467,10 @@ that matter on macOS are in the SDK patch:
   objects missing for a frame and corrupted textures rendered by the skipped
   pass (noise, streaks, flickering shadows when new effects first appear),
   and with `vulkan_async_skip_incomplete_frames` the frame was not shown at
-  all. `async_pipeline_wait_timeout_ms` (default 5000) bounds one wait.
+  all. `async_pipeline_wait_timeout_ms` (default 5000) bounds one wait. With
+  the wait on, new pipelines are now created right away instead: the
+  placeholder was one more full Metal compile, and waiting on the creation
+  queue could build other pipelines first and time out (dropping the draw).
 - `depth_bias_shader` / `depth_bias_shader_units` for Vulkan's host render
   target (`fbo`) path, so `[patches] dog_fur_depth_bias` takes effect there.
   The FSI path stores the guest's 24-bit depth and needs no bias.
