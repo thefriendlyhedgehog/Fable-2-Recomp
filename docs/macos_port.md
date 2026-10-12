@@ -318,7 +318,7 @@ still (each press logs `[input] F6: <cvar> = true/false`):
 | Key (fn+) | cvar | Effect |
 |---|---|---|
 | F6 | `vulkan_debug_fsi_whole_quads` | Runs FSI pixel shaders for every 2x2 quad, also those where no pixel passed the early depth / stencil test. The skip checks the neighbors with derivatives and needs fine ones; artifacts along triangle edges that go away point at the GPU's derivatives. |
-| F7 | `vulkan_debug_base_mip_only` | Samples only the base mip level. Wrong-looking small or distant textures that look right then point at the smaller mips (packed mip tails); edge artifacts that go away point at texture LOD from bad derivatives. |
+| F7 | `vulkan_debug_force_mip` | Cycles the mip level every texture is sampled at: off, 0, 1, ... 6, off (`vulkan_debug_base_mip_only` is level 0 only). With level 0 only, the snowflakes (64x64 DXT1 point sprites) and the hero looked right and some edge lines went away, so smaller levels are loaded or selected wrong; forcing each level shows which. |
 | F8 | `vulkan_debug_skip_ps_group` | Cycles through the groups of `vulkan_debug_skip_ps` (guest pixel shader hashes, comma-separated, groups separated by `;`), skipping the draws of one group at a time, then none. Each press logs the group. |
 
 The analyzer lists the key presses the game logged, and the draws whose

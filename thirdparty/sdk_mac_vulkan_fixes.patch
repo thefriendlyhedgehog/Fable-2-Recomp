@@ -2431,10 +2431,10 @@ index 6788214..4822d49 100644
    bool successful = true;
    upload_regions_.clear();
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index ecbd940..36ac01d 100644
+index ecbd940..9c7b6da 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
-@@ -34,6 +34,10 @@
+@@ -34,6 +34,15 @@
  #include <rex/ui/vulkan/util.h>
  
  REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube map sampling");
@@ -2442,10 +2442,15 @@ index ecbd940..36ac01d 100644
 +                    "Debug: sample only the base mip level of every texture, to check whether "
 +                    "the smaller mip levels (packed mip tails) are loaded correctly.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_INT32(vulkan_debug_force_mip, -1, "GPU/Vulkan",
++                     "Debug: sample every texture only at this mip level (counted from the "
++                     "fetch constant's first level, clamped to the last), to see which levels "
++                     "are loaded wrong; -1 = off.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
  namespace rex::graphics::vulkan {
  
-@@ -735,7 +739,8 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
+@@ -735,11 +744,18 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
    bool min_mag_linear = parameters.mag_linear && parameters.min_linear;
    bool mip_filter_bilinear_or_trilinear =
        mip_filter == xenos::TextureFilter::kPoint || mip_filter == xenos::TextureFilter::kLinear;
@@ -2455,7 +2460,17 @@ index ecbd940..36ac01d 100644
    uint32_t mip_min_level, mip_max_level;
    texture_util::GetSubresourcesFromFetchConstant(fetch, nullptr, nullptr, nullptr, nullptr, nullptr,
                                                   &mip_min_level, &mip_max_level);
-@@ -1608,6 +1613,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+   parameters.mip_min_level = mip_min_level;
++  int32_t debug_force_mip = REXCVAR_GET(vulkan_debug_force_mip);
++  if (debug_force_mip >= 0) {
++    parameters.mip_base_map = 1;
++    parameters.mip_min_level =
++        std::min(mip_min_level + uint32_t(debug_force_mip), std::max(mip_max_level, mip_min_level));
++  }
+   bool has_mips = mip_max_level > mip_min_level;
+   int32_t anisotropic_override = REXCVAR_GET(anisotropic_override);
+   if (anisotropic_override > -1 && anisotropic_override < 6 && has_mips &&
+@@ -1608,6 +1624,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                            sizeof(load_constants.host_offset),
                                            &load_constants.host_offset);
        }
@@ -2464,7 +2479,7 @@ index ecbd940..36ac01d 100644
        command_processor_.SubmitBarriers(true);
        command_buffer.CmdVkDispatch(group_count_x, group_count_y, load_constants.size_blocks[2]);
        load_constants.guest_offset += level_array_slice_stride_bytes_scaled;
-@@ -1708,6 +1715,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1708,6 +1726,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                              sizeof(load_constants_float_convert.host_offset),
                                              &load_constants_float_convert.host_offset);
          }
@@ -2473,7 +2488,7 @@ index ecbd940..36ac01d 100644
          command_processor_.SubmitBarriers(true);
          command_buffer.CmdVkDispatch(group_count_x, group_count_y,
                                       load_constants_float_convert.size_blocks[2]);
-@@ -1740,6 +1749,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1740,6 +1760,8 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
          texture_src_stage_mask, texture_dst_stage_mask, texture_src_access_mask,
          texture_dst_access_mask, texture_old_layout, texture_new_layout);
    }

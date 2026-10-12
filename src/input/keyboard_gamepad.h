@@ -449,10 +449,11 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     }
     frame_report_down_prev_ = frame_report_down;
 
-    // F6 / F7 (host) -> flip a GPU debug switch of the macOS SDK patch, to
-    // compare the picture with and without it while standing still: F6 runs
-    // fragment shader interlock shaders for whole 2x2 quads (no early quad
-    // skip), F7 samples only the base mip level. F8 cycles through the
+    // F6 (host) -> flip a GPU debug switch of the macOS SDK patch, to compare
+    // the picture with and without it while standing still: fragment shader
+    // interlock shaders run for whole 2x2 quads (no early quad skip). F7
+    // cycles the mip level every texture is sampled at (off, 0, 1, ... 6,
+    // off), to see which levels are loaded wrong. F8 cycles through the
     // groups of pixel shaders in vulkan_debug_skip_ps (';'-separated),
     // skipping the draws of one group at a time, then none.
     static constexpr struct {
@@ -462,7 +463,6 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       const char* cvar;
     } kDebugToggles[] = {
         {0x75, 0x36, "F6", "vulkan_debug_fsi_whole_quads"},
-        {0x76, 0x37, "F7", "vulkan_debug_base_mip_only"},
     };
     for (size_t i = 0; i < std::size(kDebugToggles); ++i) {
       bool down =
@@ -478,6 +478,21 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       }
       debug_toggle_down_prev_[i] = down;
     }
+    bool force_mip_down = focused && (KeyDown(0x76 /* F7 */) || KeyDown(0x37 /* 7 */));
+    if (force_mip_down && !debug_toggle_down_prev_[1]) {
+      int32_t level = rex::cvar::Query<int32_t>("vulkan_debug_force_mip") + 1;
+      if (level > 6) level = -1;
+      if (rex::cvar::SetFlagByName("vulkan_debug_force_mip", std::to_string(level))) {
+        if (level < 0) {
+          REXSYS_INFO("[input] F7: textures use all mip levels again");
+        } else {
+          REXSYS_INFO("[input] F7: textures sampled only at mip level {}", level);
+        }
+      } else {
+        REXSYS_WARN("[input] F7: vulkan_debug_force_mip is not available in this SDK build");
+      }
+    }
+    debug_toggle_down_prev_[1] = force_mip_down;
     bool skip_group_down = focused && (KeyDown(0x77 /* F8 */) || KeyDown(0x38 /* 8 */));
     if (skip_group_down && !debug_toggle_down_prev_[2]) {
       std::string groups = rex::cvar::Query<std::string>("vulkan_debug_skip_ps");
