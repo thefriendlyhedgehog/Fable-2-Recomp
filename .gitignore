@@ -62,6 +62,7 @@ __pycache__/
 !tools/stage_content.sh
 !tools/build_sdk_mac.sh
 !tools/summarize_sample.py
+!tools/summarize_gputrace.py
 
 # --- Fetched/external toolchain deps (created by tools/setup_sdk*.cmd). -------
 # The tracked files in thirdparty/ (rexglue-sdk-local.patch,
