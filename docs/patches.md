@@ -105,6 +105,7 @@ Currently **empty**.
 |---|---|---|---|
 | Unlock Website Items (Guy) | mid-asm hook `fable2_hook_unlock_website` @ 0x8256E384 (after `rlwinm r9,r10,0,25,25`); toggle: `[patches] unlock_website` | Forces `r9 = 0x40` (bit 6) in `sub_8256E368`, so the website/Guild-chest item lookup reads as unlocked and runs the real lookup. Re-derives the Xenia "Unlock Website Items" intent for THIS build (the stock ops target a different revision's bytes). | Hook confirmed in generated code + clean startup; in-game chest unlock pending manual test |
 | Unlock CE Content (Guy) | mid-asm hook `fable2_hook_unlock_ce` @ 0x824B3540 (after `rlwinm r10,r11,0,25,25`); toggle: `[patches] unlock_ce` | Forces `r10 = 0x40` (bit 6) in `sub_824B3528`, so the Collectors-Edition chest item lookup reads as unlocked and runs the real lookup. Same re-derivation approach. | Hook confirmed in generated code + clean startup; in-game chest unlock pending manual test |
+| Disable MSAA (Margen67) | mid-asm hook `fable2_hook_game_msaa` @ 0x8238DF3C (after `li r9, 2`); setting: `[patches] game_msaa` (-1 = leave the game's value, the default; 0/1/2; other values are rejected with a warning) | Replaces the multisample type the render setup stores at `stw r9,156(r31)` (0x8238DF68), next to the 1120x720 render size (`li r11,1120` at 0x8238DF58). Xbox 360 `D3DMULTISAMPLE_*`: 0 = none, 1 = 2x, 2 = 4x (the game's own). Xenia's patch writes 1 at 0x8238DF3F, the immediate of that `li`. | macOS (FSI path): 1 and 0 both render; 0 ran normal scenes at the 30 fps cap without visible problems. Logs `[patches] game MSAA mode 2 -> N` once. |
 
 To add a new code patch: a `[[entrypoint.midasm_hook]]` entry + hook
 function gated on a `[patches]` config key (preferred), or an
@@ -128,10 +129,11 @@ original `__imp__` entry). Enabled with `FABLE2_FPS_METER=1`.
 2. **Other Xenia patches** for this title (from
    `4D5307F1 - Fable II (GOTY).patch.toml`). Done as mid-asm hooks:
    **Unlock Website Items**, **Unlock CE Content** (all re-derived for THIS
-   build — see the recomp-level patches table above). Remaining (still to port,
+   build — see the recomp-level patches table above), and **Disable MSAA**
+   (`[patches] game_msaa`, an opt-in setting). Remaining (still to port,
    each needs the same build-mismatch investigation — the stock ops target a
-   different revision): 1280x720 (be16 0x8238DF5A=0x0500), Disable MSAA
-   (be8 0x8238DF3F=0x01), Disable Texture Morphing (be16 0x8220EF10=0x4280),
+   different revision): 1280x720 (be16 0x8238DF5A=0x0500),
+   Disable Texture Morphing (be16 0x8220EF10=0x4280),
    21:9 / 32:9 widescreen — all .text/data-in-.text, so expect the same "applied
    but inert" behavior for their code ops if applied to the guest image.
 3. **Oddity worth investigating (separate issue):** the recompiled C++ for

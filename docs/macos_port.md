@@ -1,9 +1,11 @@
 # macOS port
 
 **Status:** builds and runs on an M4 Mac mini (macOS, Xcode beta toolchain,
-SDK v0.10.0). With FSI render targets the boot logos, menus and new-game flow
-work and gameplay starts (audio, cutscene, tutorial). Open problems: in-game
-graphics corruption, low frame rate, wonky stick input in menus, and an
+SDK v0.10.0 built from source with `thirdparty/sdk_mac_vulkan_fixes.patch`).
+With FSI render targets the game renders and plays; normal scenes run at the
+game's 30 fps cap. Open problems: some scenes (near fire, in snow) turn
+GPU-bound at about 300 ms per frame, thin lines along some triangle edges
+(rocks, snowflake quads), snowflakes drawn as framed squares, and an
 occasional black screen at launch.
 
 ## Prior work
@@ -45,6 +47,12 @@ tools/stage_content.sh . out/build/mac-arm64-release
 out/build/mac-arm64-release/fable_2
 ```
 
+- `tools/stage_content.sh` copies `default.xex`, `data/`, `nxeart/` and
+  `$SystemUpdate/` next to the executable, only what changed. It merges
+  `data/dir.manifest` instead of copying it: the build already writes one
+  there listing only its own `scripts\recomp\*` files, which is newer than
+  the game's, so a newer-wins copy left every game file unlisted (and the app
+  then refused to start, "game data was not found or is incomplete").
 - `tools/setup_sdk.sh` downloads the prebuilt SDK for the host
   (`mac-arm64`, `mac-amd64` or `linux-amd64`) into
   `thirdparty/rexglue-sdk-prebuilt/`.
@@ -75,8 +83,11 @@ out/build/mac-arm64-release/fable_2
 
 - **Keyboard/mouse input** (`src/input/keyboard_gamepad.h`): the driver
   polled Win32 (`GetAsyncKeyState`, cursor recentering), so off Windows the
-  keyboard did nothing. It now also listens to the SDK window's key and mouse
-  events and uses SDL relative mouse mode for mouse look. Same
+  keyboard did nothing. It now also listens to the SDK window's key, mouse
+  and focus events and uses SDL relative mouse mode for mouse look; when the
+  pointer cannot be locked it recenters the cursor instead (and tries the
+  lock again on the next capture). Cursor and pointer-lock calls run on the
+  UI thread, and the driver detaches when the window closes. Same
   `keyboard_gamepad_map` / `mouse_look*` cvars, same F4/F5 behavior. The
   Windows path is unchanged.
 - **Guest memory reads** (`src/diagnostics/guest_memory.h`): probes that run on
@@ -191,7 +202,7 @@ under load, and the emulated vblank was a 1 ms polling loop whose wakeups
 are late by several milliseconds there. The patch gives every runtime
 thread `QOS_CLASS_USER_INTERACTIVE`, puts the vblank thread under a Mach
 time-constraint policy and sleeps it until just before the next vblank is
-due.
+due, converting the remaining guest ticks with the guest time scalar.
 
 The presenter picks Vulkan immediate mode when the driver offers it, and
 MoltenVK does (`presentation mode 0` in the log): frames are shown as soon
@@ -215,10 +226,19 @@ the whole GPU queue on MoltenVK:
   results into guest memory. Xenia runs Fable II without it. The app now
   seeds `readback_memexport = false` on macOS.
 - **Resolve readback** (`vulkan_readback_resolve = true` means the "fast"
-  mode: every resolve, one frame late). The hero/dog texture only needs one
-  resolve read back; the SDK patch adds `readback_resolve_force_addresses`,
-  which the app already seeds with the hero/dog texture address
-  `0x12704000`, and reads those resolves back synchronously.
+  mode: every resolve, one frame late). Upstream now fixes the black
+  hero/dog textures without any readback (`[patches]
+  realtime_texture_morphing`, on by default). The older fix,
+  `[patches] hero_dog_texture_readback` (off by default), needs only one
+  resolve read back: the SDK patch adds `readback_resolve_force_addresses`,
+  and the app seeds it with `0x12704000:color:fmt=8_8_8_8:blit` on macOS.
+  Each entry is an address (matching destinations in the next 64 KiB) with
+  optional qualifiers that must all hold: `color`/`depth`, `fmt=<format>`
+  (the `_A` and `_AS_16_16_16_16` variants of a format match it), `blit`
+  (a `PM4_DRAW_INDX_2` 3-index rectangle-list copy, how Direct3D 9
+  resolves) and `span=<bytes>`. A resolve inside an entry's window that
+  its qualifiers reject is logged (`Resolve to 0x... not read back`, first
+  16 times), so a filter that is too strict shows up in the log.
 
 The Vulkan aliases `vulkan_readback_resolve` and `vulkan_readback_memexport`
 override the shared cvars whenever they differ from their default (false),
@@ -229,13 +249,39 @@ frame late) and broken polygons on skinned characters.
 
 ### Long-frame log
 
-The SDK patch logs every frame over 100 ms as
-`Long frame N ms: draws (pipelines, textures, shared memory), resolves, GPU
-waits, swap, idle waiting for guest commands, WAIT_REG_MEM, other`. "GPU
-waits" means the CPU waited for the GPU (readbacks). "Idle waiting for
-guest commands" means the game had not submitted the next work, so the time
-went to the guest CPU side. Plus an `FSI stats` line every 300 frames with
-the fps, the longest frame and the count over 40 ms.
+With `--vulkan_long_frame_log` (off by default, hot-reloadable; it adds a
+few clock reads per draw) the SDK patch logs every frame over 100 ms as
+`Long frame N ms: draws, pipelines, textures, shared memory, resolves, GPU
+waits, GPU-bound frame throttle, submit, completed submissions, swap, idle
+waiting for guest commands, WAIT_REG_MEM, other`. Each millisecond is
+counted once, in the innermost area (a resolve inside a draw counts as
+resolves, a fence wait inside a resolve as GPU waits), so the areas add up
+to the frame. "GPU-bound frame throttle" is the wait before opening a frame
+for the GPU to finish the frame two back: the GPU is the bottleneck. "GPU
+waits" are the other blocking fence waits (readbacks, resource reuse).
+"Pipelines" includes waiting for pipelines that are still being created.
+"Idle waiting for guest commands" means the game had not submitted the
+next work, so the time went to the guest CPU side. The `FSI stats` line
+every 300 frames (fps, longest frame, frames over 40 ms) is always on.
+
+### Ported from himdo/rexglue-sdk
+
+Upstream's Windows build moved to the himdo/rexglue-sdk fork. Its fixes
+that matter on macOS are in the SDK patch:
+
+- `async_pipeline_wait` (default on), implemented for Vulkan: a draw whose
+  pipeline is still being compiled in the background waits for it (helping
+  with the creation queue) instead of being skipped. Skipped draws left
+  objects missing for a frame and corrupted textures rendered by the skipped
+  pass (noise, streaks, flickering shadows when new effects first appear),
+  and with `vulkan_async_skip_incomplete_frames` the frame was not shown at
+  all. `async_pipeline_wait_timeout_ms` (default 5000) bounds one wait.
+- `depth_bias_shader` / `depth_bias_shader_units` for Vulkan's host render
+  target (`fbo`) path, so `[patches] dog_fur_depth_bias` takes effect there.
+  The FSI path stores the guest's 24-bit depth and needs no bias.
+- The input system lock (a crash when spamming buttons on a SpinnerBox),
+  `readback_resolve_half_pixel_offset` on by default, and
+  `readback_memexport_fast_wait`.
 
 ### Performance (open)
 
@@ -247,10 +293,11 @@ GPU at 100% with a low frame rate after the fix. Things known to cost:
   off: it only returns the alias to its default, which hands control to
   `readback_memexport` (default on).
 - The game's own 4x MSAA. Xenia's Fable II patch file has "Disable MSAA"
-  (be8 `0x8238DF3F` = 1), but that address is code, which a recomp never
-  executes; it has to become a mid-asm hook. The app logs the instruction
-  words around each Xenia code-patch site at startup (`[patches] code at`)
-  so the hook can be written.
+  (be8 `0x8238DF3F` = 1, the immediate of `li r9, 2`); here it is the
+  mid-asm hook `fable2_hook_game_msaa` behind `[patches] game_msaa` in
+  `fable2_config.toml` (-1 = the game's 4x, the default; 0 = none, 1 = 2x,
+  Xenia's value). With 0, normal scenes ran at the 30 fps cap; the heavy
+  scenes stayed GPU-bound (about 300 ms per frame, all of it frame throttle).
 - The `fsi` path shades every sample (sample-rate shading at 4x MSAA) with
   interlock and storage-buffer traffic; it is the slow path on every host.
   Without dynamic rendering every sample-count change and every barrier
@@ -374,8 +421,10 @@ Options:
 - `-codegen` also builds the recompiler (`rexglue`) with the patch's codegen
   fixes (currently the upstream `vpkuhus`/`vpkuwus` aliasing fix, rexglue-sdk
   6319e23) and regenerates `generated/`; only files whose output changes are
-  rewritten. `build.sh` then passes `FABLE2_CODEGEN_EXECUTABLE` so later
-  codegen runs keep the fix. Worth it only if the game uses those
+  rewritten. The script records the binary in
+  `thirdparty/rexglue-sdk-src/codegen-tool.path`, and `build.sh` passes it as
+  `FABLE2_CODEGEN_TOOL` (upstream's name for the override) so later codegen
+  runs keep the fix. Worth it only if the game uses those
   instructions with the destination as a source; see the check below.
 - `-mvk-private` builds MoltenVK with `MVK_USE_METAL_PRIVATE_API` and stages
   it in `vulkan/lib`. MoltenVK can then honour "primitive restart disabled"
@@ -390,12 +439,15 @@ grep -rhoE "// vpku[hw]us(128)? v[0-9]+, ?v[0-9]+, ?v[0-9]+" generated | awk -F'
 
 ## Known gaps
 
-- **Hero/dog black textures:** upstream's fix seeds the GPU cvar
-  `readback_resolve_force_addresses`, which exists only in upstream's locally
-  modified SDK. The SDK patch now adds it, so with the source-built plugin
-  the app's seed is accepted and the log shows `Forced resolve readback to
-  0x12704000` when the texture is regenerated. With the prebuilt plugin the
-  app still logs "cvar readback_resolve_force_addresses rejected".
+- **Hero/dog black textures:** fixed upstream by realtime texture morphing
+  (no readback). The older readback fix needs the source-built plugin (the
+  prebuilt one has no `readback_resolve_force_addresses`, and the app logs
+  "cvar readback_resolve_force_addresses rejected" if
+  `hero_dog_texture_readback` is turned on with it).
+- **Lines along triangle edges** (rocks, snowflake quad diagonals): still
+  there with `game_msaa = 0` and with MoltenVK fast math off (which also made
+  the GPU the bottleneck everywhere), so neither MSAA coverage nor fast math.
+  The `fbo` path is the next comparison.
 - **Snow:** snowflakes render as small framed squares (point sprites
   expanded in the vertex shader, since Apple GPUs have no geometry shaders).
   Not diagnosed yet.
