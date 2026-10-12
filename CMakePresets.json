@@ -105,7 +105,10 @@
             "name": "win-amd64-release",
             "displayName": "Windows AMD64 Release",
             "inherits": "windows-base",
-            "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "FABLE2_NO_PE_CLEAN": "ON"
+            }
         },
         {
             "name": "win-amd64-release-profiling",

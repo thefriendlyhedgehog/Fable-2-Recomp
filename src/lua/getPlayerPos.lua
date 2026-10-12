@@ -15,14 +15,33 @@ local function parse_vector3(text)
   return tonumber(x), tonumber(y), tonumber(z)
 end
 
+-- NOTE: pcall only catches Lua errors. If the entity wrapped by `hero`
+-- is NULL/dead, hero:GetPosition() faults INSIDE the C++ binding (a guest
+-- access violation, not a Lua error), so the guards below are best-effort:
+-- prefer a live hero reference and bail on anything that isn't a usable
+-- entity userdata before touching GetPosition.
 local function player_position()
-  local hero = QuestManager.HeroEntity
-  if not hero then
-    hero = (Debug and Debug.GetHero) and Debug.GetHero() or GetPlayerHero()
+  local hero = nil
+  if type(QuestManager) == "table" then
+    hero = QuestManager.HeroEntity
   end
-  if not hero then return nil end
+  if not hero and type(Debug) == "table" and type(Debug.GetHero) == "function" then
+    local ok, h = pcall(Debug.GetHero)
+    if ok then hero = h end
+  end
+  if not hero then
+    local ok, h = pcall(GetPlayerHero)
+    if ok then hero = h end
+  end
+  if type(hero) ~= "userdata" then return nil end
+  -- Optional liveness probe: only if the binding exposes IsValid(), and only
+  -- trust a definitive false.
+  if type(hero.IsValid) == "function" then
+    local ok, valid = pcall(hero.IsValid, hero)
+    if ok and valid == false then return nil end
+  end
   local ok, pos = pcall(function() return hero:GetPosition() end)
-  if not ok then return nil end
+  if not ok or type(pos) ~= "userdata" then return nil end
   return parse_vector3(tostring(pos))
 end
 

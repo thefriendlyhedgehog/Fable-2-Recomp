@@ -5,38 +5,70 @@
 cmake_minimum_required(VERSION 3.25)
 project(fable_2 LANGUAGES CXX)
 
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS constants/game_versions.json)
+execute_process(COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/generate_game_versions.py --check
+    COMMAND_ERROR_IS_FATAL ANY)
+include(constants/game_versions.cmake)
+set(FABLE2_BUILD_PROFILE "${FABLE2_CATALOG_COMPATIBLE_PROFILE}" CACHE STRING "Verified guest XEX profile")
+set_property(CACHE FABLE2_BUILD_PROFILE PROPERTY STRINGS
+    "${FABLE2_CATALOG_COMPATIBLE_PROFILE}" ${FABLE2_CATALOG_PROFILES})
+if(FABLE2_BUILD_PROFILE STREQUAL FABLE2_CATALOG_COMPATIBLE_PROFILE)
+    set(FABLE2_SELECTED_PROFILES ${FABLE2_CATALOG_PROFILES})
+elseif(FABLE2_BUILD_PROFILE IN_LIST FABLE2_CATALOG_PROFILES)
+    set(FABLE2_SELECTED_PROFILES "${FABLE2_BUILD_PROFILE}")
+else()
+    message(FATAL_ERROR "Unverified FABLE2_BUILD_PROFILE: ${FABLE2_BUILD_PROFILE}")
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
+list(JOIN FABLE2_SELECTED_PROFILES "\", \"" FABLE2_PROFILES_JSON)
+set(FABLE2_SUPPORTED_PROFILES "[\"${FABLE2_PROFILES_JSON}\"]")
+configure_file(config/fable2_build.json.in ${CMAKE_CURRENT_BINARY_DIR}/fable2_build.json @ONLY)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Needed by the recomp-level patch step below (tools/apply_recomp_patches.py).
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 include(generated/rexglue.cmake)
-
-# Recompiler override: tools/build_sdk_mac.sh -codegen builds rexglue from the
-# SDK source with the fixes in thirdparty/sdk_mac_vulkan_fixes.patch (same SDK
-# version, so the generated layout is unchanged), and build.sh passes it here
-# when it exists, so a codegen re-run triggered by the build (for example after
-# a manifest change) keeps those fixes instead of regenerating with the prebuilt
-# SDK's recompiler.
-set(FABLE2_CODEGEN_EXECUTABLE "" CACHE FILEPATH
-    "rexglue binary used for codegen instead of the SDK's (empty: the SDK's)")
-if(FABLE2_CODEGEN_EXECUTABLE AND TARGET rex::rexglue)
-    get_target_property(_fable2_rexglue_alias rex::rexglue ALIASED_TARGET)
-    if(NOT EXISTS "${FABLE2_CODEGEN_EXECUTABLE}")
-        message(WARNING "FABLE2_CODEGEN_EXECUTABLE ${FABLE2_CODEGEN_EXECUTABLE} does not exist; using the SDK's rexglue")
-    elseif(_fable2_rexglue_alias)
-        message(STATUS "rex::rexglue is built in-tree; ignoring FABLE2_CODEGEN_EXECUTABLE")
-    else()
-        set_target_properties(rex::rexglue PROPERTIES
-            IMPORTED_LOCATION "${FABLE2_CODEGEN_EXECUTABLE}"
-            IMPORTED_LOCATION_RELEASE "${FABLE2_CODEGEN_EXECUTABLE}"
-            IMPORTED_LOCATION_DEBUG "${FABLE2_CODEGEN_EXECUTABLE}"
-            IMPORTED_LOCATION_RELWITHDEBINFO "${FABLE2_CODEGEN_EXECUTABLE}")
-        message(STATUS "Codegen uses ${FABLE2_CODEGEN_EXECUTABLE}")
+# Codegen tool override (rex::rexglue). On macOS build.sh passes the
+# recompiler built by tools/build_sdk_mac.sh -codegen (the v0.10.0 source with
+# the codegen fixes in thirdparty/sdk_mac_vulkan_fixes.patch), so codegen runs
+# the build triggers itself (for example after a manifest change) keep them.
+set(FABLE2_CODEGEN_TOOL "" CACHE FILEPATH "Standalone compatible ReXGlue codegen tool")
+if(FABLE2_CODEGEN_TOOL)
+    if(NOT EXISTS "${FABLE2_CODEGEN_TOOL}")
+        message(FATAL_ERROR "FABLE2_CODEGEN_TOOL does not exist")
     endif()
-    unset(_fable2_rexglue_alias)
+    # The official tool must keep its own runtime. Host headers, integration
+    # sources and libraries come from the matched source-built SDK instead.
+    set_target_properties(rex::rexglue PROPERTIES
+        IMPORTED_LOCATION "${FABLE2_CODEGEN_TOOL}"
+        IMPORTED_LOCATION_DEBUG "${FABLE2_CODEGEN_TOOL}"
+        IMPORTED_LOCATION_RELWITHDEBINFO "${FABLE2_CODEGEN_TOOL}"
+        IMPORTED_LOCATION_RELEASE "${FABLE2_CODEGEN_TOOL}")
+    # A staged package still contains the official SDK's other configurations.
+    # Reject selecting those by accident via an old/manual CMake cache.
+    get_filename_component(FABLE2_PACKAGE_ROOT "${rexglue_DIR}/../../.." ABSOLUTE)
+    set(FABLE2_SDK_PROVENANCE "${FABLE2_PACKAGE_ROOT}/renderer-sdk-provenance.json")
+    if(WIN32 AND EXISTS "${FABLE2_SDK_PROVENANCE}")
+        file(READ "${FABLE2_SDK_PROVENANCE}" FABLE2_SDK_METADATA)
+        string(JSON FABLE2_STAGED_CONFIGURATION ERROR_VARIABLE FABLE2_METADATA_ERROR
+               GET "${FABLE2_SDK_METADATA}" configuration)
+        if(NOT FABLE2_METADATA_ERROR)
+            if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+                set(FABLE2_REQUIRED_CONFIGURATION "Debug")
+            else()
+                set(FABLE2_REQUIRED_CONFIGURATION "Release")
+            endif()
+            if(NOT FABLE2_STAGED_CONFIGURATION STREQUAL FABLE2_REQUIRED_CONFIGURATION)
+                message(FATAL_ERROR "Staged SDK is ${FABLE2_STAGED_CONFIGURATION}, but this host needs ${FABLE2_REQUIRED_CONFIGURATION}. Rerun build.cmd to select the matched SDK.")
+            endif()
+        endif()
+    endif()
 endif()
+
 
 # Sources
 # Strong-symbol override copies of recompiled guest functions (perf-optimized;
@@ -58,6 +90,7 @@ set(FABLE2_SOURCES
     src/core/fable2_config.cpp
     src/core/fable2_patches.cpp
     src/core/fable2_hooks.cpp
+    src/core/fable2_address_scan.cpp
     ${HOTFUNC_SOURCES}
 )
 
@@ -83,12 +116,21 @@ endif()
 # per-configuration variant: rexgpu-xenosd.dll for Debug, rexgpu-xenos.dll
 # for Release). Without it the game runs with no GPU emulation.
 rexglue_setup_target(fable_2 GPU_PLUGINS xenos)
+add_custom_command(TARGET fable_2 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_BINARY_DIR}/fable2_build.json"
+        "$<TARGET_FILE_DIR:fable_2>/fable2_build.json"
+    COMMENT "Staging supported game profiles for the launcher"
+    VERBATIM)
 
 # The app's probe/diagnostic headers (src/diagnostics/*.h) use the standard CRT
 # functions (fopen, getenv, strcat, strncat, ...), which the MSVC/UCRT headers
 # mark deprecated when compiled with clang (-Wdeprecated-declarations noise).
 # These are safe in this codebase; silence the deprecation on Windows.
 target_compile_definitions(fable_2 PRIVATE
+    FABLE2_BUILD_PROFILE="${FABLE2_BUILD_PROFILE}"
+    FABLE2_NATIVE_CONFIGURATION="$<CONFIG>"
+    FABLE2_NATIVE_SDK="$<IF:$<BOOL:${FABLE2_CODEGEN_TOOL}>,source-built,external>"
     $<$<PLATFORM_ID:Windows>:_CRT_SECURE_NO_WARNINGS>)
 
 # Remote control server (AI input channel) is a debug-only tool: it opens a
@@ -163,7 +205,10 @@ add_custom_command(TARGET fable_2 POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
           ${CMAKE_CURRENT_SOURCE_DIR}/tools/fable2-functrace.cmd
           $<TARGET_FILE_DIR:fable_2>/fable2-functrace.cmd
-  COMMENT "Staging README.md + fable2-functrace.cmd next to fable_2.exe"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_CURRENT_SOURCE_DIR}/tools/run_profiler.cmd
+          $<TARGET_FILE_DIR:fable_2>/run_profiler.cmd
+  COMMENT "Staging README.md + fable2-functrace.cmd + run_profiler.cmd next to fable_2.exe"
 )
 
 # --- F5 external-Lua runner (src/lua/) -----------------------------------
@@ -213,6 +258,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   )
 endif()
 
+# (The screenshot command reads the game's rendered frame directly from the
+# renderer's GPU guest output via Presenter::CaptureGuestOutput - see
+# src/diagnostics/fable2_frame_capture.h - so no external capture helper is
+# needed.)
+
 # --- Recomp user config (fable2_config.toml) -------------------------------
 # Header-only toml++ parser, vendored from the same version the ReXGlue SDK
 # uses (thirdparty/rexglue-sdk-src/thirdparty/tomlplusplus), so the app's
@@ -226,15 +276,6 @@ target_include_directories(fable_2 SYSTEM PRIVATE
 # in sync - see src/core/fable2_config.cpp).
 if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/fable2_config.toml")
     file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/config/fable2_config.toml
-         DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
-endif()
-
-# Same treatment for the guest-image patch table (fable2_patches.toml, parsed
-# by src/core/fable2_patches.cpp): user data, copy-if-not-exists so edits survive
-# rebuilds; the code also recreates it if it is ever deleted (keep that
-# embedded copy in sync - see src/core/fable2_patches.cpp).
-if(NOT EXISTS "${CMAKE_CURRENT_BINARY_DIR}/fable2_patches.toml")
-    file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/config/fable2_patches.toml
          DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
 endif()
 
@@ -269,10 +310,15 @@ endif()
 option(FABLE2_PROFILER_FRIENDLY
     "Keep frame pointers for clean stack unwinding in profilers (region helpers are noinline in source; the 384k CR-compare calls stay inlined)" OFF)
 if(FABLE2_PROFILER_FRIENDLY)
-    target_compile_options(fable_2 PRIVATE -fno-omit-frame-pointer)
-    if(TARGET fable_2_recomp)
-        target_compile_options(fable_2_recomp PRIVATE -fno-omit-frame-pointer)
-    endif()
+    # Keep frame pointers ONLY on the fable_2 target (which holds the noinline
+    # per-frame region helpers that the profiler attributes time to). The
+    # recompiled guest target (fable_2_recomp) must stay on plain -O3: applying
+    # -fno-omit-frame-pointer to it changes host codegen of the mechanical guest
+    # functions and corrupts guest state at startup (a stack-local object's
+    # vtable/data pointer is read back as null -> unhandled guest 0x0 read AV).
+    # This keeps the guest codegen identical to the real -O3 release build.
+    # DIAGNOSTIC: flag fully disabled to isolate it from NO_PE_CLEAN / -O3 -DNDEBUG.
+    # (temporarily no-op the frame-pointer addition)
 endif()
 
 # --- Stable-hash hardening: strip the absolute checkout path from __FILE__ --
@@ -297,7 +343,17 @@ endif()
 # no resource compiler is configured (e.g. a bare MSVC-only preset).
 if(WIN32 AND CMAKE_RC_COMPILER AND TARGET fable_2)
     target_sources(fable_2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools/repro/fable2_version.rc)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app_icon.rc"
+         "1 ICON \"${CMAKE_CURRENT_SOURCE_DIR}/assets/app-icon.ico\"\n")
+    target_sources(fable_2 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app_icon.rc")
 endif()
+add_custom_command(TARGET fable_2 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/app-icon.png"
+            "$<TARGET_FILE_DIR:fable_2>/app-icon.png"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/StartWithoutAudio.cmd"
+            "$<TARGET_FILE_DIR:fable_2>/StartWithoutAudio.cmd")
 
 # --- Vulkan renderer: Stage 2 (source-built plugin, swappable at launch) --
 # The prebuilt plugin above (GPU_PLUGINS xenos) is D3D12-only. The Vulkan
@@ -323,6 +379,9 @@ if(NOT DEFINED REXGLUE_SDK_SOURCE)
 endif()
 set(FABLE2_SDK_SRC "${REXGLUE_SDK_SOURCE}")
 set(FABLE2_SDK_ROOT "${REXGLUE_SDK_ROOT}")
+# Never replace a matched SDK with DLLs left over from an older Vulkan build.
+# (The candidate-existence checks below guard every copy, so the staging is
+# safe regardless of whether the official standalone codegen tool is used.)
 if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     # The SDK stages its outputs under its own out/win-amd64/Release/ tree
     # (REXGLUE_ROOT based). We need both the source plugin AND the source
@@ -331,6 +390,17 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     # path must run against the source runtime.
     file(GLOB FABLE2_VULKAN_PLUGIN_CANDIDATES "${FABLE2_SDK_SRC}/out/win-amd64/Release/rexgpu-xenos.dll")
     file(GLOB FABLE2_VULKAN_RUNTIME_CANDIDATES "${FABLE2_SDK_SRC}/out/win-amd64/Release/rexruntime.dll")
+    # Vulkan loader (vulkan-1.dll), resolved at configure time: prefer a
+    # locally staged copy (out/tooling/vulkan-loader, e.g. the official loader
+    # zip), else the driver-installed System32 copy. Staged next to the exe so
+    # the release folder's plugin LoadLibrary("vulkan-1.dll") resolves in place
+    # even on a machine whose driver loader lives only in System32.
+    file(GLOB FABLE2_VULKAN_LOADER_CANDIDATES
+         "${CMAKE_CURRENT_SOURCE_DIR}/out/tooling/vulkan-loader/vulkan-1.dll"
+         "$ENV{SystemRoot}/System32/vulkan-1.dll")
+    if(FABLE2_VULKAN_LOADER_CANDIDATES)
+        list(GET FABLE2_VULKAN_LOADER_CANDIDATES 0 FABLE2_VULKAN_LOADER)
+    endif()
     if(FABLE2_VULKAN_PLUGIN_CANDIDATES AND FABLE2_VULKAN_RUNTIME_CANDIDATES)
         list(GET FABLE2_VULKAN_PLUGIN_CANDIDATES 0 FABLE2_VULKAN_PLUGIN)
         list(GET FABLE2_VULKAN_RUNTIME_CANDIDATES 0 FABLE2_VULKAN_RUNTIME)
@@ -342,6 +412,7 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
         #   rexgpu-xenos-prebuilt.dll- prebuilt 0.10.0 D3D12 plugin (pristine
         #                              backup for `fable2.cmd prebuilt`)
         #   fable2.cmd               - launcher that picks the runtime + backend
+        #   vulkan-1.dll             - Vulkan loader (in-place LoadLibrary)
         # The default rexruntime.dll (staged above by GPU_PLUGINS xenos) is the
         # prebuilt one, so a plain `fable_2.exe` launch stays D3D12 (0.10.0)
         # until fable2.cmd restages a source pair.
@@ -352,9 +423,13 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_SDK_ROOT}/bin/rexgpu-xenos.dll" "$<TARGET_FILE_DIR:fable_2>/rexgpu-xenos-prebuilt.dll"
           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/tools/fable2.cmd" "$<TARGET_FILE_DIR:fable_2>/fable2.cmd"
           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/tools/fable2-uncapped.cmd" "$<TARGET_FILE_DIR:fable_2>/fable2-uncapped.cmd"
-          COMMENT "Staging Vulkan plugin/runtime + D3D12 backups + launcher")
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_VULKAN_LOADER}" "$<TARGET_FILE_DIR:fable_2>/vulkan-1.dll"
+          COMMENT "Staging Vulkan plugin/runtime + D3D12 backups + loader + launcher")
     else()
         message(STATUS "Vulkan SDK not fully built (need rexgpu-xenos.dll + rexruntime.dll under ${FABLE2_SDK_SRC}/out/win-amd64/Release) - run tools/build_sdk_vulkan.cmd to enable 'fable2.cmd vulkan'")
+    endif()
+    if(NOT FABLE2_VULKAN_LOADER_CANDIDATES)
+        message(STATUS "vulkan-1.dll not found (checked out/tooling/vulkan-loader + System32) - 'fable2.cmd vulkan' will rely on the driver-installed loader")
     endif()
 
     # Prefer the source-built runtime/plugin pair over the prebuilt 0.10.0
@@ -367,6 +442,29 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_VULKAN_RUNTIME}" "$<TARGET_FILE_DIR:fable_2>/rexruntime.dll"
           COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_VULKAN_PLUGIN}" "$<TARGET_FILE_DIR:fable_2>/rexgpu-xenos.dll"
           COMMENT "Staging source-built runtime/plugin (overrides prebuilt 0.10.0)")
+    endif()
+
+    # Final override (Release only): stage the fresh source-built pair that
+    # tools/build_runtime_sdk.cmd just staged (build.cmd refreshes this on
+    # every run). Placed AFTER the Vulkan source-pair block above so the most
+    # recent build always wins - the Vulkan block reads the SDK's
+    # out/win-amd64/Release/ tree, which goes stale whenever a D3D12-only SDK
+    # rebuild happens (the two share the SDK output tree, last build wins).
+    set(FABLE2_TOOLING_RUNTIME_DIR "${CMAKE_CURRENT_SOURCE_DIR}/out/tooling/runtime-sdk/win-amd64/bin")
+    if(EXISTS "${FABLE2_TOOLING_RUNTIME_DIR}/rexruntime.dll" AND EXISTS "${FABLE2_TOOLING_RUNTIME_DIR}/rexgpu-xenos.dll")
+        add_custom_command(TARGET fable_2 POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_TOOLING_RUNTIME_DIR}/rexruntime.dll" "$<TARGET_FILE_DIR:fable_2>/rexruntime.dll"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_TOOLING_RUNTIME_DIR}/rexgpu-xenos.dll" "$<TARGET_FILE_DIR:fable_2>/rexgpu-xenos.dll"
+          COMMENT "Staging fresh source-built runtime/plugin (out/tooling/runtime-sdk)")
+    endif()
+    # Always stage the ReXGlue runtime/plugin PDBs next to the exe (the
+    # runtime is built Release + -g, so these carry full symbols) so the
+    # debugger/profiler symbolizes ReXGlue code with no manual PDB setup.
+    if(EXISTS "${FABLE2_TOOLING_RUNTIME_DIR}/rexruntime.pdb" AND EXISTS "${FABLE2_TOOLING_RUNTIME_DIR}/rexgpu-xenos.pdb")
+        add_custom_command(TARGET fable_2 POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_TOOLING_RUNTIME_DIR}/rexruntime.pdb" "$<TARGET_FILE_DIR:fable_2>/rexruntime.pdb"
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different "${FABLE2_TOOLING_RUNTIME_DIR}/rexgpu-xenos.pdb" "$<TARGET_FILE_DIR:fable_2>/rexgpu-xenos.pdb"
+          COMMENT "Staging ReXGlue runtime/plugin PDBs (debug symbols)")
     endif()
 endif()
 

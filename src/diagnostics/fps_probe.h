@@ -24,7 +24,7 @@ namespace fable2::fpsprobe {
 // Always-original entry points (strong symbols in the generated code).
 extern "C" void __imp__MainRenderLoop_82B9CD68(PPCContext& ctx, uint8_t* base);  // main loop (calls VdSwap); renamed from sub_82B9CD68
 extern "C" void __imp__DelayMilliseconds_82CC2028(PPCContext& ctx, uint8_t* base);  // KeDelayExecutionThread wrapper
-extern "C" void __imp__YieldAndCheckThreshold_82CBD098(PPCContext& ctx, uint8_t* base);  // NtYieldExecution wrapper
+extern "C" void __imp__Yield_82CBD098(PPCContext& ctx, uint8_t* base);  // NtYieldExecution wrapper
 extern "C" void __imp__sub_83004C20(PPCContext& ctx, uint8_t* base);  // NtSetTimerEx wrapper
 extern "C" void __imp__sub_83004C90(PPCContext& ctx, uint8_t* base);  // NtCreateTimer wrapper
 extern "C" void __imp__ProcessAndProcessAndProcess1260_82BA32C8(PPCContext& ctx, uint8_t* base);  // per-frame helper (calls the frame-wait)
@@ -170,9 +170,9 @@ extern "C" void DelayMilliseconds_82CC2028(PPCContext& ctx, uint8_t* base) {
   fable2::fpsprobe::note(fable2::fpsprobe::probe_ke_delay, ctx);
   __imp__DelayMilliseconds_82CC2028(ctx, base);
 }
-extern "C" void YieldAndCheckThreshold_82CBD098(PPCContext& ctx, uint8_t* base) {
+extern "C" void Yield_82CBD098(PPCContext& ctx, uint8_t* base) {
   fable2::fpsprobe::note(fable2::fpsprobe::probe_yield, ctx);
-  __imp__YieldAndCheckThreshold_82CBD098(ctx, base);
+  __imp__Yield_82CBD098(ctx, base);
 }
 extern "C" void sub_83004C20(PPCContext& ctx, uint8_t* base) {
   fable2::fpsprobe::note(fable2::fpsprobe::probe_nt_set_timer, ctx);

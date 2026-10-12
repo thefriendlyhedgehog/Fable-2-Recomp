@@ -26,7 +26,11 @@
 #include <windows.h>
 #endif
 
+#include <toml++/toml.hpp>
+
 #include "alloc_watch.h"
+#include "dir_manifest_heal.h"
+#include "fable2_address_scan.h"
 #include "guest_memory.h"
 #include "fable2_config.h"
 #include "fable2_patches.h"
@@ -51,6 +55,25 @@ void record_a_press(std::int64_t ms);
 }
 #endif  // FABLE2_REMOTE_CONTROL
 #include "xex_verify.h"
+#include "game_branding.h"
+
+namespace {
+// The `screenshot` command reads the game's rendered frame from the renderer's
+// presenter, but rex::ui::Window keeps presenter() protected. Window is a
+// non-final polymorphic base with Window as its only/first base, and
+// presenter() is a non-virtual inline that merely returns the presenter_
+// pointer - so the standard derived-class accessor idiom (reinterpret to a
+// first-base-derived type) safely reads the member without touching any
+// vtable. This keeps the fix self-contained in the app (no SDK edits).
+class WindowPresenterAccessor final : public rex::ui::Window {
+ public:
+  rex::ui::Presenter* PresenterPtr() const { return presenter(); }
+};
+rex::ui::Presenter* GetWindowPresenter(rex::ui::Window* w) {
+  return w ? reinterpret_cast<const WindowPresenterAccessor*>(w)->PresenterPtr()
+           : nullptr;
+}
+}  // namespace
 
 class Fable2App : public rex::ReXApp {
  public:
@@ -97,8 +120,9 @@ class Fable2App : public rex::ReXApp {
     // LoadGpuPlugin("xenos") -> the prebuilt D3D12 plugin.
 
     // Build on top of the default input system (SDL gamepad + NOP) and add a
-    // synthetic "keyboard gamepad" driver so host keys can drive the guest.
-    // The mapping is the `keyboard_gamepad_map` cvar (default "E:A"). See
+    // synthetic "keyboard gamepad" driver so host keys/mouse buttons can drive
+    // the guest. The mapping is the `keyboard_gamepad_map` cvar (default from
+    // fable2_config.toml [input], see fable2_config.h). See
     // src/input/keyboard_gamepad.h.
     config.input_factory = [this](bool tool_mode) ->
         std::unique_ptr<rex::system::IInputSystem> {
@@ -117,6 +141,7 @@ class Fable2App : public rex::ReXApp {
   }
 
   void OnPostSetup() override {
+    fable2::branding::Apply(window());
     // Hero/dog black-texture fix (see plans/hero-dog-texture-readback.md).
     // Approach + guest base 0x12704000 credit just-harry's Unofficial Xenia
     // femtofork for Fable II. readback_resolve_force_addresses is defined in the
@@ -140,6 +165,19 @@ class Fable2App : public rex::ReXApp {
                       "rejected '{}'; hero/dog readback fix may be inactive",
                       std::string{force_addr});
         }
+      }
+    }
+    // Dog fur Z-fighting fix (docs/RUNTIME_FIXES.md): the shell-fur pixel shader
+    // relies on exact 24-bit depth ties; a small host depth bias restores them.
+    // depth_bias_shader is a GPU-plugin cvar, so it is seeded here too.
+    if (fable2::config::Get().dog_fur_depth_bias &&
+        rex::cvar::GetFlagSource("depth_bias_shader") == rex::cvar::Source::kDefault) {
+      if (rex::cvar::SetFlagByName("depth_bias_shader", "014F8A02DB7B19CA") &&
+          rex::cvar::SetFlagByName("depth_bias_shader_units", "16")) {
+        REXSYS_INFO("[fable2-config] seeded dog fur depth bias (dog_fur_depth_bias=true)");
+      } else {
+        REXSYS_WARN("[fable2-config] dog fur depth bias cvars missing "
+                    "(SDK without depth_bias_shader?)");
       }
     }
 
@@ -194,7 +232,12 @@ class Fable2App : public rex::ReXApp {
     //   (B) never valid (consumer first) -> only "null" ever, no "FIRST VALID"
     std::thread([]() {
       using namespace fable2::allocwatch;
-      const uintptr_t base = fable2::guestmem::GuestBase();
+      // The arena base is 0 until the runtime's memory is up; wait for it
+      // rather than sample a guessed address.
+      uintptr_t base = 0;
+      while ((base = fable2::guestmem::GuestBase()) == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      }
       auto t0 = std::chrono::steady_clock::now();
       auto ms = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
       // The guest arena is commit-on-fault; a page may be uncommitted when we
@@ -278,28 +321,45 @@ class Fable2App : public rex::ReXApp {
   // Plain settings are read via fable2::config::Get(); settings that back a
   // cvar are seeded into it below so the console/overlay keep working.
   void OnPostInitLogging() override {
+    // This describes the linked build, not a guarantee about DLLs replaced later.
+    REXSYS_INFO("[native-build] configuration={} linked_sdk={}",
+                FABLE2_NATIVE_CONFIGURATION, FABLE2_NATIVE_SDK);
 #ifdef __APPLE__
-    // macOS defaults, set before Vulkan and the GPU plugin load. overwrite=0
-    // keeps anything the user exported, and a command-line flag still wins
-    // over these (the SDK applies REX_* env vars below the command line).
-    // - FSI render targets: the default host-RT path stores the game's D24S8
-    //   depth as D32_SFLOAT_S8 (Apple GPUs have no D24S8), which renders as a
-    //   white/flashing screen. FSI emulates EDRAM exactly in the pixel shader;
-    //   MoltenVK exposes fragment shader interlock on Apple Silicon.
-    // - MoltenVK log level 1 (errors): it otherwise warns "Metal does not
-    //   support disabling primitive restart" on every strip draw, thousands
-    //   of lines per second on stderr and in logs/.
-    ::setenv("REX_RENDER_TARGET_PATH_VULKAN", "fsi", 0);
+    // macOS defaults for two GPU-plugin cvars, set before Vulkan and the
+    // plugin load. They go through REX_* environment variables because the
+    // plugin registers its cvars only later; but for such late-registered
+    // cvars the SDK applies fable_2.toml first and the environment after it
+    // (kEnvironment outranks kConfig), so an exported default would silently
+    // override fable_2.toml. Only export one when fable_2.toml does not set
+    // that cvar; setenv(..., 0) keeps anything the user exported, and the
+    // command line still wins over both.
+    // - render_target_path_vulkan = fsi: the default host-RT path stores the
+    //   game's D24S8 depth as D32_SFLOAT_S8 (Apple GPUs have no D24S8), which
+    //   rendered as a white/flashing screen. FSI emulates EDRAM exactly in the
+    //   pixel shader; MoltenVK exposes fragment shader interlock on Apple
+    //   Silicon.
+    // - vulkan_dynamic_rendering = false: the FSI path draws into
+    //   attachment-less render passes at the guest MSAA sample count. Metal
+    //   needs that count set explicitly, and MoltenVK only learns it from
+    //   pipelines created against a VkRenderPass object (MVKPipeline.mm,
+    //   setDefaultSampleCount); with dynamic rendering there is none, so every
+    //   4x draw rasterizes at 1x and MSAA render targets come out as garbage.
+    //   The SDK patch adds one FSI render pass per sample count.
+    const auto default_env = [this](const char* env, std::string_view cvar,
+                                    const char* value) {
+      if (ConfigFileSetsCvar(sdk_config_path_, cvar)) {
+        REXSYS_INFO("[fable2-config] macOS default {} = {} not applied: set in {}", cvar,
+                    value, sdk_config_path_.string());
+        return;
+      }
+      ::setenv(env, value, 0);
+    };
+    default_env("REX_RENDER_TARGET_PATH_VULKAN", "render_target_path_vulkan", "fsi");
+    default_env("REX_VULKAN_DYNAMIC_RENDERING", "vulkan_dynamic_rendering", "false");
+    // MoltenVK's own setting (not a cvar): log level 1 (errors). It otherwise
+    // warns "Metal does not support disabling primitive restart" on every strip
+    // draw, thousands of lines per second on stderr and in logs/.
     ::setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
-    // - No dynamic rendering: the FSI path draws into attachment-less render
-    //   passes at the guest MSAA sample count. Metal needs that count set
-    //   explicitly, and MoltenVK only learns it from pipelines created against
-    //   a VkRenderPass object (MVKPipeline.mm, setDefaultSampleCount); with
-    //   dynamic rendering there is none, so every 4x draw rasterizes at 1x
-    //   ("raster sample count (1) does not match ... (4)" from the Metal
-    //   debug layer, 67k times in a minute) and MSAA render targets come out
-    //   as garbage. The SDK patch adds one FSI render pass per sample count.
-    ::setenv("REX_VULKAN_DYNAMIC_RENDERING", "false", 0);
 #endif
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();
@@ -324,6 +384,14 @@ class Fable2App : public rex::ReXApp {
                   cvar);
     };
     const fable2::config::Values& cfg = fable2::config::Get();
+    // XLanguage profile default; config, environment and CLI still win.
+    std::string profile_hash;
+    if (fable2::xexverify::Sha256File(game_data_root() / "default.xex", profile_hash) &&
+        fable2::xexverify::IsAcceptedHash(profile_hash)) {
+      const auto* version = fable2::versions::Find(profile_hash);
+      seed_cvar("user_language", std::to_string(version->language));
+      REXSYS_INFO("[build-profile] detected {}", version->name);
+    }
     seed_cvar("keyboard_gamepad_map", cfg.keyboard_gamepad_map);
     seed_cvar("mouse_look", cfg.mouse_look ? "true" : "false");
     seed_cvar("mouse_look_scale", std::to_string(cfg.mouse_look_scale));
@@ -360,6 +428,13 @@ class Fable2App : public rex::ReXApp {
           "input disabled (see logs/)");
     }
 
+    // The `screenshot` command reads the game's rendered frame from the
+    // renderer's presenter (CaptureGuestOutput). Query it at command time, not
+    // at startup: this hook runs before SetupPresentation, so the window and
+    // its presenter may not exist yet when the server starts.
+    remote_server_.SetPresenterProvider(
+        [this]() -> rex::ui::Presenter* { return GetWindowPresenter(window()); });
+
     // Observe remote A-presses (the state machine's input transition). The
     // press is brief, so latch its timestamp here (on the server thread) and
     // compare against it in the 1-second classifier sample.
@@ -384,14 +459,13 @@ class Fable2App : public rex::ReXApp {
 #endif  // FABLE2_REMOTE_CONTROL
   // Apply the game patches (see src/core/fable2_patches.h) once the SDK has
   // decrypted default.xex into the guest arena, before the module launches.
-  // The patch table is data-driven: fable2_patches.toml next to the exe
-  // (created with built-in defaults on first launch; a broken file falls
-  // back to the built-ins, so a hand edit can never wedge the launch).
+  // Each patch is switched on by a [patches] key in fable2_config.toml
+  // (loaded earlier, in OnPostInitLogging).
   void OnPostLoadXexImage() override {
-    const std::filesystem::path exe_dir =
-        rex::filesystem::GetExecutableFolder();
-    fable2::patches::Load(exe_dir / "fable2_patches.toml");
     fable2::patches::ApplyAll(runtime()->memory(), PPCImageConfig);
+    // Lets the address-scan hook (src/core/fable2_address_scan.cpp) read the
+    // guest page tables.
+    fable2::addressscan::SetMemory(runtime()->memory());
   }
 
   // Startup integrity check: this build was recompiled against a specific
@@ -400,6 +474,13 @@ class Fable2App : public rex::ReXApp {
   // cache/default.xex.sha256 marker; a mismatch aborts with a dialog that
   // shows how to check the hash yourself.
   void OnLoadXexImage(std::string& xex_image) override {
+    // Self-heal the guest VFS index before the title runs: the game indexes
+    // all of data/ from data/dir.manifest, and a missing entry means the
+    // guest sees null (crashes at startup). Content migrated with an
+    // mtime-respecting copy can leave a stale/truncated manifest in place;
+    // this appends any file that is on disk but unlisted. Idempotent.
+    fable2::manifestheal::EnsureComplete(game_data_root());
+
     // Resolve the host path the same way the SDK does (game:\ / d:\ ->
     // game_data_root). The SDK's path may use either slash direction
     // (e.g. "game:\\default.xex" or "game:/default.xex"), so strip the
@@ -416,8 +497,16 @@ class Fable2App : public rex::ReXApp {
     if (cache.empty()) cache = game_data_root() / "cache";
     const std::filesystem::path marker = cache / "default.xex.sha256";
 
+    // --skipHash (cvar, see main.cpp): compute and log the default.xex hash,
+    // but do not let a mismatch (or an unreadable file) block the launch.
+    const bool skip_hash = rex::cvar::GetFlagByName("skipHash") == "true";
+    if (skip_hash) {
+      REXSYS_INFO("[xex-verify] --skipHash is set: the default.xex hash will be "
+                  "logged but NOT enforced (a mismatch will not block the launch)");
+    }
+
     REXSYS_INFO("[xex-verify] {}", xex.string());
-    REXSYS_INFO("[xex-verify] expected SHA-256: {}", fable2::xexverify::kExpectedSha256);
+    REXSYS_INFO("[xex-verify] accepted SHA-256: {}", fable2::xexverify::kExpectedHashes);
     const auto r = fable2::xexverify::Check(xex, marker);
     switch (r.result) {
       case fable2::xexverify::Result::VerifiedCached:
@@ -431,23 +520,28 @@ class Fable2App : public rex::ReXApp {
                     r.actual_hash, marker.string());
         break;
       case fable2::xexverify::Result::Mismatch: {
+        if (skip_hash) {
+          REXSYS_INFO("[xex-verify] actual SHA-256: {} (MISMATCH vs expected {}; "
+                      "not enforced because --skipHash is set)",
+                      r.actual_hash, fable2::xexverify::kExpectedHashes);
+          break;
+        }
         REXSYS_ERROR("[xex-verify] actual SHA-256: {}", r.actual_hash);
         REXSYS_ERROR("[xex-verify] expected SHA-256: {} (MISMATCH)",
-                     fable2::xexverify::kExpectedSha256);
+                     fable2::xexverify::kExpectedHashes);
         const std::string msg = std::format(
             "default.xex hash mismatch\n\n"
-            "This build was recompiled against a specific default.xex, but\n"
-            "the file found here has a different SHA-256 hash, so the game\n"
-            "may not run correctly.\n\n"
+            "This build only supports verified original GOTY executables.\n"
+            "The XEX in the selected game folder is not supported.\n\n"
             "File:     {}\n"
             "Actual:   {}\n"
             "Expected: {}\n\n"
             "You can check the hash yourself in a Windows terminal:\n"
             "  certutil -hashfile \"{}\" SHA256\n"
             "(PowerShell: Get-FileHash \"{}\" -Algorithm SHA256)\n\n"
-            "If you have the correct default.xex, replace the one above and\n"
-            "start the game again.",
-            xex.string(), r.actual_hash, fable2::xexverify::kExpectedSha256,
+            "Select a complete matching GOTY dump and start again.\n"
+            "Do not mix an XEX from another version with these game files.",
+            xex.string(), r.actual_hash, fable2::xexverify::kExpectedHashes,
             xex.string(), xex.string());
         REXSYS_ERROR("[xex-verify] {}", msg);
         rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
@@ -455,9 +549,26 @@ class Fable2App : public rex::ReXApp {
       }
       case fable2::xexverify::Result::ReadFailed:
       default:
-        REXSYS_WARN("[xex-verify] could not hash {} (read error); "
-                   "skipping the integrity check", xex.string());
+        if (skip_hash) {
+          REXSYS_WARN("[xex-verify] could not hash {} (not enforced because "
+                      "--skipHash is set)",
+                      xex.string());
+          break;
+        }
+        REXSYS_ERROR("[xex-verify] could not hash {}; refusing to load unverified content", xex.string());
+        rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error,
+            "default.xex could not be read. Check the selected game folder and file permissions.");
+        std::exit(1);
         break;
+    }
+    const auto root = game_data_root();
+    // The content-compatibility gate depends on the XEX hash identifying a
+    // known version, so it is also bypassed by --skipHash.
+    if (!skip_hash && !fable2::xexverify::HasCompatibleContent(root, r.actual_hash)) {
+      REXSYS_ERROR("[build-profile] incomplete or mixed GOTY content: {}", root.string());
+      rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error,
+          "Incomplete or mixed GOTY content. Select an original matching GOTY dump; do not replace its XEX with another version.");
+      std::exit(1);
     }
   }
 
@@ -475,6 +586,7 @@ class Fable2App : public rex::ReXApp {
   void OnConfigurePaths(rex::PathConfig& paths) override {
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();
+    sdk_config_path_ = paths.config_path;
 
     if (paths.game_data_root.empty()) {
       if (std::filesystem::is_regular_file(exe_dir / "default.xex")) {
@@ -558,4 +670,40 @@ class Fable2App : public rex::ReXApp {
   // CreateAchievementNotificationDialog() override;
   // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
+
+ private:
+  // Whether the SDK config file sets cvar `name`, using the same key
+  // flattening as rex::cvar::LoadConfig (a key inside [table] is
+  // "table_key"). A missing or unparsable file sets nothing.
+  static bool ConfigFileSetsCvar(const std::filesystem::path& path, std::string_view name) {
+    std::error_code ec;
+    if (path.empty() || !std::filesystem::is_regular_file(path, ec)) {
+      return false;
+    }
+    toml::table root;
+    try {
+      root = toml::parse_file(path.string());
+    } catch (const toml::parse_error&) {
+      return false;
+    }
+    const auto visit = [&](const auto& self, const toml::table& table,
+                           const std::string& prefix) -> bool {
+      for (const auto& [key, value] : table) {
+        std::string full_key =
+            prefix.empty() ? std::string(key.str()) : prefix + "_" + std::string(key.str());
+        if (const toml::table* sub = value.as_table()) {
+          if (self(self, *sub, full_key)) {
+            return true;
+          }
+        } else if (full_key == name) {
+          return true;
+        }
+      }
+      return false;
+    };
+    return visit(visit, root, std::string());
+  }
+
+  // The SDK config file (fable_2.toml), captured in OnConfigurePaths.
+  std::filesystem::path sdk_config_path_;
 };

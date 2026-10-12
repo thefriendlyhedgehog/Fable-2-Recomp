@@ -100,6 +100,72 @@ gives false safety here.
 - **Emulator/xmemory bug:** guest 0 is uncommitted by design; the fault is a
   real guest load.
 
+## Debug log: why F5 "did nothing" after the first fix (2026-09-26, resolved)
+
+Two separate bugs were found while verifying:
+
+1. **Lua 5.1 pcall/yield** — `pcall(open_menu)` converted the poll-loop's
+   `coroutine.yield()` into an "attempt to yield across metamethod/C-call
+   boundary" error (verified with a locally built Lua 5.1.4 interpreter).
+   Fix: `open_menu` is called directly (yields escape into the coroutine);
+   each non-yielding API call inside it is pcall'd individually.
+
+2. **Wrong method captured (the real "nothing happens")** — the shared
+   Lua→C++ dispatcher (`LuaBind_RunScript_82806168`) serves many bound
+   methods whose string argument is a `.lua` path, not just RunScript. The
+   "refresh on every dispatch (latest wins)" rule overwrote `g_method` with
+   register-style methods (e.g. `0x825B27D0` from 'CameraFunctions.lua',
+   `0x825B26A8` from 'AIHistory.lua'), so F5 called the wrong member fn with
+   the path → no visible effect. The log showed all of it:
+   `this=0x4215F9F0 head=0x4F640220` stable, method varying per dispatch.
+   Fix: first `.lua` dispatch pins the canonical file-runner method (boot:
+   `0x825ADB40` via 'miscellaneous/GeneralScriptManager.lua'); later captures
+   refresh `this` only when the method matches; other methods are ignored.
+   The stale-`this` protection (head plausibility + expected-head match) is
+   kept as-is.
+
+Verification tooling kept in `scratch/`: locally built Lua 5.1.4
+(`scratch/lua-5.1.4/src/lua51.exe`, `luac.exe`) + `scratch/f5_sim.lua`, a
+frame-stepping harness that runs the real F5.lua against stubbed
+GUI/MessageEvents/GeneralScriptManager APIs. It confirmed F5.lua v2 is
+logically correct: menu opens, selection runs the script, F5 during an open
+message box is dropped, re-open after dismissal works, coroutine survives.
+
+## Implementation status (2026-09-26)
+
+Phase 1.1–1.4 + Phase 0.4 implemented:
+
+- `src/core/fable2_f5_lua.h`
+  - Capture: first `.lua` dispatch pins the canonical file-runner
+    `(method, this)`; same-method dispatches refresh `this`; other methods
+    with .lua args are ignored; logs `(re)captured this=.. method=.. head=..`.
+  - Pre-call validation in `run_external()`: `this` readable; `head = *(this)`
+    non-zero, non-0xFFFFFFFF, plausible (RAM readable or guest code);
+    `head == g_expected_head` (the word captured with the instance — catches
+    freed/reused blocks whose new first word is still "plausible"). Any
+    failure logs and skips the run; the next `.lua` dispatch refreshes.
+  - `run #%u state='<stateprobe name>'` logged (flushed) before each RunScript
+    call; `step1` line now includes `head=`.
+  - Forward-declares `fable2::stateprobe::CurrentStateName()` (defined later
+    in main.cpp's include chain).
+- `src/lua/F5.lua`
+  - `st.menu_open` + fixed cooldown → `st.busy` + modal-dismissal tracking:
+    a modal is "clear" once `GetMostRecentMessageID()` advances past the
+    anchor (box dismissal posts a message) AND ≥10 frames elapsed, hard cap
+    300 frames. F5 presses are dropped while `st.busy`. Re-anchors after the
+    menu result AND after the chosen script runs, so a `DisplayMessageBox`
+    left open by the script keeps F5 inert until it's dismissed.
+- `src/lua/getPlayerPos.lua`
+  - Best-effort live-hero guards (pcall-wrapped lookups, userdata type check,
+    optional `IsValid()` probe, userdata check on the position result). Note:
+    pcall cannot stop a C++ null-entity deref inside the binding; the guards
+    only avoid calling it with an obviously-dead reference.
+
+Phase 0 (crash-log capture) + Phase 2 (repro matrix) remain: run the game
+with the console visible, trigger the AV, and read the `lr=` from the
+`LogUnhostedException` block right after the error line to confirm which
+subsystem faulted.
+
 ## Plan
 
 ### Phase 0 — capture ground truth (one repro)
@@ -122,34 +188,13 @@ gives false safety here.
    F5 counter into `fable2_f5_lua.log` just before calling RunScript. The log
    is flushed per line, so the last line before the crash is always recorded.
 
-### Phase 1 — harden the F5 path (do all; each kills a failure mode)
+### Phase 1 — harden the F5 path (DONE — see implementation status above)
 
-1. **Stop pinning once** (`src/core/fable2_f5_lua.h`):
-   - Update `g_this`/`g_method` on *every* `.lua` dispatch (latest capture
-     wins) instead of `g_captured_once` locking the first one.
-   - Keep the "have we ever captured" flag only to enable F5.
-2. **Validate before calling**: in `run_external()`, before
-   `REX_CALL_INDIRECT_FUNC(method)`:
-   - `this` readable for 16 bytes (`ta::rdable2`),
-   - `*(this+0)` (manager head/vtable) non-zero and a plausible guest pointer,
-   - `method` still resolves (`ResolveIndirectFunction` — already checked).
-   On failure: log and skip (next `.lua` dispatch will refresh the capture).
-3. **Close the modal-overlap hole in `src/lua/F5.lua`**:
-   - Track *all* modals, not just the menu box: after opening any box,
-     poll `MessageEvents` until the MENUBOX **and** any MESSAGEBOX it spawned
-     are fully closed (message posted *and* a few extra frames), before
-     clearing `st.menu_open` / allowing `st.show`.
-   - Drop F5 presses while any modal is open or mid-teardown (extend the
-     existing `st.menu_open` gate to a `st.busy` that also covers the
-     `DisplayMessageBox` window).
-   - Keep the 30-frame cooldown as a floor, but make re-open conditional on
-     "no live modal", not just on frame count.
-4. **Defang `src/lua/getPlayerPos.lua`**: treat a NULL/dying hero as a no-op
-   (require the `Debug.GetHero()`/`QuestManager.HeroEntity` reference to be
-   usable *and* the `tostring(pos)` parse to succeed before touching any other
-   binding), and optionally gate F5 menu execution on the state probe
-   reporting gameplay (so the script never runs from the front-end/cutscene
-   where entity refs are invalid).
+1. Stop pinning once — refresh `g_this`/`g_method` on every `.lua` dispatch.
+2. Validate `this` + `head` (incl. expected-head match) before calling.
+3. `F5.lua`: `st.busy` + message-ID modal-dismissal tracking replaces the
+   fixed cooldown gate.
+4. `getPlayerPos.lua`: best-effort live-hero guards.
 
 ### Phase 2 — verify
 

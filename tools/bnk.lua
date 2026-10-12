@@ -4,9 +4,9 @@
 Format (big-endian), discovered from the file layout + the modding
 community's CompileCompressReplace.py:
 
-  [0x00:0x04]  baseOffset      (0x00800000; file data region starts here)
+  [0x00:0x04]  baseOffset      (0x00008000; file data region starts here)
   [0x04:0x08]  00 00 00 03     (version / tag)
-  [0x08]       01              (flag)
+  [0x08]       01              (flag; 00 in levels/streaming/art banks)
   [0x09:0x0D]  tocZSize        (compressed TOC length, zlib, NO adler32 tail)
   [0x0D:0x11]  tocSize         (uncompressed TOC length)
   [0x11 .. ]   zlib(TOC)       (stream may lack the trailing adler32)
@@ -16,17 +16,27 @@ TOC (after decompression):
   per entry:
     [0:4]      nameLen          (includes the trailing NUL)
     [..]       name (NUL-terminated, backslash paths)
-    [4]        fileOffset       (relative to baseOffset)
-    [8]        uncompressedSize
-    [12]       compressedSize
-    [16]       flag             (0)
-    [17:19]    pad              (0 0)
-    [19]       f2               (1 or 2)
-    [20:24]    tail1            (== uncompressedSize when f2==1)
-    [24:28]    tail2            (present only when f2==2; tail1+tail2==uncomp)
+    Then, relative to the end of the name:
+    [+0]       fileOffset       (relative to baseOffset)
+    [+4]       uncompressedSize (sum of all chunk tails)
+    [+8]       compressedSize   (total across all chunks)
+    [+12]      flag             (0)
+    [+13:15]   pad              (0 0)
+    [+15]      chunkCount       (f2: number of 32KB compressed chunks)
+    [+16..]    tail per chunk   (uncompressed size of each chunk;
+                                 chunkCount x 4 bytes)
 
-File payloads are zlib-compressed (standard, WITH adler32 is fine on
-write). Compressed payloads are placed at baseOffset + fileOffset.
+  Per-entry stride after the name = 16 + 4*chunkCount.
+
+File payloads: the compressedSize bytes at baseOffset + fileOffset are
+split into chunks of <= 0x8000 (32768) compressed bytes each. Each chunk
+is an independent zlib stream that decompresses to that chunk's tail
+size. Concatenating the chunk outputs gives the full file. Small files
+(f2==1) are a single zlib stream, which is why naive single-stream
+extractors work for most entries.
+
+NOTE: levels/streaming/skeletalmorphs banks use a different (compact)
+TOC meta and do not contain Lua; only the script banks are parsed here.
 
 Usage:
   bnk.lua list <bnk>
@@ -34,16 +44,21 @@ Usage:
   bnk.lua replace <bnk> <name-substr> <payload-file>
       - payload is written COMPRESSED at the entry's existing offset; it
         MUST be <= the entry's current compressed size (padding zeros).
+      - for multi-chunk entries the new payload is written as one stream
+        in chunk 0 and the remaining chunks are filled with empty
+        placeholder streams; the tail sizes are updated accordingly.
 """
 import struct
 import sys
 import zlib
 
+CHUNK = 0x8000  # max compressed bytes per chunk
+
 
 def _decompress_lenient(raw: bytes) -> bytes:
     """zlib that tolerates a missing trailing adler32."""
     d = zlib.decompressobj()
-    return d.decompress(raw)
+    return d.decompress(raw) + d.flush()
 
 
 def read(bnk: bytes):
@@ -59,24 +74,32 @@ def read(bnk: bytes):
         name = toc[off + 4:off + 4 + nlen].split(b"\x00")[0].decode()
         meta = off + 4 + nlen
         o, u, c = struct.unpack(">III", toc[meta:meta + 12])
-        f2 = toc[meta + 15]
+        chunks = toc[meta + 15]
+        tails = [struct.unpack(">I", toc[meta + 16 + j * 4: meta + 20 + j * 4])[0]
+                 for j in range(chunks)]
         entries.append(
             {
                 "name": name,
                 "offset": o,
                 "uncomp": u,
                 "comp": c,
-                "f2": f2,
+                "chunks": chunks,
+                "tails": tails,
                 "toc_off": off,  # index of this entry's nameLen in the TOC
             }
         )
-        off += 4 + nlen + (20 if f2 == 1 else 24)
+        off += 4 + nlen + 16 + 4 * chunks
     return base, toc_z, toc_u, toc, entries
 
 
 def payload(bnk: bytes, base: int, e) -> bytes:
-    raw = bnk[base + e["offset"]: base + e["offset"] + e["comp"]]
-    return _decompress_lenient(raw)
+    out = b""
+    pos = base + e["offset"]
+    for j in range(e["chunks"]):
+        size = min(CHUNK, e["comp"] - j * CHUNK)
+        out += _decompress_lenient(bnk[pos:pos + size])
+        pos += size
+    return out
 
 
 def list_entries(bnk: bytes):
@@ -87,7 +110,7 @@ def list_entries(bnk: bytes):
     for e in entries:
         print(
             f"{e['name']}  off={e['offset']:#08x} u={e['uncomp']:#07x} "
-            f"c={e['comp']:#07x} f2={e['f2']}"
+            f"c={e['comp']:#07x} chunks={e['chunks']}"
         )
 
 
@@ -106,6 +129,11 @@ def extract(bnk: bytes, needle: str, outdir: str):
             print(f"wrote {path} ({len(data)} bytes) <- {e['name']}")
 
 
+def _empty_stream():
+    """smallest valid zlib stream (compresses empty data)"""
+    return zlib.compress(b"")
+
+
 def replace(bnk: bytes, needle: str, payload_file: str) -> bytes:
     base, toc_z, toc_u, toc, entries = read(bnk)
     matches = [e for e in entries if needle in e["name"]]
@@ -116,52 +144,49 @@ def replace(bnk: bytes, needle: str, payload_file: str) -> bytes:
         )
     e = matches[0]
     new_raw = open(payload_file, "rb").read()
-    if len(new_raw) > e["comp"]:
+    if len(new_raw) > e["uncomp"]:
         raise SystemExit(
-            f"new payload {len(new_raw)} > entry compressed size {e['comp']}; "
-            "shorten the payload"
+            f"new payload {len(new_raw)} > entry uncompressed size {e['uncomp']}"
         )
     comp = zlib.compress(new_raw, 9)
-    if len(comp) > e["comp"]:
+    if len(comp) > min(CHUNK, e["comp"]):
         raise SystemExit(
-            f"compressed payload {len(comp)} > entry size {e['comp']}; "
-            "shorten the payload"
+            f"compressed size {len(comp)} > chunk-0 capacity "
+            f"{min(CHUNK, e['comp'])}; shorten the payload"
         )
 
     out = bytearray(bnk)
-    # 1) replace the file payload at its existing offset, zero the tail
+    # 1) write the new stream in chunk 0, zero the rest of the entry
     start = base + e["offset"]
     out[start:start + len(comp)] = comp
     out[start + len(comp): start + e["comp"]] = b"\x00" * (e["comp"] - len(comp))
-
-    # 2) patch the TOC entry sizes (uncomp + comp [+ tail])
-    meta = e["toc_off"] + 4
-    nlen = struct.unpack(">I", toc[meta - 4: meta])[0]
-    m2 = meta + nlen
+    # 2) multi-chunk entries: fill remaining chunks with empty streams
+    for j in range(1, e["chunks"]):
+        pos = start + j * CHUNK
+        if pos >= start + e["comp"]:
+            break
+        stub = _empty_stream()
+        out[pos:pos + len(stub)] = stub
     new_u = len(new_raw)
     new_c = len(comp)
+    # 3) patch the TOC entry sizes + tails
     toc = bytearray(toc)
+    toc_off = e["toc_off"]
+    nlen = struct.unpack(">I", toc[toc_off:toc_off + 4])[0]
+    m2 = toc_off + 4 + nlen
     struct.pack_into(">I", toc, m2 + 4, new_u)   # uncompressedSize
     struct.pack_into(">I", toc, m2 + 8, new_c)   # compressedSize
-    struct.pack_into(">I", toc, m2 + 20, new_u)  # tail1
-    if e["f2"] == 2:
-        # keep tail1+tail2 == uncompressedSize
-        old_tail1 = struct.unpack(">I", toc[m2 + 20: m2 + 24])[0]
-        old_tail2 = struct.unpack(">I", toc[m2 + 24: m2 + 28])[0]
-        # distribute the delta to tail1 (clamped), tail2 keeps the rest
-        delta = new_u - (old_tail1 + old_tail2)
-        t1 = max(0, min(old_tail1 + delta, new_u))
-        t2 = new_u - t1
-        struct.pack_into(">I", toc, m2 + 20, t1)
-        struct.pack_into(">I", toc, m2 + 24, t2)
+    struct.pack_into(">I", toc, m2 + 16, new_u)  # tail0
+    for j in range(1, e["chunks"]):
+        struct.pack_into(">I", toc, m2 + 16 + j * 4, 0)  # other tails empty
 
-    # 3) recompress the TOC and rewrite the header
+    # 4) recompress the TOC and rewrite the header
     toc_new = zlib.compress(bytes(toc), 9)
     struct.pack_into(">I", out, 0x09, len(toc_new))
     struct.pack_into(">I", out, 0x0D, len(toc))
     # clear the old TOC region then write the new one
-    out[0x11: 0x11 + toc_z] = b"\x00" * toc_z
-    out[0x11: 0x11 + len(toc_new)] = toc_new
+    out[0x11:0x11 + toc_z] = b"\x00" * toc_z
+    out[0x11:0x11 + len(toc_new)] = toc_new
     return bytes(out)
 
 

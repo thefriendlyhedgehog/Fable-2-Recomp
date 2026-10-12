@@ -37,5 +37,19 @@ for %%d in (data nxeart $SystemUpdate) do (
         exit /b 1
     )
 )
+rem dir.manifest is merged, not /D-copied: the build may have already created
+rem or extended %DEST%\data\dir.manifest (staged external-Lua entries) BEFORE
+rem content staging, and xcopy /D skips a destination file that is NEWER than
+rem the source -- so the full source manifest would never arrive, leaving an
+rem incomplete VFS index (missing entries = invisible assets = guest null-
+rem reads at startup). The merge keeps every source line plus any
+rem destination-only lines (the build's lua entries), in any order, idempotently.
+if exist "%ROOT%\data\dir.manifest" (
+    python "%~dp0merge_dir_manifest.py" "%ROOT%\data\dir.manifest" "%DEST%\data\dir.manifest"
+    if errorlevel 1 (
+        echo Error: merging dir.manifest into %DEST%\data\ failed. 1>&2
+        exit /b 1
+    )
+)
 rem Note: saves\ and cache\ are created by the game itself at startup.
 endlocal

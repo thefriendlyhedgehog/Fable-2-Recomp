@@ -5,6 +5,9 @@
 // SDK maps it at 0x100000000 on Windows, but that is not a given elsewhere
 // (on 64-bit macOS the low 4 GB is __PAGEZERO and 0x100000000 is where the
 // executable itself is loaded), so ask the runtime instead of hardcoding it.
+// Returns 0 until the runtime's memory is initialized; callers must treat 0
+// as "nothing to read yet" (guessing an address could read the app's own
+// image on macOS and report it as guest data).
 //
 // SafeRead(): copy host memory without faulting. Windows probes use
 // VirtualQuery / SEH for this; off Windows the kernel does the checking
@@ -29,9 +32,6 @@
 
 namespace fable2::guestmem {
 
-// Fallback when the runtime isn't up yet: the SDK's Windows mapping.
-inline constexpr uintptr_t kDefaultGuestBase = 0x100000000ull;
-
 inline uintptr_t GuestBase() {
   if (auto* rt = rex::Runtime::instance()) {
     if (auto* mem = rt->memory()) {
@@ -39,7 +39,7 @@ inline uintptr_t GuestBase() {
         return reinterpret_cast<uintptr_t>(base);
     }
   }
-  return kDefaultGuestBase;
+  return 0;
 }
 
 #ifndef _WIN32

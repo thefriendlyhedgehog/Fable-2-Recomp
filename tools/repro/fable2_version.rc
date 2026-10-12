@@ -20,12 +20,12 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "CompanyName",      "ReXGlue Project\0"
-      VALUE "FileDescription",  "Fable 2 (ReXGlue recompile)\0"
+      VALUE "FileDescription",  "Fable 2 Recompiled\0"
       VALUE "FileVersion",      "1.0.0.0\0"
       VALUE "InternalName",     "fable_2\0"
       VALUE "LegalCopyright",   "Copyright (C) ReXGlue Project\0"
       VALUE "OriginalFilename", "fable_2.exe\0"
-      VALUE "ProductName",      "Fable 2 ReXGlue\0"
+      VALUE "ProductName",      "Fable 2 Recompiled\0"
       VALUE "ProductVersion",   "1.0.0.0\0"
     END
   END

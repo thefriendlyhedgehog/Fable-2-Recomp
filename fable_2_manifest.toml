@@ -100,6 +100,21 @@ address = 0x8256D9E4
 name = "fable2_hook_website_grantnew"
 registers = ["r3"]
 after_instruction = true
+
+# Disable Motion Blur. In the camera's per-frame update (sub_822A47C0, the
+# code that eases the camera's current values toward their targets), the
+# current full-screen motion blur amount (camera +0xD4; the value scripts set
+# through Camera.SetBlur / SetBlurCut / SetFullScreenMotionBlurCut) is handed
+# to the renderer: `lfs f12, 0xd4(r31)` at 0x822A49E8, then
+# `stfs f12, 0x7c(r11)`. Right after the load we zero f12 so the renderer
+# always receives 0; the camera's own value (and script reads of it) is
+# untouched. f12 is not read again before it is overwritten.
+# Toggle: [patches] disable_motion_blur.
+[[entrypoint.midasm_hook]]
+address = 0x822A49E8
+name = "fable2_hook_disable_motion_blur"
+registers = ["f12"]
+after_instruction = true
 #
 # CE: sub_824ACAE0 is the CE-chest grant vtable slot called from
 # GetCEContent. Its entire body is `lbz r3, 993(r3)` (returns the byte at
@@ -109,6 +124,77 @@ after_instruction = true
 address = 0x824ACAE0
 name = "fable2_hook_ce_grantavail"
 registers = ["r3"]
+after_instruction = true
+
+# High Tick Rate (Xenia patch by Guy), code half. The Xenia patch NOPs the
+# store at 0x8233AEB4 that writes the tick-rate double at 0x83319510 every
+# time it runs, and patches that double (be8 0x83319511: 15.0 -> 30.0; written
+# at load by src/core/fable2_patches.cpp). Guest .text never runs here, so the NOP was inert and
+# the game overwrote the patched value. This hook runs BEFORE the store and,
+# while [patches] high_tick_rate is true, jumps past it (= the NOP).
+[[entrypoint.midasm_hook]]
+address = 0x8233AEB4
+name = "fable2_hook_high_tick_rate_skip_store"
+registers = []
+jump_address_on_true = 0x8233AEB8
+
+# Higher HF Tick Rate (Xenia patch by Ultra), code half. Same function: the
+# store at 0x8233AE98 (`stfd f0, -0x6ae8(r9)`) writes the HF tick double at
+# 0x83319518 (30.0, copied from 0x833194F0) every time it runs and would undo
+# the 30 -> 60 Hz data write (src/core/fable2_patches.cpp). Runs BEFORE the
+# store and, while [patches] higher_hf_tick_rate is true, jumps past it.
+[[entrypoint.midasm_hook]]
+address = 0x8233AE98
+name = "fable2_hook_high_hf_tick_rate_skip_store"
+registers = []
+jump_address_on_true = 0x8233AE9C
+
+# Address-space scan fix (src/core/fable2_address_scan.cpp). sub_82B4DDD8
+# finds an aligned block of address space by reserving one candidate address
+# after another (step r28, size r26, limit r27, candidate r31); each taken
+# candidate was a failed NtAllocateVirtualMemory call and an "[error]
+# BaseHeap::AllocFixed attempting to reserve an already reserved range" line
+# (~3,850 at startup). The hook runs at the loop head, before each attempt,
+# and moves r31 to the first candidate whose range is actually free, so the
+# game gets the same address without the failed calls. It returns true only
+# when no candidate is left, jumping to the function's own "nothing found"
+# exit (li r3, 0).
+[[entrypoint.midasm_hook]]
+address = 0x82B4DE50
+name = "fable2_hook_address_scan_skip"
+registers = ["r26", "r27", "r28", "r31"]
+jump_address_on_true = 0x82B4DEF8
+
+# Skip Intro Videos (just-harry's "Skip intro videos" patch from his
+# Unofficial Xenia femtofork, as a hook). sub_822F4958 builds the boot video
+# queue: slot 0 = microsoft_logo.bik, slot 1 = lionhead_logo.bik, slot 2 =
+# terminator, then loops queueing slots until CompareString says "terminator".
+# Right after the first CompareString (bl at 0x822F49B8) we report
+# "terminator" (r3 = 0), so nothing is queued; the three strings are still
+# constructed and released normally. Toggle: [patches] skip_intro_videos.
+[[entrypoint.midasm_hook]]
+address = 0x822F49B8
+name = "fable2_hook_skip_intro_videos"
+registers = ["r3"]
+after_instruction = true
+
+# Hero/dog black textures, fixed without CPU readback
+# (plans/hero-dog-realtime-texture-morphing.md). The hero's and dog's skin
+# textures are built by texture morphing. In the default "baked" mode the morph
+# renderer (sub_82A69728) draws each mip into a scratch render target, resolves
+# it to guest memory (the 0x12704000 scratch texture), locks that READONLY on
+# the CPU and DXT-compresses it into the final texture (sub_83008E98). On a
+# split-memory host that CPU read sees stale memory, so the result is black.
+# The game also has a RealTimeTextureMorphing mode in which the morph is drawn
+# straight into an uncompressed final texture and its mips are made on the
+# GPU, so the CPU never reads the result. Every morph request becomes a morph
+# job in sub_82A76018, which copies the request's realtime byte with
+# `lbz r9, 0x20(r30)` at 0x82A7607C (then `stb r9, 0x60(r31)`); force it to 1.
+# Toggle: [patches] realtime_texture_morphing.
+[[entrypoint.midasm_hook]]
+address = 0x82A7607C
+name = "fable2_hook_realtime_texture_morphing"
+registers = ["r9"]
 after_instruction = true
 
 # Game MSAA mode (Xenia "Disable MSAA" by Margen67, be8 0x8238DF3F = 1):
@@ -122,14 +208,14 @@ registers = ["r9"]
 after_instruction = true
 
 # Conservative settings: no register optimizations
-skip_lr = false
-skip_msr = false
-ctr_as_local = false
-xer_as_local = false
-reserved_as_local = false
-cr_as_local = false
-non_argument_as_local = false
-non_volatile_as_local = false
+skip_lr = true
+skip_msr = true
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true
+cr_as_local = true
+non_argument_as_local = true
+non_volatile_as_local = true
 
 # Invalid instruction skips: 32-bit values (big-endian) the recompiler skips
 # over during its linear .text walk instead of analyzing them as functions.
@@ -226,6 +312,16 @@ name = "Skill_AimRangeWeapon"
 # Tatter spire right after you get there when the man says "Get Moving"
 [entrypoint.functions."0x8274B768"]
 name = "Story_TatterSpireGetMoving"
+
+# Finished Game going to Bowerstone Market: from issue #32
+[entrypoint.functions."0x8217EFE0"]
+
+# Loading Keystone and Spinnerbox pub game
+[entrypoint.functions."0x831465C8"]
+name = "LoadPubGames_831465C8"
+
+# Shooting a gun when on a pressure plate in wellspring cave (issue #38)
+[entrypoint.functions."0x82988EA8"]
 
 # === Guild chest (fable2.com website items / CE content unlock) ===
 # The Guild chest holds items obtainable from the fable2.com website and the
@@ -3780,7 +3876,7 @@ name = "ByteValueCheck_82CBC678"
 # meaning (an "interrupted" / "abort" flag) isn't resolvable, so the name states the mechanism: delay
 # for a duration in milliseconds.
 [entrypoint.functions."0x82CC2028"]
-name = "DelayMilliseconds_82CC2028"
+name = "KeDelayExecutionThreadWrapper_82CC2028"
 
 # A 16-byte-stride array constructor (the sibling of ConstructArray4_823093F8): given a size, do an
 # overflow check, run a setup step (sub_822F1F00), and allocate size * 16 bytes.
@@ -38890,7 +38986,7 @@ name = "ProcessStateTransition_8221E680"
 
 # Yield execution and check a value against a threshold, returning a bit (a yield-and-check routine). It takes a value (a); it yields execution (NtYieldExecution), then compares a to a threshold (16420), and returns a bit value based on the comparison. This is a "yield and check threshold" routine. 36 lines. 1 callee (__imp__NtYieldExecution). 10 callers (many from the 0x82B* and 0x82* clusters).
 [entrypoint.functions."0x82CBD098"]
-name = "YieldAndCheckThreshold_82CBD098"
+name = "Yield_82CBD098"
 
 # Check a structure's state and drive the appropriate sub-operations (five hundred and third form). It takes a structure (a: fields at a->32, a->8, and a->52) and two values (b and c); it checks the structure's state, and — when ready — drives the appropriate sub-operations based on the flags. This is the "process this data" routine (five hundred and third form), part of the 0x8222A process cluster. 171 lines. 2 callees (sub_821A5A30 and sub_82CBC6B0). 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
 [entrypoint.functions."0x8222AC38"]
@@ -38934,9 +39030,12 @@ name = "ProcessAndProcessAndProcess507_82185228"
 
 # Iterate an array of pointers and issue a virtual call on each one (five hundred and eighth form). It takes a structure (a: array of pointers at a->0, a->4, a->8, ...); it iterates over the array (up to 6 entries), and for each valid pointer, issues a virtual call. This is the "process this data" routine (five hundred and eighth form), part of the 0x822A2 process cluster. 148 lines. 0 callees (uses indirect calls). 4 callers (sub_829F8D30, ProcessAndProcessAndProcess506, sub_829F8028, and sub_829F7F88). Strong override in fable2_text_probe.h.
 [entrypoint.functions."0x822A2948"]
-name = "ProcessAndProcessAndProcess508_822A2948"
-
-# Return the byte at offset 96 of a structure (a byte-getter routine). It takes a structure (a: field at a->96) and returns the byte value at a->96. This is a "get byte at offset" routine. 7 lines. 0 callees. 0 callers (unresolved — body is recovered but no callers found; likely a vtable method or indirect entry).
+name = "UITextContainer_ProcessChildren"
+# UI-text container per-frame processor (hooked in fable2_text_probe.h). r3 = container;
+# iterates the up-to-6 child element pointers at container+0..+20. Pass 1 calls each
+# live child's vtable[2] (offset 8, the per-element update). Pass 2 calls each child's
+# vtable[1] (offset 4, a query) and records the index of the first child returning a
+# non-zero low byte. Confirmed on the main-menu render path by the UIR render probe.
 [entrypoint.functions."0x822A9360"]
 name = "GetByteAtOffset96_822A9360"
 
@@ -39026,7 +39125,7 @@ name = "ProcessAndProcessAndProcess522_8221C908"
 
 # Process timing and state by performing delay operations and driving sub-operations (five hundred and twenty-third form). It takes a structure (a: fields at a->0 and a->8); it performs delay operations (db16cyc), checks state flags, and drives sub-operations (GetGlobalField and sub_82BA0E80). This is the "process this data" routine (five hundred and twenty-third form), part of the 0x82B9B process cluster. 119 lines. 2 callees. 6 callers (including MainRenderLoop and sub_82242628).
 [entrypoint.functions."0x82B9BF90"]
-name = "ProcessAndProcessAndProcess523_82B9BF90"
+name = "GpuProgressCheck_82B9BF90"
 
 # Process a structure by driving refcount operations and sub-operations (five hundred and twenty-fourth form). It takes a structure (a: field at a->4); it checks the structure's state, and drives several sub-operations (DecrementRefcountAtomic, Free_SizeBucketed_Thunk, IncrementRefcountAtomic, sub_821F6140, sub_82B83FA8, and sub_82B9B9F0) based on the result. This is the "process this data" routine (five hundred and twenty-fourth form), part of the 0x821FB process cluster. 142 lines. 6 callees. 12 callers (many from the 0x821F*, 0x82A*, 0x82B*, and 0x832A* clusters).
 [entrypoint.functions."0x821FBED8"]
@@ -39624,7 +39723,7 @@ name = "ProcessAndProcessAndProcess643_821FBE60"
 [entrypoint.functions."0x82A3ED80"]
 name = "DestructAndDecrementRefcount_82A3ED80"
 
-# Delay for zero milliseconds by calling the delay routine (a zero delay function). It takes no arguments; it calls the delay routine (DelayMilliseconds) with a zero argument. This is a "delay for zero" routine. 9 lines. 1 callee. 12 callers (many from the 0x822*, 0x823*, 0x824*, 0x82B*, 0x82C*, 0x82E*, 0x830* clusters, and ProcessAndProcessAndProcess503).
+# Delay for zero milliseconds by calling the delay routine (a zero delay function). It takes no arguments; it calls the delay routine (KeDelayExecutionThreadWrapper) with a zero argument. This is a "delay for zero" routine. 9 lines. 1 callee. 12 callers (many from the 0x822*, 0x823*, 0x824*, 0x82B*, 0x82C*, 0x82E*, 0x830* clusters, and ProcessAndProcessAndProcess503).
 [entrypoint.functions."0x82CBC6B0"]
 name = "DelayZero_82CBC6B0"
 
@@ -40164,7 +40263,7 @@ name = "ProcessAndProcessAndProcess769_82A7F338"
 [entrypoint.functions."0x82A6D008"]
 name = "ProcessAndProcessAndProcess770_82A6D008"
 
-# Process a structure by driving sub-operations (seven hundred and seventy-first form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess523, sub_82B9BEC8) based on the result. Part of the 0x82286 process cluster. 119 lines. 2 callees. 2 callers.
+# Process a structure by driving sub-operations (seven hundred and seventy-first form). It takes a structure, checks its state, and drives sub-operations (GpuProgressCheck, sub_82B9BEC8) based on the result. Part of the 0x82286 process cluster. 119 lines. 2 callees. 2 callers.
 [entrypoint.functions."0x82286180"]
 name = "ProcessAndProcessAndProcess771_82286180"
 
@@ -40658,7 +40757,7 @@ name = "ProcessAndProcessAndProcess893_82CE6820"
 
 # Process a structure by wrapping a sub-operation (seven hundred and one hundred and eighty-fourth form). It takes a structure and drives a sub-operation (sub_82B9C530). Part of the 0x82B9B process cluster. 91 lines. 1 callee. 0 callers.
 [entrypoint.functions."0x82B9B8D8"]
-name = "ProcessAndProcessAndProcess894_82B9B8D8"
+name = "VblankInterruptCallback_82B9B8D8"
 
 # Acquire a refcount by swapping it (seven hundred and one hundred and eighty-fifth form). It takes a structure, increments and swaps its reference count (IncrementRefcountAtomic, SwapRefcount), and drives a sub-operation (ProcessAndProcessAndProcess524) based on the result. This is a refcount acquirer in the 0x821FB cluster. 61 lines. 3 callees. 14 callers.
 [entrypoint.functions."0x821FBAB8"]
@@ -40842,7 +40941,7 @@ name = "ProcessAndProcessAndProcess939_821E8B98"
 
 # Process a frequently-used structure by driving sub-operations (seven hundred and one hundred and one hundred and fortieth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess529, sub_821E8B98, sub_82242628, sub_82283530, ProcessAndProcessAndProcess926) based on the result. This is one of the hottest core process helpers in the recompiled binary, called from the main render loop. 150 lines. 5 callees. 78 callers.
 [entrypoint.functions."0x821E8D20"]
-name = "ProcessAndProcessAndProcess940_821E8D20"
+name = "FastHelper_821E8D20"
 
 # Process a very large data structure (seven hundred and one hundred and one hundred and forty-first form). It takes a structure and checks its state, with no external sub-operations. This is a leaf handler in the 0x82CD4/0x82CD5 cluster, dispatched solely by sub_82CD6010. 969 lines. 0 callees. 1 caller (sub_82CD6010).
 [entrypoint.functions."0x82CD4A10"]
@@ -40940,7 +41039,7 @@ name = "ProcessAndProcessAndProcess963_832BF5A0"
 [entrypoint.functions."0x82C51BF8"]
 name = "ProcessAndProcessAndProcess964_82C51BF8"
 
-# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and sixty-fifth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess940). Part of the 0x822AF process cluster. 73 lines. 1 callee. 4 callers.
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and sixty-fifth form). It takes a structure and drives a sub-operation (FastHelper). Part of the 0x822AF process cluster. 73 lines. 1 callee. 4 callers.
 [entrypoint.functions."0x822AF3A0"]
 name = "ProcessAndProcessAndProcess965_822AF3A0"
 
@@ -41256,15 +41355,15 @@ name = "ProcessAndProcessAndProcess1042_82BFCB58"
 [entrypoint.functions."0x82A00A18"]
 name = "ProcessAndProcessAndProcess1043_82A00A18"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and forty-fourth form). It takes a structure, checks its state, and drives a sub-operation (ProcessAndProcessAndProcess529) based on the result. Part of the 0x82283 process cluster. 331 lines. 1 callee. 2 callers (including ProcessAndProcessAndProcess940).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and forty-fourth form). It takes a structure, checks its state, and drives a sub-operation (ProcessAndProcessAndProcess529) based on the result. Part of the 0x82283 process cluster. 331 lines. 1 callee. 2 callers (including FastHelper).
 [entrypoint.functions."0x82283530"]
 name = "ProcessAndProcessAndProcess1044_82283530"
 
 # Process a structure (seven hundred and one hundred and one hundred and one hundred and forty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82298 process cluster. 145 lines. 0 callees. 2 callers (including ProcessAndProcessAndProcess939).
 [entrypoint.functions."0x822981F0"]
-name = "ProcessAndProcessAndProcess1045_822981F0"
+name = "EndFrame_822981F0"
 
-# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and forty-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess568, ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess965) based on the result. Part of the 0x822A6 process cluster, called from the main render loop. 154 lines. 3 callees. 6 callers.
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and forty-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess568, FastHelper, ProcessAndProcessAndProcess965) based on the result. Part of the 0x822A6 process cluster, called from the main render loop. 154 lines. 3 callees. 6 callers.
 [entrypoint.functions."0x822A6318"]
 name = "ProcessAndProcessAndProcess1046_822A6318"
 
@@ -41312,7 +41411,7 @@ name = "ProcessAndProcessAndProcess1056_82CD7960"
 [entrypoint.functions."0x82CDDB60"]
 name = "ProcessAndProcessAndProcess1057_82CDDB60"
 
-# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and fifty-eighth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess940). Part of the 0x82BA8 process cluster. 129 lines. 1 callee. 1 caller (sub_82B9C7F8).
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and fifty-eighth form). It takes a structure and drives a sub-operation (FastHelper). Part of the 0x82BA8 process cluster. 129 lines. 1 callee. 1 caller (sub_82B9C7F8).
 [entrypoint.functions."0x82BA8170"]
 name = "ProcessAndProcessAndProcess1058_82BA8170"
 
@@ -41400,7 +41499,7 @@ name = "ProcessAndProcessAndProcess1078_82A6C4F0"
 [entrypoint.functions."0x82B9ED28"]
 name = "ProcessAndProcessAndProcess1079_82B9ED28"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and eightieth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess523, ProcessAndProcessAndProcess679, sub_82B9BEC8) based on the result. Part of the 0x82B9F process cluster. 273 lines. 3 callees. 1 caller (sub_82B9F280).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and eightieth form). It takes a structure, checks its state, and drives sub-operations (GpuProgressCheck, ProcessAndProcessAndProcess679, sub_82B9BEC8) based on the result. Part of the 0x82B9F process cluster. 273 lines. 3 callees. 1 caller (sub_82B9F280).
 [entrypoint.functions."0x82B9F0A8"]
 name = "ProcessAndProcessAndProcess1080_82B9F0A8"
 
@@ -41412,9 +41511,9 @@ name = "ProcessAndProcessAndProcess1081_82B9F280"
 [entrypoint.functions."0x82B9F730"]
 name = "ProcessAndProcessAndProcess1082_82B9F730"
 
-# Process a structure by querying the timebase (seven hundred and one hundred and one hundred and one hundred and eighty-third form). It takes a structure, queries the timebase (GetTimebase), and drives sub-operations based on the result. Part of the 0x82B9C process cluster. 155 lines. 1 callee. 1 caller (ProcessAndProcessAndProcess894).
+# Process a structure by querying the timebase (seven hundred and one hundred and one hundred and one hundred and eighty-third form). It takes a structure, queries the timebase (GetTimebase), and drives sub-operations based on the result. Part of the 0x82B9C process cluster. 155 lines. 1 callee. 1 caller (VblankInterruptCallback).
 [entrypoint.functions."0x82B9C530"]
-name = "ProcessAndProcessAndProcess1083_82B9C530"
+name = "GpuInterruptHandler_82B9C530"
 
 # Process a structure (seven hundred and one hundred and one hundred and one hundred and eighty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82C08 process cluster. 114 lines. 0 callees. 0 callers.
 [entrypoint.functions."0x82C08E40"]
@@ -41428,9 +41527,9 @@ name = "ProcessAndProcessAndProcess1085_82C4DEA8"
 [entrypoint.functions."0x82C0B3D8"]
 name = "ProcessAndProcessAndProcess1086_82C0B3D8"
 
-# Process a frequently-used structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and eighty-seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess523, ProcessAndProcessAndProcess940, sub_82B9BEC8) based on the result. This is a frequently-called helper in the 0x82242 process cluster, called from the main render loop and ProcessAndProcessAndProcess940. 139 lines. 3 callees. 11 callers.
+# Process a frequently-used structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and eighty-seventh form). It takes a structure, checks its state, and drives sub-operations (GpuProgressCheck, FastHelper, sub_82B9BEC8) based on the result. This is a frequently-called helper in the 0x82242 process cluster, called from the main render loop and FastHelper. 139 lines. 3 callees. 11 callers.
 [entrypoint.functions."0x82242628"]
-name = "ProcessAndProcessAndProcess1087_82242628"
+name = "FrameLimiterWait_82242628"
 
 # Process a large data structure by freeing size-bucketed memory (seven hundred and one hundred and one hundred and one hundred and eighty-eighth form). It takes a structure, frees size-bucketed memory (Free_SizeBucketed), and drives sub-operations (sub_82B7FDB0, ProcessAndProcessAndProcess1089) based on the result. Part of the 0x82B8B process cluster. 339 lines. 3 callees. 3 callers.
 [entrypoint.functions."0x82B8B690"]
@@ -41760,7 +41859,7 @@ name = "ProcessAndProcessAndProcess1168_82278DF8"
 [entrypoint.functions."0x8227B050"]
 name = "ProcessAndProcessAndProcess1169_8227B050"
 
-# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and seventieth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess860, ProcessAndProcessAndProcess940) based on the result. Part of the 0x8227C process cluster. 282 lines. 3 callees. 2 callers (sub_822872D0 and sub_822AA060).
+# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and seventieth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess860, FastHelper) based on the result. Part of the 0x8227C process cluster. 282 lines. 3 callees. 2 callers (sub_822872D0 and sub_822AA060).
 [entrypoint.functions."0x8227CDD0"]
 name = "ProcessAndProcessAndProcess1170_8227CDD0"
 
@@ -42080,7 +42179,7 @@ name = "ProcessAndProcessAndProcess1248_82A7FA88"
 [entrypoint.functions."0x8259D340"]
 name = "ProcessAndProcessAndProcess1249_8259D340"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fiftieth form). It takes a structure, gets a global field (GetGlobalField), and drives sub-operations (ProcessAndProcessAndProcess1087, ProcessAndProcessAndProcess940) based on the result. This is a frequently-called helper in the 0x821F6 process cluster. 445 lines. 3 callees. 18 callers.
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fiftieth form). It takes a structure, gets a global field (GetGlobalField), and drives sub-operations (FrameLimiterWait, FastHelper) based on the result. This is a frequently-called helper in the 0x821F6 process cluster. 445 lines. 3 callees. 18 callers.
 [entrypoint.functions."0x821F61D0"]
 name = "ProcessAndProcessAndProcess1250_821F61D0"
 
@@ -42100,7 +42199,7 @@ name = "ProcessAndProcessAndProcess1253_832BB018"
 [entrypoint.functions."0x82C50FE8"]
 name = "ProcessAndProcessAndProcess1254_82C50FE8"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess555, ProcessAndProcessAndProcess919, ProcessAndProcessAndProcess940) based on the result. Part of the 0x821E2 process cluster. 532 lines. 4 callees. 10 callers.
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-fifth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess551, ProcessAndProcessAndProcess555, ProcessAndProcessAndProcess919, FastHelper) based on the result. Part of the 0x821E2 process cluster. 532 lines. 4 callees. 10 callers.
 [entrypoint.functions."0x821E27C8"]
 name = "ProcessAndProcessAndProcess1255_821E27C8"
 
@@ -42108,15 +42207,15 @@ name = "ProcessAndProcessAndProcess1255_821E27C8"
 [entrypoint.functions."0x82BA8630"]
 name = "ProcessAndProcessAndProcess1256_82BA8630"
 
-# Process a large structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-seventh form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess1087, ProcessAndProcessAndProcess528, sub_82B9B770) based on the result. Part of the render-loop process path in the 0x821D1 cluster. 244 lines. 3 callees. 3 callers (including MainRenderLoop).
+# Process a large structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-seventh form). It takes a structure and drives sub-operations (FrameLimiterWait, ProcessAndProcessAndProcess528, sub_82B9B770) based on the result. Part of the render-loop process path in the 0x821D1 cluster. 244 lines. 3 callees. 3 callers (including MainRenderLoop).
 [entrypoint.functions."0x821D17B8"]
 name = "ProcessAndProcessAndProcess1257_821D17B8"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1058, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess952) based on the result. Part of the render-loop process path in the 0x82B9C cluster. 293 lines. 4 callees. 6 callers (including MainRenderLoop).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-eighth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1058, ProcessAndProcessAndProcess791, FastHelper, ProcessAndProcessAndProcess952) based on the result. Part of the render-loop process path in the 0x82B9C cluster. 293 lines. 4 callees. 6 callers (including MainRenderLoop).
 [entrypoint.functions."0x82B9C7F8"]
 name = "ProcessAndProcessAndProcess1258_82B9C7F8"
 
-# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-ninth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess940) based on the result. Part of the render-loop process path in the 0x82B9C cluster. 104 lines. 1 callee. 4 callers (including MainRenderLoop).
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and fifty-ninth form). It takes a structure and drives a sub-operation (FastHelper) based on the result. Part of the render-loop process path in the 0x82B9C cluster. 104 lines. 1 callee. 4 callers (including MainRenderLoop).
 [entrypoint.functions."0x82B9C9D8"]
 name = "ProcessAndProcessAndProcess1259_82B9C9D8"
 
@@ -42124,7 +42223,7 @@ name = "ProcessAndProcessAndProcess1259_82B9C9D8"
 [entrypoint.functions."0x82BA32C8"]
 name = "ProcessAndProcessAndProcess1260_82BA32C8"
 
-# Process a structure by clearing memory and driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-first form). It takes a structure, clears its memory (MemSet), and drives sub-operations (ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess952, sub_82BA6820) based on the result. Part of the render-loop process path in the 0x82BA6 cluster. 174 lines. 4 callees. 1 caller (MainRenderLoop).
+# Process a structure by clearing memory and driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-first form). It takes a structure, clears its memory (MemSet), and drives sub-operations (FastHelper, ProcessAndProcessAndProcess952, sub_82BA6820) based on the result. Part of the render-loop process path in the 0x82BA6 cluster. 174 lines. 4 callees. 1 caller (MainRenderLoop).
 [entrypoint.functions."0x82BA6F08"]
 name = "ProcessAndProcessAndProcess1261_82BA6F08"
 
@@ -42140,7 +42239,7 @@ name = "ProcessAndProcessAndProcess1263_82BA8350"
 [entrypoint.functions."0x83004BB0"]
 name = "ProcessAndProcessAndProcess1264_83004BB0"
 
-# Orchestrate a render-loop frame (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-fifth form). It takes a structure, enters a critical section (CriticalSection_EnterOrTry), queries the timebase (GetTimebase), increments an atomic reference count (IncrementRefcountAtomic), calls the main render loop (MainRenderLoop), checks a yield threshold (YieldAndCheckThreshold), and drives many sub-operations (ProcessAndProcessAndProcess1017, ProcessAndProcessAndProcess1107, ProcessAndProcessAndProcess792, ProcessAndProcessAndProcess805, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess905, ProcessAndProcessAndProcess907, ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1258) based on the result. This is the main render-loop orchestrator in the 0x82B69 cluster. 426 lines. 15 callees. 3 callers (sub_8236C520, sub_8236D0A8, sub_82A393A8).
+# Orchestrate a render-loop frame (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-fifth form). It takes a structure, enters a critical section (CriticalSection_EnterOrTry), queries the timebase (GetTimebase), increments an atomic reference count (IncrementRefcountAtomic), calls the main render loop (MainRenderLoop), checks a yield threshold (Yield), and drives many sub-operations (ProcessAndProcessAndProcess1017, ProcessAndProcessAndProcess1107, ProcessAndProcessAndProcess792, ProcessAndProcessAndProcess805, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess905, ProcessAndProcessAndProcess907, FastHelper, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1258) based on the result. This is the main render-loop orchestrator in the 0x82B69 cluster. 426 lines. 15 callees. 3 callers (sub_8236C520, sub_8236D0A8, sub_82A393A8).
 [entrypoint.functions."0x82B69488"]
 name = "ProcessAndProcessAndProcess1265_82B69488"
 
@@ -42152,7 +42251,7 @@ name = "ProcessAndProcessAndProcess1266_82B9C648"
 [entrypoint.functions."0x82B89A78"]
 name = "ProcessAndProcessAndProcess1267_82B89A78"
 
-# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-eighth form). It takes a structure and drives sub-operations (ProcessAndProcessAndProcess940, sub_8228EAF0) based on the result. Part of the 0x822B3 process cluster. 236 lines. 2 callees. 6 callers (including ProcessAndProcessAndProcess841).
+# Process a structure by driving sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and sixty-eighth form). It takes a structure and drives sub-operations (FastHelper, sub_8228EAF0) based on the result. Part of the 0x822B3 process cluster. 236 lines. 2 callees. 6 callers (including ProcessAndProcessAndProcess841).
 [entrypoint.functions."0x822B3E40"]
 name = "ProcessAndProcessAndProcess1268_822B3E40"
 
@@ -42229,8 +42328,11 @@ name = "ProcessAndProcessAndProcess1285_82184C68"
 name = "ProcessAndProcessAndProcess1286_82184D38"
 
 # Process a large structure by copying data (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and eighty-seventh form). It takes a structure, copies its data (MemCpy), and drives sub-operations (sub_829FA5E8, sub_82A666A8, sub_82BE3F30) based on the result. Part of the 0x82185 process cluster. 317 lines. 4 callees. 1 caller (ProcessAndProcessAndProcess1294).
+# Per-frame front-end input poller: walks the menu input-element list and, when
+# a pending button event is queued, builds the event struct and calls
+# FrontMenu_InputEvent. Fires ~once per frame (30 Hz) while the menu is open.
 [entrypoint.functions."0x82185C90"]
-name = "ProcessAndProcessAndProcess1287_82185C90"
+name = "FrontMenu_PollEventQueue"
 
 # Process a very large data structure by copying data (seven hundred and one hundred and one hundred and one hundred and one hundred and two hundred and eighty-eighth form). It takes a structure, copies its data (MemCpy), and drives sub-operations (ProcessAndProcessAndProcess1091, ProcessAndProcessAndProcess1092, sub_82188F20, sub_829FA5E8) based on the result. Part of the 0x82189 process cluster. 780 lines. 5 callees. 1 caller (ProcessAndProcessAndProcess1294).
 [entrypoint.functions."0x82189058"]
@@ -42360,7 +42462,7 @@ name = "ProcessAndProcessAndProcess1318_82C02410"
 [entrypoint.functions."0x82396A68"]
 name = "ProcessAndProcessAndProcess1319_82396A68"
 
-# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twentieth form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess940). This is a frequently-called helper in the 0x821F6 process cluster. 89 lines. 1 callee. 13 callers (including ProcessAndProcessAndProcess1159).
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and twentieth form). It takes a structure and drives a sub-operation (FastHelper). This is a frequently-called helper in the 0x821F6 process cluster. 89 lines. 1 callee. 13 callers (including ProcessAndProcessAndProcess1159).
 [entrypoint.functions."0x821F6140"]
 name = "ProcessAndProcessAndProcess1320_821F6140"
 
@@ -42418,9 +42520,11 @@ name = "ProcessAndProcessAndProcess1333_82C08DC0"
 
 # Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirty-fourth form). It takes a structure and checks its state, with no external sub-operations. Part of the UI text-rendering cluster in the 0x82C09 region. 102 lines. 0 callees. 1 caller (UIText_RenderElement).
 [entrypoint.functions."0x82C09018"]
-name = "ProcessAndProcessAndProcess1334_82C09018"
-
-# Process a large structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and thirty-fifth form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82C12 process cluster. 152 lines. 0 callees. 0 callers.
+name = "UITextElement_Draw"
+# Per-element UI-text draw: called once for every visible element (r3 = element object,
+# r4 = render context). This is the function fable2_text_append.h re-invokes to render
+# appended text through the game's own font pipeline, so it is on the true render path.
+# The vertex shift in the glyph probe is applied right after its state builder.
 [entrypoint.functions."0x82C12D90"]
 name = "ProcessAndProcessAndProcess1335_82C12D90"
 
@@ -42612,15 +42716,17 @@ name = "ProcessAndProcessAndProcess1381_822C0960"
 [entrypoint.functions."0x82237378"]
 name = "ProcessAndProcessAndProcess1382_82237378"
 
-# Process a structure by entering a critical section (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-third form). It takes a structure, enters or tries a critical section (CriticalSection_EnterOrTry), gets a global field (GetGlobalField), yields and checks a threshold (YieldAndCheckThreshold), and drives sub-operations (sub_82B68F60, sub_82B68FC8) based on the result. Part of the 0x82B69 process cluster. 142 lines. 5 callees. 4 callers (including ProcessAndProcessAndProcess577).
+# Process a structure by entering a critical section (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-third form). It takes a structure, enters or tries a critical section (CriticalSection_EnterOrTry), gets a global field (GetGlobalField), yields and checks a threshold (Yield), and drives sub-operations (sub_82B68F60, sub_82B68FC8) based on the result. Part of the 0x82B69 process cluster. 142 lines. 5 callees. 4 callers (including ProcessAndProcessAndProcess577).
 [entrypoint.functions."0x82B69098"]
 name = "ProcessAndProcessAndProcess1383_82B69098"
 
 # Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-fourth form). It takes a structure, checks its state, and drives sub-operations (sub_82C08F08, sub_82C09680) based on the result. Part of the UI text-rendering cluster in the 0x82C09 region. 68 lines. 2 callees. 1 caller (UIText_RenderElement).
 [entrypoint.functions."0x82C09870"]
-name = "ProcessAndProcessAndProcess1384_82C09870"
-
-# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-fifth form). It takes a structure, enters a critical section (CriticalSection_EnterOrTry), gets a global field (GetGlobalField), and drives many sub-operations (ProcessAndProcessAndProcess1021, ProcessAndProcessAndProcess1066, ProcessAndProcessAndProcess1155, ProcessAndProcessAndProcess1178, ProcessAndProcessAndProcess1179, ProcessAndProcessAndProcess1184, ProcessAndProcessAndProcess1186, ProcessAndProcessAndProcess1214, ProcessAndProcessAndProcess1255, ProcessAndProcessAndProcess264, ProcessAndProcessAndProcess526, ProcessAndProcessAndProcess555, ProcessAndProcessAndProcess653, ProcessAndProcessAndProcess805, sub_821815B0, sub_821A5CB8, sub_821C3CD0, sub_821E2D40, sub_821F4448, ProcessAndProcessAndProcess1382, sub_82263530, sub_822B4D70, sub_822B4E08, sub_822C09E0, ProcessAndProcessAndProcess1388, sub_822E0508, sub_82B38478, sub_82B6C060, sub_82B7CD18, sub_82B9BA58, sub_82BE4D50) based on the result. This is a large dispatcher in the 0x821C3 cluster. 592 lines. 33 callees. 1 caller (ProcessAndProcessAndProcess1389).
+name = "UITextElement_PostQuery"
+# UI-text element query: element.vtable[13] (body loads r31->32, then dispatches
+# r31->vtable[13]). Runs AFTER the vertex-emitting calls, so it is NOT the draw (see
+# fable2_glyph_probe.h, which hooks it and drives the throttled font/glyph-table scan
+# from here). Called once per element after its draw has been emitted.
 [entrypoint.functions."0x821C38C8"]
 name = "ProcessAndProcessAndProcess1385_821C38C8"
 
@@ -42712,7 +42818,7 @@ name = "ProcessAndProcessAndProcess1406_82CD2AC0"
 [entrypoint.functions."0x8228FF90"]
 name = "ProcessAndProcessAndProcess1407_8228FF90"
 
-# Process an enormous data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-eighth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), destructs a refcounted object (DestructRefCounted), frees size-bucketed memory (Free_SizeBucketed), gets the timebase (GetTimebase), grows a buffer (GrowBufferAndAppend), checks for success (ProcessAndCheckSuccess), sets an event (SetEvent), yields and checks a threshold (YieldAndCheckThreshold), and drives many sub-operations (ProcessAndProcessAndProcess1214, ProcessAndProcessAndProcess543, ProcessAndProcessAndProcess544, ProcessAndProcessAndProcess559, ProcessAndProcessAndProcess578, ProcessAndProcessAndProcess641, ProcessAndProcessAndProcess720, ProcessAndProcessAndProcess766, ProcessAndProcessAndProcess776, ProcessAndProcessAndProcess783, sub_827D4B70, sub_82A48FC8, sub_82A49158, sub_82A491F0, sub_82A498E8, sub_82A4A3F0, sub_82A4EB10, sub_82A4EF80, sub_82A4F1C0, sub_82A4F2F0, sub_82A4F3E0, sub_82A50A38, sub_82A50AD8, sub_82A50E40, sub_82A5AC08, sub_82A5AD18, sub_82A71B80) based on the result. This is the fourth-largest function in the recompiled binary, in the 0x822E0 cluster. 3501 lines. 35 callees. 2 callers (including ProcessAndProcessAndProcess1385).
+# Process an enormous data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and forty-eighth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), destructs a refcounted object (DestructRefCounted), frees size-bucketed memory (Free_SizeBucketed), gets the timebase (GetTimebase), grows a buffer (GrowBufferAndAppend), checks for success (ProcessAndCheckSuccess), sets an event (SetEvent), yields and checks a threshold (Yield), and drives many sub-operations (ProcessAndProcessAndProcess1214, ProcessAndProcessAndProcess543, ProcessAndProcessAndProcess544, ProcessAndProcessAndProcess559, ProcessAndProcessAndProcess578, ProcessAndProcessAndProcess641, ProcessAndProcessAndProcess720, ProcessAndProcessAndProcess766, ProcessAndProcessAndProcess776, ProcessAndProcessAndProcess783, sub_827D4B70, sub_82A48FC8, sub_82A49158, sub_82A491F0, sub_82A498E8, sub_82A4A3F0, sub_82A4EB10, sub_82A4EF80, sub_82A4F1C0, sub_82A4F2F0, sub_82A4F3E0, sub_82A50A38, sub_82A50AD8, sub_82A50E40, sub_82A5AC08, sub_82A5AD18, sub_82A71B80) based on the result. This is the fourth-largest function in the recompiled binary, in the 0x822E0 cluster. 3501 lines. 35 callees. 2 callers (including ProcessAndProcessAndProcess1385).
 [entrypoint.functions."0x822E0508"]
 name = "ProcessAndProcessAndProcess1408_822E0508"
 
@@ -42848,7 +42954,7 @@ name = "ProcessAndProcessAndProcess1440_8218DB30"
 [entrypoint.functions."0x82192418"]
 name = "ProcessAndProcessAndProcess1441_82192418"
 
-# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and sixty-second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess940, sub_82286D00) based on the result. Part of the 0x82193 process cluster. 118 lines. 4 callees. 1 caller (sub_821B9AD0).
+# Process a structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and sixty-second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess897, FastHelper, sub_82286D00) based on the result. Part of the 0x82193 process cluster. 118 lines. 4 callees. 1 caller (sub_821B9AD0).
 [entrypoint.functions."0x82193120"]
 name = "ProcessAndProcessAndProcess1442_82193120"
 
@@ -42868,7 +42974,7 @@ name = "ProcessAndProcessAndProcess1445_82197D00"
 [entrypoint.functions."0x8219B9B0"]
 name = "ProcessAndProcessAndProcess1446_8219B9B0"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and sixty-seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess940, sub_822A5F80) based on the result. Part of the 0x821A1 process cluster. 426 lines. 3 callees. 3 callers (sub_822872D0, sub_8228D838, sub_82B69D00).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and sixty-seventh form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess603, FastHelper, sub_822A5F80) based on the result. Part of the 0x821A1 process cluster. 426 lines. 3 callees. 3 callers (sub_822872D0, sub_8228D838, sub_82B69D00).
 [entrypoint.functions."0x821A17A8"]
 name = "ProcessAndProcessAndProcess1447_821A17A8"
 
@@ -42904,7 +43010,7 @@ name = "ProcessAndProcessAndProcess1454_821B7268"
 [entrypoint.functions."0x821B99A0"]
 name = "ProcessAndProcessAndProcess1455_821B99A0"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and seventy-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess600, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess896, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1442) based on the result. Part of the 0x821B9 process cluster. 404 lines. 7 callees. 1 caller (ProcessAndProcessAndProcess1441).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and seventy-sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess600, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess896, ProcessAndProcessAndProcess897, FastHelper, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1442) based on the result. Part of the 0x821B9 process cluster. 404 lines. 7 callees. 1 caller (ProcessAndProcessAndProcess1441).
 [entrypoint.functions."0x821B9AD0"]
 name = "ProcessAndProcessAndProcess1456_821B9AD0"
 
@@ -42920,7 +43026,7 @@ name = "ProcessAndProcessAndProcess1458_821BDE80"
 [entrypoint.functions."0x821C36E0"]
 name = "ProcessAndProcessAndProcess1459_821C36E0"
 
-# Process a large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eightieth form). It takes a structure, copies memory (MemCpy), and drives sub-operations (ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess600, ProcessAndProcessAndProcess602, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess919, ProcessAndProcessAndProcess940, sub_822A5CA8) based on the result. Part of the 0x821C6 process cluster. 378 lines. 10 callees. 1 caller (sub_822AA5A0).
+# Process a large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eightieth form). It takes a structure, copies memory (MemCpy), and drives sub-operations (ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess600, ProcessAndProcessAndProcess602, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess919, FastHelper, sub_822A5CA8) based on the result. Part of the 0x821C6 process cluster. 378 lines. 10 callees. 1 caller (sub_822AA5A0).
 [entrypoint.functions."0x821C64E8"]
 name = "ProcessAndProcessAndProcess1460_821C64E8"
 
@@ -42932,7 +43038,7 @@ name = "ProcessAndProcessAndProcess1461_821C8020"
 [entrypoint.functions."0x821CB3A0"]
 name = "ProcessAndProcessAndProcess1462_821CB3A0"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-third form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess905, ProcessAndProcessAndProcess940, sub_8217D050, ProcessAndProcessAndProcess1454, sub_822824B8, sub_822961A0, sub_822B7D08, sub_82A46D90, sub_82B16EF0, sub_82B9B5D0) based on the result. Part of the 0x821CC process cluster. 479 lines. 11 callees. 1 caller (ProcessAndProcessAndProcess927).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and eighty-third form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess905, FastHelper, sub_8217D050, ProcessAndProcessAndProcess1454, sub_822824B8, sub_822961A0, sub_822B7D08, sub_82A46D90, sub_82B16EF0, sub_82B9B5D0) based on the result. Part of the 0x821CC process cluster. 479 lines. 11 callees. 1 caller (ProcessAndProcessAndProcess927).
 [entrypoint.functions."0x821CCF58"]
 name = "ProcessAndProcessAndProcess1463_821CCF58"
 
@@ -42964,11 +43070,11 @@ name = "ProcessAndProcessAndProcess1469_821EC008"
 [entrypoint.functions."0x821F4448"]
 name = "ProcessAndProcessAndProcess1470_821F4448"
 
-# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-first form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess940). Part of the 0x82221 process cluster. 165 lines. 1 callee. 5 callers (including ProcessAndProcessAndProcess927).
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-first form). It takes a structure and drives a sub-operation (FastHelper). Part of the 0x82221 process cluster. 165 lines. 1 callee. 5 callers (including ProcessAndProcessAndProcess927).
 [entrypoint.functions."0x82221860"]
 name = "ProcessAndProcessAndProcess1471_82221860"
 
-# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-second form). It takes a structure and drives a sub-operation (ProcessAndProcessAndProcess940). Part of the 0x82223 process cluster. 165 lines. 1 callee. 4 callers (including ProcessAndProcessAndProcess927).
+# Process a structure by wrapping a sub-operation (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-second form). It takes a structure and drives a sub-operation (FastHelper). Part of the 0x82223 process cluster. 165 lines. 1 callee. 4 callers (including ProcessAndProcessAndProcess927).
 [entrypoint.functions."0x82223C70"]
 name = "ProcessAndProcessAndProcess1472_82223C70"
 
@@ -43008,7 +43114,7 @@ name = "ProcessAndProcessAndProcess1480_8227A300"
 [entrypoint.functions."0x8227D988"]
 name = "ProcessAndProcessAndProcess1481_8227D988"
 
-# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1019, ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1486) based on the result. Part of the 0x8227F process cluster. 697 lines. 9 callees. 3 callers (including ProcessAndProcessAndProcess1448).
+# Process a very large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and second form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1019, ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess897, FastHelper, ProcessAndProcessAndProcess952, ProcessAndProcessAndProcess1486) based on the result. Part of the 0x8227F process cluster. 697 lines. 9 callees. 3 callers (including ProcessAndProcessAndProcess1448).
 [entrypoint.functions."0x8227F0B0"]
 name = "ProcessAndProcessAndProcess1482_8227F0B0"
 
@@ -43024,11 +43130,11 @@ name = "ProcessAndProcessAndProcess1484_82282B58"
 [entrypoint.functions."0x82282C48"]
 name = "ProcessAndProcessAndProcess1485_82282C48"
 
-# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1044, ProcessAndProcessAndProcess1045, ProcessAndProcessAndProcess529, ProcessAndProcessAndProcess896, ProcessAndProcessAndProcess926, ProcessAndProcessAndProcess952) based on the result. Part of the 0x82286 process cluster. 298 lines. 6 callees. 2 callers (including ProcessAndProcessAndProcess1442).
+# Process a large data structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and sixth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess1044, EndFrame, ProcessAndProcessAndProcess529, ProcessAndProcessAndProcess896, ProcessAndProcessAndProcess926, ProcessAndProcessAndProcess952) based on the result. Part of the 0x82286 process cluster. 298 lines. 6 callees. 2 callers (including ProcessAndProcessAndProcess1442).
 [entrypoint.functions."0x82286D00"]
 name = "ProcessAndProcessAndProcess1486_82286D00"
 
-# Process a large structure by incrementing a refcount atomically (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-seventh form). It takes a structure, increments a refcount atomically (IncrementRefcountAtomic), and drives sub-operations (ProcessAndProcessAndProcess1170, ProcessAndProcessAndProcess1255, ProcessAndProcessAndProcess1447, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess792, ProcessAndProcessAndProcess907, ProcessAndProcessAndProcess940, sub_82B9B5D0) based on the result. Part of the 0x82287 process cluster. 282 lines. 9 callees. 0 callers.
+# Process a large structure by incrementing a refcount atomically (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-seventh form). It takes a structure, increments a refcount atomically (IncrementRefcountAtomic), and drives sub-operations (ProcessAndProcessAndProcess1170, ProcessAndProcessAndProcess1255, ProcessAndProcessAndProcess1447, ProcessAndProcessAndProcess791, ProcessAndProcessAndProcess792, ProcessAndProcessAndProcess907, FastHelper, sub_82B9B5D0) based on the result. Part of the 0x82287 process cluster. 282 lines. 9 callees. 0 callers.
 [entrypoint.functions."0x822872D0"]
 name = "ProcessAndProcessAndProcess1487_822872D0"
 
@@ -43076,11 +43182,11 @@ name = "ProcessAndProcessAndProcess1497_822A0298"
 [entrypoint.functions."0x822A0B88"]
 name = "ProcessAndProcessAndProcess1498_822A0B88"
 
-# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess940) based on the result. Part of the 0x822A5 process cluster. 271 lines. 2 callees. 2 callers (including ProcessAndProcessAndProcess1460).
+# Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and ninety-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess897, FastHelper) based on the result. Part of the 0x822A5 process cluster. 271 lines. 2 callees. 2 callers (including ProcessAndProcessAndProcess1460).
 [entrypoint.functions."0x822A5CA8"]
 name = "ProcessAndProcessAndProcess1499_822A5CA8"
 
-# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundredth form). It takes a structure, copies memory (MemCpy), and drives sub-operations (ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess600, ProcessAndProcessAndProcess602, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess764, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess919, ProcessAndProcessAndProcess940, ProcessAndProcessAndProcess1499, sub_822CA9B0) based on the result. Part of the 0x822A5 process cluster. 530 lines. 11 callees. 1 caller (ProcessAndProcessAndProcess1447).
+# Process a very large data structure by copying memory (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundredth form). It takes a structure, copies memory (MemCpy), and drives sub-operations (ProcessAndProcessAndProcess1046, ProcessAndProcessAndProcess600, ProcessAndProcessAndProcess602, ProcessAndProcessAndProcess603, ProcessAndProcessAndProcess764, ProcessAndProcessAndProcess897, ProcessAndProcessAndProcess919, FastHelper, ProcessAndProcessAndProcess1499, sub_822CA9B0) based on the result. Part of the 0x822A5 process cluster. 530 lines. 11 callees. 1 caller (ProcessAndProcessAndProcess1447).
 [entrypoint.functions."0x822A5F80"]
 name = "ProcessAndProcessAndProcess1500_822A5F80"
 
@@ -43140,7 +43246,7 @@ name = "ProcessAndProcessAndProcess1513_822CA9B0"
 [entrypoint.functions."0x82A1B3E0"]
 name = "ProcessAndProcessAndProcess1514_82A1B3E0"
 
-# Process a structure by driving a state transition (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifteenth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess805, ProcessAndProcessAndProcess806, ProcessAndProcessAndProcess940) based on the result. Part of the 0x82A6C process cluster. 190 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess928).
+# Process a structure by driving a state transition (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and fifteenth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess805, ProcessAndProcessAndProcess806, FastHelper) based on the result. Part of the 0x82A6C process cluster. 190 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess928).
 [entrypoint.functions."0x82A6CAD8"]
 name = "ProcessAndProcessAndProcess1515_82A6CAD8"
 
@@ -43630,9 +43736,10 @@ name = "ProcessAndProcessAndProcess1636_82CE69B8"
 
 # Process a structure (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-seventh form). It takes a structure and checks its state, with no external sub-operations. Part of the 0x82B4E process cluster. 15 lines. 0 callees. 0 callers.
 [entrypoint.functions."0x82B4EEE0"]
-name = "ProcessAndProcessAndProcess1637_82B4EEE0"
-
-# Process a large structure by wrapping an element (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and one hundred and thirty-eighth form). It takes a structure, accesses an element (ElementAccess), dispatches by type (ProcessAndDispatchByType2), reads or resolves a value (ProcessAndReadOrResolveValue), stores an element (ProcessAndStoreElement2), stores an indexed value (ProcessAndStoreIndexedValue), and drives a sub-operation (sub_82BC68F0) based on the result. Part of the 0x82BDC process cluster. 206 lines. 6 callees. 0 callers.
+name = "UITextElement_DrawDispatch"
+# Tiny tail-call dispatcher on the element draw path: loads r3 = *(r3+16) (a sub-object),
+# then tail-calls r3->vtable[7]. The UIR render probe lists it as the "element draw
+# vtable" entry (see fable2_ui_render_probe.h).
 [entrypoint.functions."0x82BDC380"]
 name = "ProcessAndProcessAndProcess1638_82BDC380"
 
@@ -45358,9 +45465,11 @@ name = "ProcessAndProcessAndProcess2068_82C09FE8"
 
 # Process a large structure by wrapping sub-operations (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and sixty-ninth form). It takes a structure, checks its state, and drives sub-operations (ProcessAndProcessAndProcess2068, sub_82C0A1A0) based on the result. This is a frequently-called helper in the 0x82C0A process cluster. 189 lines. 2 callees. 4 callers (UIText_RenderElement, sub_82C0A590, sub_82C0A988, sub_82C0AA60).
 [entrypoint.functions."0x82C0A230"]
-name = "ProcessAndProcessAndProcess2069_82C0A230"
-
-# Process a very large data structure by inserting a linked-list node (seven hundred and one hundred and one hundred and one hundred and one hundred and three hundred and two hundred and three hundred and seventieth form). It takes a structure, allocates fresh memory (Allocate_OrDbgBreak), frees memory (Free_Thunk), inserts a linked-list node (ListNodeInsert), splices a linked-list node (SpliceListNode), sets a string (SetString), and drives sub-operations (sub_822F1EC0, sub_822F1F00, sub_826C3FA8) based on the result. This is a frequently-called processor in the 0x82C7E process cluster. 451 lines. 8 callees. 2 callers (ProcessAndProcessAndProcess2068 and sub_82C7E470).
+name = "UITextElement_FieldByIndex"
+# Element field getter: r3 = element, r5 = index+1. Returns a pointer to one of four
+# self-fields selected by (r5-1) (case 0 -> r3+12, case 1 -> r3, ...; indices >3 are
+# rejected). A small vertex-emit-path helper on the per-element draw (see
+# fable2_ui_render_probe.h / fable2_text_append.h).
 [entrypoint.functions."0x82C7E138"]
 name = "ProcessAndProcessAndProcess2070_82C7E138"
 
@@ -46658,9 +46767,11 @@ name = "ProcessAndProcessAndProcess2381_82C09368"
 
 # Process a structure by checking its state and driving many sub-operations (two thousand three hundred and eighty-third form). It takes a structure (a: fields at a->64, a->72, and a->68), a value (b), and a value (c); it checks the structure's state, and drives many sub-operations (CheckedCopy, ProcessAndProcessAndProcess1942, and more) based on the result. This is the "process this data" routine (two thousand three hundred and eighty-third form), part of the 0x82C09 process cluster. 179 lines. 2 callees. 2 callers (UIText_RenderElement and sub_82C09C80).
 [entrypoint.functions."0x82C09B50"]
-name = "ProcessAndProcessAndProcess2382_82C09B50"
-
-# Process a structure by checking its state and driving many sub-operations (two thousand three hundred and eighty-fourth form). It takes a structure (a: fields at a->0, a->44, a->136, a->64, and a->60); it checks the structure's state, and drives many sub-operations (Free_Thunk, ProcessAndProcessAndProcess2382, and more) based on the result. This is the "process this data" routine (two thousand three hundred and eighty-fourth form), part of the 0x82C09 process cluster. 153 lines. 2 callees. 1 caller (sub_82C09D88).
+name = "UITextElement_GrowBuffer"
+# Element accumulator: r3 = structure with a growable buffer at self+64/72 and a cursor
+# at self+68. Grows the buffer end (self+72) when r4 exceeds the current span
+# (self+72-self+64), otherwise wraps the cursor (self+68) by the remainder. One of the
+# vertex-emit-path calls on the per-element draw (see fable2_text_append.h).
 [entrypoint.functions."0x82C09C80"]
 name = "ProcessAndProcessAndProcess2383_82C09C80"
 
@@ -47373,8 +47484,12 @@ name = "ProcessAndProcessAndProcess2559_830053D0"
 name = "ProcessAndProcessAndProcess2560_8322BB68"
 
 # Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and twelfth form). It takes a value (a), a structure (b: field at b->0), a mask (c), a value (d), a value (e), and a float (f); it checks the value's state, and drives many sub-operations (GetTimebase, MemCpy_SdkRuntime, ProcessAndProcessAndProcess1934, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and twelfth form), part of the 0x82188 process cluster. 187 lines. 3 callees. 1 caller (ProcessAndProcessAndProcess1288).
+# Raw press bit-dispatch for the front-end (main) menu: ANDs the currently
+# pressed button mask (r5: Up=1, Down=2, Back=32, A=4096) against the element's
+# supported buttons (r10, u16 at r4) and drives per-button handling. Fires
+# ~twice per physical press (once per menu input element).
 [entrypoint.functions."0x82188F20"]
-name = "ProcessAndProcessAndProcess2561_82188F20"
+name = "FrontMenu_PressBitDispatch"
 
 # Process a structure by checking its state (two thousand four hundred and one hundred and thirteenth form). It takes a structure (a: field at a->12) and a flag (b); it checks the structure's state, and sets or clears a bit in the structure based on the flag. This is the "process this data" routine (two thousand four hundred and one hundred and thirteenth form), part of the 0x82C5C process cluster. 15 lines. 0 callees. 3 callers (sub_82C5A780, sub_82C5CC60, and sub_82C5A950).
 [entrypoint.functions."0x82C5C748"]
@@ -47665,8 +47780,11 @@ name = "ProcessAndProcessAndProcess2632_82C21028"
 name = "ProcessAndProcessAndProcess2633_82C21190"
 
 # Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and eighty-fifth form). It takes a value (a), a value (b), a structure (c: field at c->16), and a value (d); it checks the value's state, and drives many sub-operations (ProcessBinarySearch, Allocate_OrDbgBreak, ConstructAndIncrementCounter, and more) based on the result. This is the "process this data" routine (two thousand four hundred and one hundred and eighty-fifth form), part of the 0x82C21 process cluster. 400 lines. 16 callees. 0 callers (vtable-dispatched).
+# Get-or-create front-end UI element node: binary-searches an element table by
+# key and constructs a fresh node (with refcounted sub-objects) if absent.
+# Fires on effective menu actions (selection change / activation).
 [entrypoint.functions."0x82C217B8"]
-name = "ProcessAndProcessAndProcess2634_82C217B8"
+name = "FrontMenu_EnsureElement"
 
 # Process a value by checking its state and driving many sub-operations (two thousand four hundred and one hundred and eighty-sixth form). It takes a structure (a: fields at a->4, a->0, a->16, and a->8); it checks the value's state, and drives many sub-operations (Free_Thunk, ProcessAndProcessAndProcess1811, and more) based on the result, looping over elements. This is the "process this data" routine (two thousand four hundred and one hundred and eighty-sixth form), part of the 0x82C22 process cluster. 137 lines. 2 callees. 1 caller (sub_82C23198).
 [entrypoint.functions."0x82C22EC8"]
@@ -48988,3 +49106,163 @@ name = "LuaScriptError_FormatMessage_825ADB40"
 # script code (e.g. EScriptableAction tables).
 [entrypoint.functions."0x82514818"]
 name = "RegisterActionEffectTypeStrings_82514818"
+
+# Main-menu input event handler (one call per pending UI button press:
+# Up/Down/A/Back, incl. clamped presses). Called from
+# ProcessAndProcessAndProcess1287_82185C90 (per-frame event queue poller).
+# Named for the mod-menu hook (see src/diagnostics/fable2_modmenu.h).
+[entrypoint.functions."0x82BE3F30"]
+name = "FrontMenu_InputEvent"
+
+# ===========================================================================
+# Camera system (per-frame camera update)
+#
+# The runtime "Camera" object is the C++ class CECCamera (registration block
+# at 0x820B28E4 in the guest image carries the class name and the full method
+# list: GetFOV/SetFOV/SetFOVCut, GetRoll/SetRoll/SetRollCut, GetBlur/SetBlur/
+# SetBlurCut, SetFullScreenMotionBlurCut, SetAngles/SetAnglesCut, MoveTo/
+# MoveToCut, AddCameraShake, SetDOF, ...). The per-frame step below eases the
+# camera's current values toward their targets and hands the result to the
+# renderer; the PDB only has __imp__ thunks (no real names), so these are
+# best-effort names from reading the recompiled code + the image's class data.
+# ===========================================================================
+
+# The camera's per-frame update. Args: camera (r3, the CECCamera object),
+# flag (r4 low byte, a computed clz bit, not a plain bool). Body is a textbook
+# eased-camera frame step, all "current -> target" pairs scaled by a per-frame
+# coefficient (camera +0xE4):
+#   - vector lerp  result = lerp(cam+0x60, cam+0x90, cam+0xE4), then
+#     sub_822CBDC8(result)  -- a transform/interface op on the lerped vector
+#   - CECCameraUpdateRoll_822A4A68 advances the rotation state (cam+0xA0..0xB8)
+#     each frame using the 0xE4 coefficient (see that entry below)
+#   - 11 dt-integrated scalar channels: current += (target - current)*0xE4
+#     for (24/28),(32/56),(36/60),(40/64),(44/68),(48/72),(52/76),(80/84),
+#     (196/200),(204/208),(212/216)  -- angles, position, zoom, DOF, blur
+#   - ease/snap split: a channel snaps straight to its target when 0xE4 >= 1.0
+#     (global constant at 0x820994C0, image value 1.0) else it eases -- the
+#     "...Cut" vs plain setter semantics
+#   - renderer hand-off (gated by the flag): copies the integrated values to
+#     the global app hub *(0x8221B620): 6+1 floats into a state object,
+#     vtable[5] update call, and 3 floats into the render object at
+#     0x74/0x78/0x7C (the 0x7C write IS the full-screen motion blur; the
+#     disable-motion-blur hook zeroes the lfs at 0x822A49E8 inside this fn)
+#   - frame ramp: decrements an integer frame counter (cam+0xDC) each call and
+#     recomputes 0xE4 = cam+0xE8 / (cam+0xE8 - remaining) -- a per-frame
+#     countdown for multi-frame camera moves (MoveTo(duration) style)
+# The counter-decrement + dt-integration on every call is the "per-frame" tell:
+# a frame-countdown ramp is only correct if this runs exactly once per frame
+# per camera. Named CECCameraUpdateFrame (not just Update/Lerp/Tween) because
+# it is the stateful per-frame step of the specific CECCamera class; see the
+# section header for the class-name evidence.
+[entrypoint.functions."0x822A47C0"]
+name = "CECCameraUpdateFrame_822A47C0"
+
+# Rotation/roll easing sub-step called by CECCameraUpdateFrame. Args: camera
+# (r3). Reads the 32-byte rotation state at cam+0xA0..0xB8 and advances it with
+# the same 1.0 threshold used for the scalar channels (global at 0x820994C0),
+# i.e. it eases the view roll/rotation toward its target each frame. Named
+# CECCameraUpdateRoll for the rotation channel it advances.
+[entrypoint.functions."0x822A4A68"]
+name = "CECCameraUpdateRoll_822A4A68"
+
+# Camera-controller update (one of two per-frame camera drivers). Args: r3 =
+# the controller. Computes the frame delta-time from GetTimebase_8221EB58
+# ((timebase - t0)/t1), resolves the active camera from the manager's object
+# array (entries are {tag, obj} pairs; tag >= 87 == camera; picked by an active
+# slot byte or a binary search for the last tag-87 entry), adds the dt to
+# cam+0xC0, and calls CECCameraUpdateFrame on up to two cameras (two call
+# sites: active + secondary/interesting). Named UpdateCamerasTimebase to reflect
+# that it derives the frame dt from the timebase clock before stepping the
+# cameras (its twin sub_824246F0 derives dt differently -- see
+# UpdateCamerasGlobalDt). PDB: __imp__sub_821B9320, 12234 bytes.
+[entrypoint.functions."0x821B9320"]
+name = "UpdateCamerasTimebase_821B9320"
+
+# Camera-controller update (the other of the two per-frame camera drivers). Same
+# shape as UpdateCamerasTimebase but sources the frame delta-time from the
+# global dt float at 0x820994B4 (image initial value 0.0) instead of
+# GetTimebase: it copies that dt into this+84/this+88, primes the camera's frame
+# ramp (stfs 0xE4; stb 0x5C; stw 0xDC/0xE8), then calls CECCameraUpdateFrame on
+# up to two cameras (tag-87 active + secondary selection). Named
+# UpdateCamerasGlobalDt for the dt source that distinguishes it from its twin.
+# PDB: __imp__sub_824246F0, 8869 bytes.
+[entrypoint.functions."0x824246F0"]
+name = "UpdateCamerasGlobalDt_824246F0"
+
+# =====================================================================
+# Texture morph system (per-appearance skin texture build: hero/dog age,
+# morality, scars, makeup)
+# =====================================================================
+#
+# The hero/dog skin is not a plain file texture: each frame of appearance change
+# rebuilds it. The pipeline (top -> down, verified from the recompiled call
+# graph):  TextureMorph_CreateJob  ->  [orchestrator sub_82A56CA0, called from
+# fable_2_recomp.284.cpp:2324]  ->  TextureMorph_SelectFormat  ->
+# [render driver sub_82A56428: retry-in-a-loop under a critical section]  ->
+# TextureMorph_Render, which for the Baked path calls TextureCompress_Quantized
+# and for the Realtime path calls TextureMips_BuildGPU. A per-request mode byte
+# (the "realtime" flag) is what selects the two paths. See
+# plans/hero-dog-realtime-texture-morphing.md.
+
+# Texture morph -- job creation (per-request dispatcher). For each request (r30)
+# it calls vtable[1]; when the result is 18 (the texture-morph request type) it
+# builds a job object (r31) carrying the source width/height (r30+8/+12) and a
+# data pointer (via sub_82A57AC8 on r30+16), and copies the per-request
+# "realtime mode" byte from request+0x20 into job+0x60 -- exactly at 0x82A7607C
+# (lbz r9,32(r30) / stb r9,96(r31)). That copy is the hook point the
+# force-realtime-texture-morphing patch targets. Named TextureMorph_CreateJob
+# for the morph job it constructs. PDB: __imp__sub_82A76018, 1815 bytes.
+[entrypoint.functions."0x82A76018"]
+name = "TextureMorph_CreateJob_82A76018"
+
+# Texture morph -- output format selection. Chosen by the orchestrator
+# (sub_82A56CA0) before rendering; it returns a byte that gates whether the
+# texture is rendered at all. The format-choice itself is at
+# 0x82A56088..0x82A560E4: cmpwi r31,40, then it derives the target D3D format id
+# from a source-format byte (obj+36) with bit-masks and adds 40/37/35 (the
+# A8R8G8B8 / X8R8G8B8 / DXT-family choices). The plan attributes an engine
+# format table at 0x8331D988 (stride 0x70) to this step; the 0x83310000 format
+# page is referenced by the renderer, but that exact offset/stride is not
+# visible in the recompiled form. Named TextureMorph_SelectFormat for the
+# output-format decision. PDB: __imp__sub_82A55EC0, 14768 bytes.
+[entrypoint.functions."0x82A55EC0"]
+name = "TextureMorph_SelectFormat_82A55EC0"
+
+# Texture morph -- the renderer (the large texture builder). A width x height
+# texel loop (blt back to loc_82A69D50) that sets D3D render state (the
+# 0x821fXXXX API family), calls GetTimebase_8221EB58 six times, and references
+# the engine format page (0x83310000). It draws the morph, then for the BAKED
+# path compresses the result on the CPU via TextureCompress_Quantized (bl at
+# 0x82A6A3F4) while for the REALTIME path builds the mip chain on the GPU via
+# TextureMips_BuildGPU (bl at 0x82A6A554, gated on mip count > 0). The mode is
+# threaded in as the 4th arg (stb 959(r1)); it ultimately comes from the job
+# built by TextureMorph_CreateJob. Named TextureMorph_Render for the texture
+# build it performs. PDB: __imp__sub_82A69728, 46456 bytes.
+[entrypoint.functions."0x82A69728"]
+name = "TextureMorph_Render_82A69728"
+
+# Texture morph -- CPU-side texture compressor (Baked path). Called by
+# TextureMorph_Render (bl at 0x82A6A3F4); it takes the resolved source pixels
+# and packs them into a compact block format on the CPU (a 4-iteration block
+# loop feeding sub_8300BDF8 -> sub_8300BB78). NOTE: the recompiled body shows a
+# quantized/palette-style encode -- many 3-6 bit field extracts and 3 indexed
+# table lookups, and NO 5-bit (0x1F) DXT color masks -- so the plan's
+# "D3DFMT_DXT1/DXT2_3/DXN" label is an inference, not something the code spells
+# out; the safe description is a CPU quantizing texture compressor. This is the
+# step that reads GPU-resolved memory back on the CPU, which is why the
+# split-memory host shows black when it is not hooked. Named
+# TextureCompress_Quantized for the CPU quantizing compression. PDB:
+# __imp__sub_83008E98, 18173 bytes.
+[entrypoint.functions."0x83008E98"]
+name = "TextureCompress_Quantized_83008E98"
+
+# Texture morph -- GPU mip-chain builder (Realtime path). Called by
+# TextureMorph_Render (bl at 0x82A6A554); it takes a texture object, reads the
+# D3D texture at +4, gets the level count from ((tex+44)>>26)&0xF, and loops
+# over levels halving width/height ((w+1)>>1) while managing an 8200-byte-stride
+# mip-surface array -- i.e. it (re)generates the mip levels on the GPU. This is
+# the path the realtime mode takes instead of the CPU compress, so no CPU
+# readback of GPU-resolved memory is needed. Named TextureMips_BuildGPU for the
+# GPU mip generation. PDB: __imp__sub_821FC4A0, 6505 bytes.
+[entrypoint.functions."0x821FC4A0"]
+name = "TextureMips_BuildGPU_821FC4A0"

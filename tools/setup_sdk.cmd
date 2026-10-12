@@ -1,12 +1,12 @@
 @echo off
 rem ===========================================================================
 rem Fetch the prebuilt ReXGlue SDK (v0.10.0, win-amd64) into
-rem thirdparty\rexglue-sdk\ (relative to the repo root). No-op if already
+rem out\tooling\rexglue-sdk-0.10.0\ (relative to the repo root). No-op if already
 rem present.
 rem
 rem The release zip contains a top-level "win-amd64" folder, so the SDK root
 rem (bin/, include/, lib/) ends up at:
-rem   thirdparty\rexglue-sdk\win-amd64
+rem   out\tooling\rexglue-sdk-0.10.0\win-amd64
 rem
 rem Run automatically by build.cmd when the SDK is missing; can also be run
 rem manually.
@@ -14,7 +14,7 @@ rem ===========================================================================
 setlocal
 set "REPO=%~dp0.."
 set "VER=0.10.0"
-set "DEST=%REPO%\thirdparty\rexglue-sdk"
+set "DEST=%REPO%\out\tooling\rexglue-sdk-0.10.0"
 set "ZIPNAME=rexglue-sdk-%VER%-win-amd64.zip"
 set "URL=https://github.com/rexglue/rexglue-sdk/releases/download/v%VER%/%ZIPNAME%"
 
@@ -29,8 +29,8 @@ if errorlevel 1 (
     exit /b 1
 )
 
-if not exist "%REPO%\thirdparty" mkdir "%REPO%\thirdparty"
-if exist "%DEST%" rmdir /s /q "%DEST%"
+rem Keep the source submodule and any local edits separate from downloaded SDKs.
+if not exist "%DEST%" mkdir "%DEST%"
 
 echo Downloading %URL%
 curl -L --fail -sS -o "%TEMP%\%ZIPNAME%" "%URL%"

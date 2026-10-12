@@ -19,6 +19,10 @@
 #                                     changes are rewritten, so the next game
 #                                     build recompiles just those); from then
 #                                     on build.sh keeps using that recompiler
+#                                     (its path is recorded in
+#                                     thirdparty/rexglue-sdk-src/codegen-tool.path;
+#                                     delete that file to go back to the
+#                                     prebuilt one)
 #   tools/build_sdk_mac.sh -mvk-private
 #                                     also build MoltenVK with Metal's private
 #                                     API (MVK_USE_METAL_PRIVATE_API) and stage
@@ -140,16 +144,22 @@ if [ ! -d "$SRC/.git" ]; then
         https://github.com/rexglue/rexglue-sdk.git "$SRC"
 fi
 
-# 2. Fixes. The tree is reset to the tag first so an updated patch applies
-#    on a re-run (the build only recompiles what the patch touches).
+# 2. Fixes. If exactly this patch is already applied, leave the tree alone:
+#    resetting and re-applying rewrites the patched headers with new mtimes
+#    and recompiles most of the plugin and runtime for nothing. Otherwise
+#    (first run, or an updated patch) reset the tree to the tag and apply.
 cd "$SRC"
-git checkout -q -- .
-if git apply --check "$PATCH" 2>/dev/null; then
-    git apply "$PATCH"
-    echo "Applied $(basename "$PATCH")"
+if git apply --reverse --check "$PATCH" 2>/dev/null; then
+    echo "$(basename "$PATCH") already applied"
 else
-    echo "Error: $PATCH does not apply to $SRC (SDK tag $TAG expected)." >&2
-    exit 1
+    git checkout -q -- .
+    if git apply --check "$PATCH" 2>/dev/null; then
+        git apply "$PATCH"
+        echo "Applied $(basename "$PATCH")"
+    else
+        echo "Error: $PATCH does not apply to $SRC (SDK tag $TAG expected)." >&2
+        exit 1
+    fi
 fi
 
 # 3. Configure + build only what the game loads. The presets use Ninja
@@ -184,18 +194,21 @@ if ! stage_built; then
     exit 1
 fi
 # 5. Optional: regenerate the recompiled code with the patched recompiler.
-#    The codegen fingerprint covers the inputs and the SDK version, not the
-#    tool, so drop the stamp to force one run; unchanged files are not
-#    rewritten.
+#    The codegen fingerprint (generated/<module>/codegen.stamp) covers the
+#    inputs and the SDK version, not the tool, so a same-version tool would
+#    report "up to date": --ignore-stamp forces one run. Unchanged files are
+#    not rewritten. The tool's path is recorded for build.sh, which passes it
+#    to CMake (FABLE2_CODEGEN_TOOL) so codegen runs the build triggers later
+#    keep the fixes, whichever configuration (-debug or not) built it.
 if [ "$CODEGEN" = 1 ]; then
     TOOL="$(find "$SRC/out" -path "*/$CONFIG/*" -name rexglue -type f -perm -u+x 2>/dev/null | head -1)"
     [ -n "$TOOL" ] || { echo "Error: no rexglue binary under $SRC/out." >&2; exit 1; }
     [ -f "$REPO/default.xex" ] || { echo "Error: default.xex not found in $REPO (codegen needs it)." >&2; exit 1; }
+    echo "$TOOL" > "$SRC/codegen-tool.path"
     echo "Regenerating generated/ with $TOOL ..."
-    rm -f "$REPO/generated/codegen.stamp"
-    (cd "$REPO" && "$TOOL" codegen fable_2_manifest.toml) > "$SRC/codegen.log" 2>&1 || {
+    (cd "$REPO" && "$TOOL" codegen --ignore-stamp fable_2_manifest.toml) > "$SRC/codegen.log" 2>&1 || {
         tail -30 "$SRC/codegen.log"; echo "Error: codegen failed; full output in $SRC/codegen.log" >&2; exit 1; }
-    grep -i -E "wrote|written|changed|unchanged" "$SRC/codegen.log" | tail -5 || true
+    grep -i -E "wrote|written|changed|unchanged|up to date" "$SRC/codegen.log" | tail -5 || true
     echo "Codegen done (log: $SRC/codegen.log). Now rebuild the game: ./build.sh -release fable_2"
 fi
 

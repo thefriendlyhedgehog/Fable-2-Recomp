@@ -1,0 +1,4 @@
+# Legacy catalogue location. Runtime/build definitions now share one source:
+# constants/game_versions.json, including the dump metadata previously here.
+# See constants/README.md for adding or denying a version and regenerating
+# the C#/C++/CMake object arrays. This file no longer duplicates those hashes.

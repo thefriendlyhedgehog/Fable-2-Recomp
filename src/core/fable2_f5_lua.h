@@ -64,15 +64,37 @@ REXCVAR_DEFINE_STRING(
     "CScriptManager::RunScript / loadfile resolves it, relative to the VFS "
     "root (data/). Default scripts/recomp/F5.lua -> <gamedataroot>/data/scripts/recomp/F5.lua.");
 
+// Current game-state name (defined in src/diagnostics/fable2_state_probe.h,
+// which is included later in main.cpp). Logged before each RunScript call so
+// a crash is self-explanatory (front-end vs. gameplay vs. cutscene). Must be
+// declared at top level (NOT inside fable2::f5lua - nested namespace
+// declarations nest, which would create fable2::f5lua::fable2::stateprobe).
+namespace fable2::stateprobe {
+const char* CurrentStateName();
+}
+
 namespace fable2::f5lua {
 
 // Guest-memory helpers live in fable2::textappend (src/diagnostics/fable2_text_append.h).
 namespace ta = fable2::textappend;
 
 // The captured CScriptManager "run file" callable (guest addresses).
+// The FIRST .lua dispatch (boot: 'miscellaneous/GeneralScriptManager.lua' via
+// the canonical file-runner method) is pinned; later same-method dispatches
+// refresh `this` in case the manager instance moves (a stale instance
+// null-dereferences guest memory - the "read of guest 0x0" access violation).
+// Dispatches of OTHER methods that also take a .lua path are ignored.
 inline std::atomic<uint32_t> g_this{0};   // CScriptManager instance
 inline std::atomic<uint32_t> g_method{0}; // member fn (CScriptManager::RunScript)
-inline std::atomic<bool> g_captured_once{false};
+// this[0] as read at capture time (vtable-like; stable for the object's
+// lifetime). A freed/reused block almost always differs, which catches the
+// stale-`this` case even when the new first word happens to be a plausible
+// pointer.
+inline std::atomic<uint32_t> g_expected_head{0};
+
+// Monotonic F5 run counter: the crash log (fable2_f5_lua.log is flushed per
+// line) always shows the last run number before a hard crash.
+inline std::atomic<uint32_t> g_run_count{0};
 
 // Latched by the per-frame F5 poll; consumed by poll_mainloop.
 inline std::atomic<bool> g_f5_pending{false};
@@ -81,13 +103,16 @@ inline bool g_f5_down_prev = false;
 inline std::mutex& log_mtx() { static std::mutex m; return m; }
 inline std::FILE* logf() {
   static std::FILE* f = [] {
+    // Release build: don't create the F5-Lua log file. logline() is
+    // null-guarded, so the F5 feature runs without logging.
+    return nullptr;
 #if defined(_WIN32)
-    // Open with shared read/write so the log can be read live while the game
-    // holds it open (plain fopen() takes an exclusive lock on Windows).
-    std::FILE* out = ::_fsopen("fable2_f5_lua.log", "a", _SH_DENYNO);
-    return out;
+    // // Open with shared read/write so the log can be read live while the game
+    // // holds it open (plain fopen() takes an exclusive lock on Windows).
+    // std::FILE* out = ::_fsopen("fable2_f5_lua.log", "a", _SH_DENYNO);
+    // return out;
 #else
-    return std::fopen("fable2_f5_lua.log", "a");
+    // return std::fopen("fable2_f5_lua.log", "a");
 #endif
   }();
   return f;
@@ -140,6 +165,37 @@ inline bool run_external(PPCContext& ctx, uint8_t* base) {
     return false;
   }
 
+  // Safety: the captured CScriptManager instance must still be alive. RunScript
+  // reads *(this) first and calls through it, so a freed/recreated manager
+  // (head == 0, 0xFFFFFFFF, 0xCD.. free-fill, or an otherwise implausible
+  // pointer) null-dereferences downstream. Skip this run; the next .lua
+  // dispatch refreshes the capture. (Log line is flushed, so the run counter
+  // below proves the guard fired before any crash.)
+  if (!ta::rdable2(base, this_ptr, 8)) {
+    logline("[f5] this=0x%08X no longer readable; skipping (capture refreshes)\n",
+            this_ptr);
+    return false;
+  }
+  const uint32_t head = ta::load_be(base, this_ptr);
+  const bool head_plausible =
+      (head >= 0x1000 && head < 0x82000000 && ta::rdable2(base, head, 4)) ||
+      (head >= 0x82000000 && head <= 0x82FFFFFF);
+  if (head == 0 || head == 0xFFFFFFFF || !head_plausible) {
+    logline("[f5] this=0x%08X head=0x%08X not a live manager; skipping\n", this_ptr,
+            head);
+    return false;
+  }
+  const uint32_t expected_head = g_expected_head.load();
+  if (expected_head != 0 && head != expected_head) {
+    logline("[f5] this=0x%08X head=0x%08X != expected 0x%08X (manager moved or "
+            "freed); skipping\n",
+            this_ptr, head, expected_head);
+    return false;
+  }
+
+  const uint32_t run_n = g_run_count.fetch_add(1) + 1;
+  logline("[f5] run #%u state='%s'\n", run_n, fable2::stateprobe::CurrentStateName());
+
   // 1) Source C-string in guest memory.
   const uint32_t src = ta::guest_alloc(ctx, base, path.size() + 1);
   if (!src || !ta::wr2(base, src, path.size() + 1)) {
@@ -162,9 +218,9 @@ inline bool run_external(PPCContext& ctx, uint8_t* base) {
 
   // DIAG: trace each guest step so fable2_f5_lua.log shows the last step before
   // a hard crash (the log is flushed per line).
-  logline("[f5] step1 src=0x%08X str_obj=0x%08X this=0x%08X method=0x%08X -> "
-          "ConstructRefCounted\n",
-          src, str_obj, this_ptr, method);
+  logline("[f5] step1 src=0x%08X str_obj=0x%08X this=0x%08X head=0x%08X method=0x%08X "
+          "-> ConstructRefCounted\n",
+          src, str_obj, this_ptr, head, method);
   // ConstructRefCounted_8222CF18(dest, cstring, len=-1): build the game string.
   ctx.r3.u32 = str_obj;
   ctx.r4.u32 = src;
@@ -258,12 +314,28 @@ extern "C" void LuaBind_RunScript_82806168(PPCContext& ctx, uint8_t* base) {
     if (this_ptr != 0 && method != 0 && pathbuf[0]) {
       const std::string p(pathbuf);
       const bool is_lua = p.size() > 4 && p.compare(p.size() - 4, 4, ".lua") == 0;
-      // Pin the RunScript callable: the dispatch whose argument is a .lua path.
-      if (is_lua && g_captured_once.exchange(true) == false) {
-        g_this.store(this_ptr);
-        g_method.store(method);
-        logline("[f5] RunScript callable pinned this=0x%08X method=0x%08X path='%s'\n", this_ptr,
-                method, pathbuf);
+      // Capture the RunScript callable from .lua-arg dispatches. IMPORTANT:
+      // the shared dispatcher serves MANY bound methods whose string argument
+      // is a .lua path (the RunScript file runner AND register-style APIs -
+      // e.g. 0x825B27D0 for 'CameraFunctions.lua', 0x825B26A8 for
+      // 'AIHistory.lua'). Only the canonical file-runner method (first seen
+      // at boot, 0x825ADB40, dispatched for
+      // 'miscellaneous/GeneralScriptManager.lua' / 'Quests/QuestManager.lua')
+      // actually runs a file - calling the others with a path does nothing.
+      // So: the first capture establishes the canonical (method, this); later
+      // captures refresh `this` ONLY when the method matches (the manager
+      // instance can move over a session); all other methods are ignored.
+      const uint32_t prev_this = g_this.load(std::memory_order_relaxed);
+      const uint32_t prev_method = g_method.load(std::memory_order_relaxed);
+      if (is_lua && (prev_this == 0 || (method == prev_method && this_ptr != prev_this))) {
+        g_method.store(method, std::memory_order_relaxed);
+        g_this.store(this_ptr, std::memory_order_relaxed);
+        const uint32_t head_now =
+            ta::rdable2(base, this_ptr, 4) ? ta::load_be(base, this_ptr) : 0;
+        g_expected_head.store(head_now, std::memory_order_relaxed);
+        logline("[f5] RunScript callable (re)captured this=0x%08X method=0x%08X "
+                "head=0x%08X path='%s'\n",
+                this_ptr, method, head_now, pathbuf);
       }
     }
   }

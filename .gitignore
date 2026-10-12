@@ -3,6 +3,7 @@ default.xex
 /data/
 /nxeart/
 /$SystemUpdate/
+/Gamefiles/
 
 # --- Build artifacts --------------------------------------------------------
 out
@@ -47,6 +48,14 @@ __pycache__/
 !tools/repro/*.py
 !tools/apply_recomp_patches.py
 !tools/fable2_control.py
+!tools/prepare_runtime_sdk.py
+!tools/generate_game_versions.py
+!tests/*.py
+!tools/prepare_renderer_mspack.py
+!tools/stage_renderer_sdk.py
+!tools/create_app_icon.ps1
+!assets/app-icon.png
+!docs/screenshots/launcher.png
 # macOS/Linux build entry points (counterparts of build.cmd / tools/*.cmd).
 !build.sh
 !tools/setup_sdk.sh

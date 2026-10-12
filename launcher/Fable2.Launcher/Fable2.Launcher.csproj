@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Fable2Launcher</AssemblyName>
+    <AssemblyTitle>Fable 2 Recompiled Launcher</AssemblyTitle>
+    <Product>Fable 2 Recompiled</Product>
+    <ApplicationIcon>..\..\assets\app-icon.ico</ApplicationIcon>
+    <RootNamespace>Fable2Launcher</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\constants\GameVersions.cs" Link="Constants\GameVersions.cs" />
+    <!-- Reusable Xbox 360 disc reader/extractor (GDFX + ISO 9660 + STFS), shared
+         with tools/x360extract. Consumed as a project reference; produces X360ExtractCore.dll. -->
+    <ProjectReference Include="..\..\tools\x360extract\lib\X360Extract.Core.csproj" />
+    <Resource Include="..\..\assets\app-icon.png" Link="Assets\app-icon.png" />
+  </ItemGroup>
+</Project>

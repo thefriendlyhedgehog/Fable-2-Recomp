@@ -8,26 +8,78 @@
 //
 // Once a correct hash has been confirmed, a marker file
 // (cache/default.xex.sha256) records the hash together with the file's
-// size and last-write time. On future starts the marker is read and, as
-// long as the file's size + mtime still match, the full-file hash pass is
+// canonical source path, size and last-write time. On future starts the
+// marker is read and, if all of these still match, the full-file hash pass is
 // skipped. If the file ever changes (e.g. a different xex was dropped in),
 // the hash is recomputed and the marker updated.
 
 #pragma once
 
 #include <chrono>
+#include <algorithm>
+#include "../../constants/game_versions.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 
 namespace fable2::xexverify {
 
-// SHA-256 of the default.xex this build was recompiled against.
-inline constexpr char kExpectedSha256[] =
-    "88c4ef2e18e65409444d1b068eff921d1f7e180a5ae64edc64ba6b0872372662";
+// Only catalogue entries validated for this guest-code group can be enabled.
+// A single-edition build further restricts the accepted entry by profile ID.
+#ifdef FABLE2_BUILD_PROFILE
+inline constexpr std::string_view kBuildProfile = FABLE2_BUILD_PROFILE;
+#elif defined(FABLE2_GOTY_COMPATIBLE)
+inline constexpr std::string_view kBuildProfile = versions::kCompatibleProfile;
+#else
+inline constexpr std::string_view kBuildProfile = versions::kDefaultProfile;
+#endif
+inline constexpr bool IsEnabledVersion(const versions::GameVersion& version) {
+  return version.compatible && version.code_group == versions::kCodeGroup &&
+      (kBuildProfile == versions::kCompatibleProfile || version.id == kBuildProfile);
+}
+inline bool IsAcceptedHash(std::string_view hash) {
+  for (const auto& version : versions::kVersions)
+    if (version.hash == hash) return IsEnabledVersion(version);
+  return false;
+}
+inline const std::string kExpectedHashes = [] {
+  std::string result;
+  for (const auto& version : versions::kVersions) {
+    if (!IsEnabledVersion(version)) continue;
+    if (!result.empty()) result += "; ";
+    result += std::string(version.name) + ": " + std::string(version.hash);
+  }
+  return result;
+}();
+inline int DefaultLanguage(std::string_view hash) {
+  const auto* version = versions::Find(hash);
+  return version ? version->language : 0;  // Unknown hashes never get a locale.
+}
+
+// Content markers are sanity checks, not a complete game-file hash manifest.
+inline bool HasCompatibleContent(const std::filesystem::path& root, std::string_view hash) {
+  const auto* version = versions::Find(hash);
+  if (!version || !IsEnabledVersion(*version)) return false;
+  const auto file = [&](std::string_view path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(root / path, ec) && !ec;
+  };
+  const auto directory = [&](std::string_view path) {
+    std::error_code ec;
+    return std::filesystem::is_directory(root / path, ec) && !ec;
+  };
+  const bool has_rejection_rule = !version->reject_files.empty() ||
+      !version->reject_directories.empty();
+  if (has_rejection_rule &&
+      std::all_of(version->reject_files.begin(), version->reject_files.end(), file) &&
+      std::all_of(version->reject_directories.begin(), version->reject_directories.end(), directory))
+    return false;
+  return std::all_of(version->required_files.begin(), version->required_files.end(), file);
+}
 
 namespace detail {
 
@@ -131,6 +183,7 @@ inline bool Sha256File(const std::filesystem::path& path, std::string& hex_out) 
     if (n <= 0) break;
     sha.Update(buf, size_t(n));
   }
+  if (in.bad()) return false;
   uint8_t digest[32];
   sha.Final(digest);
   static const char* digits = "0123456789abcdef";
@@ -151,6 +204,7 @@ struct Marker {
   std::string hash;
   uint64_t size = 0;
   uint64_t mtime = 0;
+  std::string source_path;
 };
 
 inline bool ReadMarker(const std::filesystem::path& path, Marker& m) {
@@ -162,10 +216,11 @@ inline bool ReadMarker(const std::filesystem::path& path, Marker& m) {
     const std::string key = line.substr(0, eq);
     const std::string value = line.substr(eq + 1);
     if (key == "hash") m.hash = value;
+    else if (key == "source_path") m.source_path = value;
     else if (key == "size") m.size = strtoull(value.c_str(), nullptr, 10);
     else if (key == "mtime") m.mtime = strtoull(value.c_str(), nullptr, 10);
   }
-  m.ok = !m.hash.empty() && m.hash == kExpectedSha256;
+  m.ok = IsAcceptedHash(m.hash);
   return m.ok;
 }
 
@@ -174,6 +229,7 @@ inline void WriteMarker(const std::filesystem::path& path, const Marker& m) {
   std::filesystem::create_directories(path.parent_path(), ec);
   std::ofstream out(path, std::ios::trunc);
   out << "hash=" << m.hash << "\n"
+      << "source_path=" << m.source_path << "\n"
       << "size=" << m.size << "\n"
       << "mtime=" << m.mtime << "\n";
 }
@@ -187,35 +243,38 @@ struct Outcome {
   uint64_t mtime = 0;
 };
 
-// Verify xex_path against kExpectedSha256, using marker_path to skip the
+// Verify xex_path against the enabled catalogue entries, using marker_path to skip the
 // hash pass when a previous start already verified this exact file.
 inline Outcome Check(const std::filesystem::path& xex_path,
                      const std::filesystem::path& marker_path) {
   Outcome o;
-  if (!std::filesystem::is_regular_file(xex_path)) return o;
   std::error_code ec;
+  if (!std::filesystem::is_regular_file(xex_path, ec) || ec) return o;
+  const std::string source_path = std::filesystem::weakly_canonical(xex_path, ec).string();
+  if (ec) return o;
   const uint64_t size = uint64_t(std::filesystem::file_size(xex_path, ec));
   if (ec) return o;
   auto last_write = std::filesystem::last_write_time(xex_path, ec);
   if (ec) return o;
   o.size = size;
   o.mtime =
-      uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+      uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                    last_write.time_since_epoch())
                    .count());
 
   // Fast path: a previous start verified this exact file (hash, size and
   // mtime all match) -> skip the full-file hash pass.
   Marker m;
-  if (ReadMarker(marker_path, m) && m.size == o.size && m.mtime == o.mtime) {
+  if (ReadMarker(marker_path, m) && m.source_path == source_path &&
+      m.size == o.size && m.mtime == o.mtime) {
     o.result = Result::VerifiedCached;
     o.actual_hash = m.hash;
     return o;
   }
 
   if (!Sha256File(xex_path, o.actual_hash)) return o;  // ReadFailed
-  if (o.actual_hash == kExpectedSha256) {
-    WriteMarker(marker_path, Marker{true, o.actual_hash, o.size, o.mtime});
+  if (IsAcceptedHash(o.actual_hash)) {
+    WriteMarker(marker_path, Marker{true, o.actual_hash, o.size, o.mtime, source_path});
     o.result = Result::VerifiedFresh;
   } else {
     o.result = Result::Mismatch;
