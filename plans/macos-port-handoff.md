@@ -235,11 +235,16 @@ the same way as Xenia's ROV path.
   `fable_2_082.log`) had **2 corrupted frames** (shots 02 and 12: blue hair
   and lantern, stray light shafts; 13-16% of pixels): presumably the GPU
   now reads memory the CPU rewrites after the draw was recorded (the copy
-  used to snapshot it). Next: run the same flicker test without zero-copy
-  to confirm the corruption is zero-copy's; then find which data races
-  (e.g. dynamic vertex or constant buffers the game rewrites per frame),
-  and either snapshot those ranges or delay CPU writes until the GPU is
-  done with them.
+  used to snapshot it). **Confirmed zero-copy's (2026-10-14):** the same
+  test without it (`fable_2_083.log`) has all 15 shots within 1.1-1.8% of
+  shot 00 (snowflakes); with it, shots 02 and 12 are 12-15% off (scored
+  with the same script; zero-copy shots kept in `out/flicker_zero_copy/`).
+  Likely mechanism: the guest reuses memory once it sees the GPU's
+  completion (fence/event writes), which the command processor reports
+  when it records the draws, before the host GPU runs them. Next: find
+  which data races (e.g. dynamic vertex or constant buffers the game
+  rewrites per frame), and either snapshot those ranges or hold the
+  guest-visible completion writes until the host submission is done.
 - Done: pipeline store loading, thread QoS, async pipeline waits. Tried and
   dropped: upload hoisting (`vulkan_hoist_shared_memory_uploads`; no
   measurable gain, causes flicker).
