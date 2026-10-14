@@ -95,7 +95,8 @@ Repo: `/Volumes/MacMiniExternal/Games/fable2/Fable-2-Recomp`. Game content
   rotates at `log_max_file_size_mb` (default 5): older parts are
   `fable_2_NNN.1.log`, `.2`, ... The analyzer reads all parts.
 - Metal System Trace summary: `tools/summarize_gputrace.py <trace>` (see its
-  docstring for the `xctrace record` line).
+  docstring for the `xctrace record` line); busy/idle time, gaps and GPU
+  time by encoder kind for the game alone: `tools/gputrace_timeline.py`.
 
 The user's settings (`render_target_path_vulkan = "fsi"` is already the
 app's default on macOS): `fable2_config.toml` has `[patches] game_msaa = 0` (forces the
@@ -229,6 +230,20 @@ the same way as Xenia's ROV path.
   frame): shared memory uploads, each ending the render pass (the 216
   restarts "after a barrier, copy or upload" per frame). Fragment work is
   ~70% of the time.
+- **Trace of the current copy-mode build (2026-10-14,
+  `out/profile/copy_1014.trace`, 10 s at the trail, uncapped;
+  `tools/gputrace_timeline.py`):** the GPU is busy with the game 79% of
+  the time, ~90% without one 1.4 s hitch, so idle gaps are no longer the
+  big loss. GPU time: render encoders ~84% (69.8% opened by
+  vkCmdBeginRenderPass, 14.3% MoltenVK render pass restarts), uploads
+  ~12% (the "Blit Command #" intervals on the compute channel are the
+  copies themselves, 10%; vkCmdCopyBuffer encoders 1.8%,
+  vkCmdCopyBufferToImage 0.9%), compute dispatches 2%. Per Metal frame
+  (about two per game frame): ~200 render passes, ~30 restarts, ~100
+  shared memory upload encoders. **Other apps used the GPU during the
+  runs:** RuneLite 24% of all GPU time in the trace, the Claude app 5%;
+  close them for fps comparisons (today's copy mode measured 12.8 fps vs.
+  13.4 before).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

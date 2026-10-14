@@ -81,3 +81,4 @@ thirdparty/android-ndk/
 XenonRecomp
 TODO.md
 !tools/shot_diff.py
+!tools/gputrace_timeline.py
