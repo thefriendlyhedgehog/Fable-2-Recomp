@@ -178,6 +178,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; **causes the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
+| - | `vulkan_gpu_progress_wait` | submit and wait for the host GPU before every guest-visible GPU progress write (fixes zero-copy corruption, costs ~35% fps) |
 | - | `vulkan_zero_copy_race_log` | every 5 s, `[race]` lines: guest pages the CPU rewrote while a pending submission read them, with what for and how many used bytes changed (restart; works with or without zero-copy) |
 
 ## Open problems, with evidence
@@ -265,6 +266,26 @@ the same way as Xenia's ROV path.
   with a guest call to address 0 in the hero/dog texture builder thread;
   the rerun loaded fine (intermittent; zero-copy lets GPU resolves write
   guest memory directly, which copy mode never does).
+  **Writers (`fable_2_087.log`, the race log names the faulting host
+  code):** both big vertex buffers are filled by guest 0x822BEAA0 (a
+  large CPU vertex generator, unrolled by 4; called via 0x821C3CD0 >
+  0x821C36E0 > 0x821BA2D0 > 0x822A9E60), the small vertex range by
+  sub_82CD3C50 (via 0x82C44F50 ... 0x82C08310), an index page by
+  sub_822964F8.
+  **Fence test confirms the cause (`vulkan_gpu_progress_wait`, live):**
+  submitting and waiting for the host GPU before every guest-visible
+  progress write (EVENT_WRITE_SHD, MEM_WRITE, COND_WRITE to memory,
+  scratch writeback, INTERRUPT) leaves no changed bytes in the race log
+  and a clean flicker test (`fable_2_088.log`: all 15 shots 1.2-2.0% off
+  shot 00, `tools/shot_diff.py`). But it waits ~26 times per frame and
+  costs more than zero-copy gains: **11.2 fps** with it vs. 17.4 without
+  (zero-copy, uncapped, `fable_2_089.log`; copy mode ~13.4). Next: make
+  the guest see progress late instead of waiting for it: defer those
+  writes (and interrupts) until the submission before them completes,
+  ending the submission there without waiting, applying them from the
+  completion check and from the command processor's idle wait, and
+  flushing them before a WAIT_REG_MEM that polls memory. Or wait only
+  for the progress events that guard these buffers.
   The detector (`vulkan_zero_copy_race_log`, restart) works with or
   without zero-copy: per page it keeps the last submission that read it,
   what for (`SharedMemory::RequestKind`, set by each caller) and the used
