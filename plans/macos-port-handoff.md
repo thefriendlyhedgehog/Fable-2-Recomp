@@ -178,6 +178,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; **causes the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
+| - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
 | - | `vulkan_gpu_progress_wait` | submit and wait for the host GPU before every guest-visible GPU progress write (fixes zero-copy corruption, costs ~35% fps) |
 | - | `vulkan_zero_copy_race_log` | every 5 s, `[race]` lines: guest pages the CPU rewrote while a pending submission read them, with what for and how many used bytes changed (restart; works with or without zero-copy) |
 
@@ -279,13 +280,29 @@ the same way as Xenia's ROV path.
   and a clean flicker test (`fable_2_088.log`: all 15 shots 1.2-2.0% off
   shot 00, `tools/shot_diff.py`). But it waits ~26 times per frame and
   costs more than zero-copy gains: **11.2 fps** with it vs. 17.4 without
-  (zero-copy, uncapped, `fable_2_089.log`; copy mode ~13.4). Next: make
-  the guest see progress late instead of waiting for it: defer those
-  writes (and interrupts) until the submission before them completes,
-  ending the submission there without waiting, applying them from the
-  completion check and from the command processor's idle wait, and
-  flushing them before a WAIT_REG_MEM that polls memory. Or wait only
-  for the progress events that guard these buffers.
+  (zero-copy, uncapped, `fable_2_089.log`; copy mode ~13.4).
+  **Deferred progress (`vulkan_defer_gpu_progress`, live; 2026-10-14):**
+  those writes and interrupts queue, in order, until the submission with
+  the commands before them completes (applied between packets, at swaps,
+  and while the command processor idles or polls in WAIT_REG_MEM, which
+  also submits what they wait for; COND_WRITE flushes before reading
+  memory; `vulkan_defer_gpu_progress_submit` also submits at each
+  delayed write). Correct: no race, clean flicker test (`fable_2_090.log`,
+  shots 1.5-2.1%), no deadlock, nothing let through early. But **12.2
+  fps** (11.7 with the early submit; zero-copy alone 17.3, copy mode 12.8
+  on the same build, `fable_2_091`-`096`). The command processor then
+  idles ~48% of the time behind two alternating writes, 0x1FC83004 and
+  0x1FC84004 (a per-frame fence the game waits on every frame).
+  **Why no correct zero-copy is faster here:** at the racing writes the
+  GPU is 1-4 submissions behind (`fable_2_095.log`, uncapped); making
+  only those writers wait would mean ~1.5 waits per frame of ~80 ms on
+  average. The game rewrites its dynamic vertex buffers every frame
+  expecting the GPU to be about a frame behind at most; copy mode hides
+  that by snapshotting, zero-copy can only keep the GPU that close, which
+  loses the CPU/GPU overlap. Zero-copy pays only once the GPU is faster
+  (or with a shader-side redirect of the racing vertex fetches to a
+  snapshot buffer). So copy mode stays the default; GPU time (FSI
+  specialization, NoContraction) is the next lever.
   The detector (`vulkan_zero_copy_race_log`, restart) works with or
   without zero-copy: per page it keeps the last submission that read it,
   what for (`SharedMemory::RequestKind`, set by each caller) and the used
