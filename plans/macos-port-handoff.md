@@ -178,6 +178,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; **causes the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
+| - | `vulkan_zero_copy_race_log` | every 5 s, `[race]` lines: guest pages the CPU rewrote while a pending submission read them, with what for and how many used bytes changed (restart; works with or without zero-copy) |
 
 ## Open problems, with evidence
 
@@ -241,10 +242,37 @@ the same way as Xenia's ROV path.
   with the same script; zero-copy shots kept in `out/flicker_zero_copy/`).
   Likely mechanism: the guest reuses memory once it sees the GPU's
   completion (fence/event writes), which the command processor reports
-  when it records the draws, before the host GPU runs them. Next: find
-  which data races (e.g. dynamic vertex or constant buffers the game
-  rewrites per frame), and either snapshot those ranges or hold the
-  guest-visible completion writes until the host submission is done.
+  when it records the draws, before the host GPU runs them.
+  **Racing data found (2026-10-14, `--vulkan_zero_copy_race_log=true`,
+  `fable_2_085.log`, gameplay at the trail, capped):** every 5 s, the
+  CPU rewrites the bytes pending draws read in a handful of pages, all
+  vertex data except one texture:
+  - 0x1A568000 and 0x1A5E8000 (vertex fetches from about 0x1A56AE00 and
+    0x1A5EAE00): ~4.5-5.4 KB changed, every window. Looks like a
+    double-buffered dynamic vertex buffer refilled per frame.
+  - 0x1F434000 (vertex fetch at 0x1F437000): 20-30 bytes.
+  - 0x1FAA0000 (texture): ~1.5 KB, most windows.
+  On the console the game reuses these only after the GPU's fence, which
+  the emulator writes as soon as the draws are recorded
+  (`ExecutePacketType3_EVENT_WRITE_SHD` stores the value immediately).
+  xenia-edge has the same design (zero-copy default on ARM64) and the same
+  gap. Fix options: (1) hold guest-visible GPU progress (EVENT_WRITE_SHD,
+  MEM_WRITE, INTERRUPT, the write half of WAIT_REG_MEM, scratch writeback)
+  until the host submission completes, first as a test that submits and
+  waits there; (2) on a CPU write fault to a page a pending submission
+  reads (what the detector sees), make the writer wait for that
+  submission. One load with the detector on (`fable_2_084.log`) crashed
+  with a guest call to address 0 in the hero/dog texture builder thread;
+  the rerun loaded fine (intermittent; zero-copy lets GPU resolves write
+  guest memory directly, which copy mode never does).
+  The detector (`vulkan_zero_copy_race_log`, restart) works with or
+  without zero-copy: per page it keeps the last submission that read it,
+  what for (`SharedMemory::RequestKind`, set by each caller) and the used
+  byte span; a CPU write fault to a page whose submission is pending saves
+  the page first, and once the submission completes it compares the used
+  bytes. Vertex buffers that skip RequestRange (same address and size as
+  before, an upstream shortcut that lasts across frames) are noted with
+  `NoteRangeUsed`.
 - Done: pipeline store loading, thread QoS, async pipeline waits. Tried and
   dropped: upload hoisting (`vulkan_hoist_shared_memory_uploads`; no
   measurable gain, causes flicker).
@@ -252,6 +280,30 @@ the same way as Xenia's ROV path.
   frame report's pass list), the host render target path (`fbo`) for
   comparison, fewer FSI restarts, `game_msaa` effects on render targets that
   stay 4x.
+
+## Upstream (checked 2026-10-14)
+
+ReXGlue does not take GPU emulation changes upstream (#456 closed as not
+planned; `development` has no Vulkan or shared memory fixes), so GPU fixes
+come from xenia-edge, xenia-canary or open PRs. Still worth porting, most
+useful first (taken: the two bugs in the fixed list):
+- xenia-edge 3ec3e8a05 `spirv_moltenvk_allow_contraction`: SPIRV-Cross
+  turns NoContraction ops into `optnone` helpers; our position,
+  interpolator and quad patch code use them. Check the MSL and depth
+  prepass equality first (`tools/sdk_offline`).
+- AArch64 memory ordering in codegen (`development` bd833a2a fences for
+  sync/lwsync/eieio, 7f7c92ef stwcx. as a compare-and-swap, issue #462);
+  needs `generated/` regenerated.
+- xenia-edge 8d75a1779 / 830e60518: FSI pixel shaders specialized for the
+  render target formats, blending and sample count (we are mostly
+  fragment-bound); large, conflicts with our translator changes.
+- PR #501: WaitMultiple sleeps instead of polling (audio worker 75% of a
+  core to 2%).
+- PR #490: texture `exp_adjust` read from the wrong fetch constant word
+  (`spirv_translator_fetch.cpp`).
+- MoltenVK 1.4.1 to 1.4.3 (`development` e9d44256).
+Nothing upstream for render passes ended by uploads or for MoltenVK's
+adaptive tessellation cost.
 
 ## Frame anatomy at the brazier (frame report, 1x main scene)
 
@@ -276,6 +328,12 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- Two upstream bugs (found by checking xenia-edge and the ReXGlue
+  issues): the presenter never recorded the format of its final effect
+  pipeline, so every paint waited for the previous one and recreated it
+  (rexglue #507); the index buffer cache dropped an entry overlapped by a
+  CPU write only if the entry ended past the write (xenia-edge 1b0e9d00e).
+  Not yet measured.
 - Ordering fixes from a review against upstream Xenia and xenia-edge:
   hoisted uploads only for first uses of pages in a submission, texture
   validity checked before watching, same-image load barrier; pipelines
