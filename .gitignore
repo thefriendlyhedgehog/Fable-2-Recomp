@@ -67,6 +67,7 @@ __pycache__/
 !tools/mac_sweep_sheet.py
 !tools/mac_resolve_dumps.py
 !tools/mac_capture.sh
+!tools/mac_autotest.sh
 !tools/sdk_patch_refresh.sh
 
 # --- Fetched/external toolchain deps (created by tools/setup_sdk*.cmd). -------

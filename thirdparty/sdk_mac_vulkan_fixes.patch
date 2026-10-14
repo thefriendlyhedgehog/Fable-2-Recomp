@@ -133,8 +133,29 @@ index 2cf24c4..85ab717 100644
  REXCVAR_DECLARE(bool, occlusion_query_enable);
  REXCVAR_DECLARE(int32_t, query_occlusion_fake_sample_count);
  
+diff --git a/include/rex/graphics/pipeline/shader/shader.h b/include/rex/graphics/pipeline/shader/shader.h
+index 4cf3854..c1a662b 100644
+--- a/include/rex/graphics/pipeline/shader/shader.h
++++ b/include/rex/graphics/pipeline/shader/shader.h
+@@ -661,6 +661,16 @@ class Shader {
+     // strip orientation, for implementations without unconditional geometry
+     // shader support.
+     kRectangleListAsTriangleStrip,
++
++    // Non-adaptive quad patches with a uniform integer tessellation factor N
++    // (discrete, or continuous with an even N), for hosts where tessellation
++    // is expensive (MoltenVK runs the vertex and tessellation control stages
++    // of every tessellated draw in a compute pass, splitting the render pass).
++    // Non-indexed triangle list of N * N * 6 host vertices per patch; the
++    // vertex shader works out the patch and its domain location (an N x N
++    // grid, the same points the tessellator would generate) from the vertex
++    // index, and runs the guest domain shader with them.
++    kQuadPatchAsTriangleList,
+   };
+   // For packing HostVertexShaderType in bit fields.
+   static constexpr uint32_t kHostVertexShaderTypeBitCount = 4;
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..50dce39 100644
+index dce3dbf..a46c7ba 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -151,6 +151,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -156,7 +177,17 @@ index dce3dbf..50dce39 100644
    };
    static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
  
-@@ -399,6 +404,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -307,6 +312,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     uint32_t vertex_index_max;
+     float tessellation_factor_range_min;
+     float tessellation_factor_range_max;
++
++    // HostVertexShaderType::kQuadPatchAsTriangleList cell diagonal pattern.
++    uint32_t quad_patch_diagonals;
+   };
+ 
+   enum ConstantBuffer : uint32_t {
+@@ -399,6 +407,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
      bool demote_to_helper_invocation;
      bool sample_rate_shading;
@@ -166,6 +197,15 @@ index dce3dbf..50dce39 100644
    };
  
    SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
+@@ -879,6 +890,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     kSystemConstantEdramRTKeepMask,
+     kSystemConstantEdramRTClamp,
+     kSystemConstantEdramBlendConstant,
++    kSystemConstantTessellationFactorRangeMax,
++    kSystemConstantQuadPatchDiagonals,
+   };
+   spv::Id uniform_system_constants_;
+   spv::Id uniform_float_constants_;
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
 index d26cd4f..1b6bdc9 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
@@ -181,6 +221,30 @@ index d26cd4f..1b6bdc9 100644
  
      void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip);
  
+diff --git a/include/rex/graphics/primitive_processor.h b/include/rex/graphics/primitive_processor.h
+index 2945731..3862a7f 100644
+--- a/include/rex/graphics/primitive_processor.h
++++ b/include/rex/graphics/primitive_processor.h
+@@ -164,6 +164,9 @@ class PrimitiveProcessor {
+   }
+   bool IsExpandingPointSpritesInVS() const { return expand_point_sprites_in_vs_; }
+   bool IsExpandingRectangleListsInVS() const { return expand_rectangle_lists_in_vs_; }
++  // Whether to use HostVertexShaderType::kQuadPatchAsTriangleList for eligible
++  // quad patches; only for backends whose translator supports it.
++  void SetExpandQuadPatchesInVS(bool expand) { expand_quad_patches_in_vs_ = expand; }
+ 
+   // Submission must be open to call (may request the index buffer in the shared
+   // memory).
+@@ -633,6 +636,9 @@ class PrimitiveProcessor {
+   bool convert_quad_lists_to_triangle_lists_ = false;
+   bool expand_point_sprites_in_vs_ = false;
+   bool expand_rectangle_lists_in_vs_ = false;
++  // HostVertexShaderType::kQuadPatchAsTriangleList for eligible quad patches
++  // (set by the backend if its translator supports it).
++  bool expand_quad_patches_in_vs_ = false;
+ 
+   // Byte offsets used, for simplicity, directly as handles.
+   size_t builtin_ib_offset_two_triangle_strips_ = SIZE_MAX;
 diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
 index 4d85a2b..a902a06 100644
 --- a/include/rex/graphics/shared_memory.h
@@ -1039,7 +1103,7 @@ index 8f2fcb0..c7f886a 100644
          return 0;
        }));
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..dca9eb8 100644
+index 1774f97..02ed274 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
 @@ -21,11 +21,44 @@
@@ -1117,7 +1181,17 @@ index 1774f97..dca9eb8 100644
  }
  
  uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
-@@ -1750,6 +1788,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -309,6 +347,9 @@ void SpirvShaderTranslator::StartTranslation() {
+       {"edram_rt_keep_mask", offsetof(SystemConstants, edram_rt_keep_mask), type_uint4_array_2},
+       {"edram_rt_clamp", offsetof(SystemConstants, edram_rt_clamp), type_float4_array_4},
+       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant), type_float4_},
++      {"tessellation_factor_range_max", offsetof(SystemConstants, tessellation_factor_range_max),
++       type_float_},
++      {"quad_patch_diagonals", offsetof(SystemConstants, quad_patch_diagonals), type_uint_},
+   };
+   id_vector_temp_.clear();
+   id_vector_temp_.reserve(rex::countof(system_constants));
+@@ -1750,6 +1791,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
    builder_->addMemberName(type_struct_per_vertex, kOutputPerVertexMemberPosition, "gl_Position");
    builder_->addMemberDecoration(type_struct_per_vertex, kOutputPerVertexMemberPosition,
                                  spv::DecorationBuiltIn, spv::BuiltInPosition);
@@ -1134,7 +1208,193 @@ index 1774f97..dca9eb8 100644
    if (output_per_vertex_member_clip_distance_ != UINT32_MAX) {
      builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_clip_distance_,
                              "gl_ClipDistance");
-@@ -3052,34 +3100,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+@@ -1925,6 +1976,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+     }
+     if (IsSpirvVertexShader() || IsSpirvComputeShader()) {
+       spv::Id vertex_index;
++      spv::Id quad_patch_domain_x = spv::NoResult;
++      spv::Id quad_patch_domain_y = spv::NoResult;
+       spv::Id compute_vertex_processing_index = spv::NoResult;
+       spv::Id compute_load_vertex_index = spv::NoResult;
+       spv::Id compute_vertex_index_is_32bit = spv::NoResult;
+@@ -1984,37 +2037,131 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+       }
+       if (IsSpirvVertexShader() &&
+           (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
+-           host_vertex_shader_type ==
+-               Shader::HostVertexShaderType::kRectangleListAsTriangleStrip)) {
++           host_vertex_shader_type == Shader::HostVertexShaderType::kRectangleListAsTriangleStrip ||
++           host_vertex_shader_type == Shader::HostVertexShaderType::kQuadPatchAsTriangleList)) {
+         spv::Id const_uint_2 = builder_->makeUintConstant(2);
+-        spv::Id two_triangle_strip_vertex_index = vertex_index;
+-        // Extract the primitive index from the two-triangle strip vertex index.
+-        vertex_index = builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
+-                                             two_triangle_strip_vertex_index, const_uint_2);
+-        if (host_vertex_shader_type ==
+-            Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+-          spv::Id const_uint_3 = builder_->makeUintConstant(3);
+-          spv::Id guest_vertex_in_guest_primitive;
+-          if (IsSpirvRectangleListVertexLoopEnabled()) {
+-            // In the rectangle VS fallback loop, process guest vertices 0, 1 and
+-            // 2 in every host invocation.
+-            guest_vertex_in_guest_primitive =
+-                builder_->createLoad(var_main_rectangle_guest_vertex_index_, spv::NoPrecision);
+-          } else {
+-            // Rectangle lists consume 3 guest vertices per primitive. Clamp the
+-            // synthetic fourth host vertex to guest vertex 2.
+-            spv::Id host_vertex_in_guest_primitive = builder_->createBinOp(
+-                spv::OpBitwiseAnd, type_uint_, two_triangle_strip_vertex_index, const_uint_3);
+-            guest_vertex_in_guest_primitive = builder_->createTriOp(
+-                spv::OpSelect, type_uint_,
+-                builder_->createBinOp(spv::OpIEqual, type_bool_, host_vertex_in_guest_primitive,
+-                                      const_uint_3),
+-                const_uint_2, host_vertex_in_guest_primitive);
++        if (host_vertex_shader_type == Shader::HostVertexShaderType::kQuadPatchAsTriangleList) {
++          // N * N cells of 2 triangles per patch, N = the tessellation factor
++          // (an integer here, checked by the primitive processor). Each cell
++          // is split along one of its diagonals, as selected by
++          // quad_patch_diagonals: (1,0)-(0,1) into (0,0) (1,0) (0,1) and
++          // (1,0) (1,1) (0,1), or (0,0)-(1,1) into (0,0) (1,0) (1,1) and
++          // (0,0) (1,1) (0,1). Clockwise in the domain like the tessellator's
++          // triangles (vertex order cw, upper-left domain origin).
++          id_vector_temp_.clear();
++          id_vector_temp_.push_back(
++              builder_->makeIntConstant(kSystemConstantTessellationFactorRangeMax));
++          spv::Id grid_size = builder_->createUnaryOp(
++              spv::OpConvertFToU, type_uint_,
++              builder_->createLoad(builder_->createAccessChain(spv::StorageClassUniform,
++                                                               uniform_system_constants_,
++                                                               id_vector_temp_),
++                                   spv::NoPrecision));
++          spv::Id const_uint_6 = builder_->makeUintConstant(6);
++          spv::Id vertices_per_patch = builder_->createBinOp(
++              spv::OpIMul, type_uint_,
++              builder_->createBinOp(spv::OpIMul, type_uint_, grid_size, grid_size), const_uint_6);
++          spv::Id vertex_in_patch =
++              builder_->createBinOp(spv::OpUMod, type_uint_, vertex_index, vertices_per_patch);
++          spv::Id cell = builder_->createBinOp(spv::OpUDiv, type_uint_, vertex_in_patch,
++                                               const_uint_6);
++          spv::Id corner = builder_->createBinOp(spv::OpUMod, type_uint_, vertex_in_patch,
++                                                 const_uint_6);
++          spv::Id const_uint_1 = builder_->makeUintConstant(1);
++          spv::Id cell_x = builder_->createBinOp(spv::OpUMod, type_uint_, cell, grid_size);
++          spv::Id cell_y = builder_->createBinOp(spv::OpUDiv, type_uint_, cell, grid_size);
++          // Diagonal (0,0)-(1,1): mode 1, or mode 2 / 3 when the cell is (2)
++          // or is not (3) in the top-left or the bottom-right quarter.
++          id_vector_temp_.clear();
++          id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantQuadPatchDiagonals));
++          spv::Id diagonals = builder_->createLoad(
++              builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
++                                          id_vector_temp_),
++              spv::NoPrecision);
++          spv::Id half_grid_size = builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
++                                                         grid_size, const_uint_1);
++          spv::Id same_quarter_sides = builder_->createBinOp(
++              spv::OpLogicalEqual, type_bool_,
++              builder_->createBinOp(spv::OpULessThan, type_bool_, cell_x, half_grid_size),
++              builder_->createBinOp(spv::OpULessThan, type_bool_, cell_y, half_grid_size));
++          spv::Id main_diagonal = builder_->createBinOp(
++              spv::OpLogicalOr, type_bool_,
++              builder_->createBinOp(spv::OpIEqual, type_bool_, diagonals, const_uint_1),
++              builder_->createBinOp(
++                  spv::OpLogicalOr, type_bool_,
++                  builder_->createBinOp(
++                      spv::OpLogicalAnd, type_bool_,
++                      builder_->createBinOp(spv::OpIEqual, type_bool_, diagonals, const_uint_2),
++                      same_quarter_sides),
++                  builder_->createBinOp(
++                      spv::OpLogicalAnd, type_bool_,
++                      builder_->createBinOp(spv::OpIEqual, type_bool_, diagonals,
++                                            builder_->makeUintConstant(3)),
++                      builder_->createUnaryOp(spv::OpLogicalNot, type_bool_,
++                                              same_quarter_sides))));
++          // x + 1: corners 1, 3, 4 for (1,0)-(0,1), 1, 2, 4 for (0,0)-(1,1).
++          // y + 1: corners 2, 4, 5 for both.
++          spv::Id corner_x = builder_->createBinOp(
++              spv::OpBitwiseAnd, type_uint_,
++              builder_->createBinOp(
++                  spv::OpShiftRightLogical, type_uint_,
++                  builder_->createTriOp(spv::OpSelect, type_uint_, main_diagonal,
++                                        builder_->makeUintConstant(0b010110),
++                                        builder_->makeUintConstant(0b011010)),
++                  corner),
++              const_uint_1);
++          spv::Id corner_y = builder_->createBinOp(
++              spv::OpBitwiseAnd, type_uint_,
++              builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
++                                    builder_->makeUintConstant(0b110100), corner),
++              const_uint_1);
++          spv::Id grid_size_float =
++              builder_->createUnaryOp(spv::OpConvertUToF, type_float_, grid_size);
++          quad_patch_domain_x = builder_->createNoContractionBinOp(
++              spv::OpFDiv, type_float_,
++              builder_->createUnaryOp(
++                  spv::OpConvertUToF, type_float_,
++                  builder_->createBinOp(spv::OpIAdd, type_uint_, cell_x, corner_x)),
++              grid_size_float);
++          quad_patch_domain_y = builder_->createNoContractionBinOp(
++              spv::OpFDiv, type_float_,
++              builder_->createUnaryOp(
++                  spv::OpConvertUToF, type_float_,
++                  builder_->createBinOp(spv::OpIAdd, type_uint_, cell_y, corner_y)),
++              grid_size_float);
++          // The guest index (patch index) of the patch.
++          vertex_index =
++              builder_->createBinOp(spv::OpUDiv, type_uint_, vertex_index, vertices_per_patch);
++        } else {
++          spv::Id two_triangle_strip_vertex_index = vertex_index;
++          // Extract the primitive index from the two-triangle strip vertex index.
++          vertex_index = builder_->createBinOp(spv::OpShiftRightLogical, type_uint_,
++                                               two_triangle_strip_vertex_index, const_uint_2);
++          if (host_vertex_shader_type ==
++              Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
++            spv::Id const_uint_3 = builder_->makeUintConstant(3);
++            spv::Id guest_vertex_in_guest_primitive;
++            if (IsSpirvRectangleListVertexLoopEnabled()) {
++              // In the rectangle VS fallback loop, process guest vertices 0, 1 and
++              // 2 in every host invocation.
++              guest_vertex_in_guest_primitive =
++                  builder_->createLoad(var_main_rectangle_guest_vertex_index_, spv::NoPrecision);
++            } else {
++              // Rectangle lists consume 3 guest vertices per primitive. Clamp the
++              // synthetic fourth host vertex to guest vertex 2.
++              spv::Id host_vertex_in_guest_primitive = builder_->createBinOp(
++                  spv::OpBitwiseAnd, type_uint_, two_triangle_strip_vertex_index, const_uint_3);
++              guest_vertex_in_guest_primitive = builder_->createTriOp(
++                  spv::OpSelect, type_uint_,
++                  builder_->createBinOp(spv::OpIEqual, type_bool_, host_vertex_in_guest_primitive,
++                                        const_uint_3),
++                  const_uint_2, host_vertex_in_guest_primitive);
++            }
++            vertex_index = builder_->createBinOp(
++                spv::OpIAdd, type_uint_,
++                builder_->createBinOp(spv::OpIMul, type_uint_, vertex_index, const_uint_3),
++                guest_vertex_in_guest_primitive);
+           }
+-          vertex_index = builder_->createBinOp(
+-              spv::OpIAdd, type_uint_,
+-              builder_->createBinOp(spv::OpIMul, type_uint_, vertex_index, const_uint_3),
+-              guest_vertex_in_guest_primitive);
+         }
+         // Check if the index needs to be loaded from the index buffer.
+         spv::Id load_vertex_index = builder_->createBinOp(
+@@ -2431,6 +2578,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+         if_cp_indexed.makeEndIf();
+       } else {
+         store_register_component(0, 0, vertex_index_float);
++        if (quad_patch_domain_x != spv::NoResult) {
++          // As kQuadDomainPatchIndexed: r0.x = patch index, r0.yz = domain
++          // location xy, r1.x = swizzle.
++          store_register_component(0, 1, quad_patch_domain_x);
++          store_register_component(0, 2, quad_patch_domain_y);
++          if (register_count() >= 2) {
++            store_register_component(1, 0, const_float_0_);
++          }
++        }
+       }
+     }
+   }
+@@ -3052,34 +3208,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
        // failed the depth / stencil test, and there are no depth and stencil
        // values to conditionally write after running the shader to check if
        // samples don't additionally need to be discarded.
@@ -1324,6 +1584,76 @@ index 76f5600..7b6953e 100644
  }
  
  void TextureCache::Texture::MarkAsUsed() {
+diff --git a/src/graphics/primitive_processor.cpp b/src/graphics/primitive_processor.cpp
+index d49e9c3..356c59c 100644
+--- a/src/graphics/primitive_processor.cpp
++++ b/src/graphics/primitive_processor.cpp
+@@ -350,6 +350,24 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+         // - 4D5307F1 - ground - continuous.
+         // - 4D5307F2 - garden ground - adaptive.
+         host_vertex_shader_type = Shader::HostVertexShaderType::kQuadDomainPatchIndexed;
++        if (expand_quad_patches_in_vs_ &&
++            tessellation_mode != xenos::TessellationMode::kAdaptive) {
++          // Without adaptive factors, the tessellator uses the maximum factor
++          // for all edges and the inside. With an integer factor (discrete,
++          // equal spacing) or an even one (continuous, fractional even
++          // spacing), it splits the patch into a uniform grid, which can be
++          // drawn as a plain triangle list.
++          float factor = regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f;
++          uint32_t grid_size = uint32_t(factor);
++          uint64_t host_vertex_count =
++              uint64_t(vgt_draw_initiator.num_indices) * grid_size * grid_size * 6;
++          if (factor >= 1.0f && factor <= 64.0f && float(grid_size) == factor &&
++              (tessellation_mode == xenos::TessellationMode::kDiscrete || !(grid_size & 1)) &&
++              host_vertex_count <= (uint64_t(1) << 26)) {
++            host_vertex_shader_type = Shader::HostVertexShaderType::kQuadPatchAsTriangleList;
++            host_primitive_type = xenos::PrimitiveType::kTriangleList;
++          }
++        }
+         break;
+       default:
+         // TODO(Triang3l): Support line patches.
+@@ -429,18 +447,29 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
+   cacheable.host_primitive_reset_enabled = false;
+   cacheable.host_index_buffer_handle = SIZE_MAX;
+   if (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
+-      host_vertex_shader_type == Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+-    // As two-triangle strips, with guest indices being either autogenerated or
+-    // fetched via DMA.
+-    uint32_t primitive_count = guest_draw_vertex_count;
+-    if (host_vertex_shader_type == Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+-      primitive_count /= 3;
++      host_vertex_shader_type == Shader::HostVertexShaderType::kRectangleListAsTriangleStrip ||
++      host_vertex_shader_type == Shader::HostVertexShaderType::kQuadPatchAsTriangleList) {
++    // As two-triangle strips (or, for quad patches, a non-indexed triangle
++    // list without a host index buffer), with guest indices being either
++    // autogenerated or fetched via DMA in the vertex shader.
++    if (host_vertex_shader_type == Shader::HostVertexShaderType::kQuadPatchAsTriangleList) {
++      uint32_t grid_size =
++          uint32_t(regs.Get<float>(XE_GPU_REG_VGT_HOS_MAX_TESS_LEVEL) + 1.0f);
++      cacheable.host_draw_vertex_count = guest_draw_vertex_count * grid_size * grid_size * 6;
++      cacheable.host_index_format = xenos::IndexFormat::kInt32;
++      cacheable.host_primitive_reset_enabled = false;
++    } else {
++      uint32_t primitive_count = guest_draw_vertex_count;
++      if (host_vertex_shader_type ==
++          Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
++        primitive_count /= 3;
++      }
++      cacheable.host_draw_vertex_count = GetTwoTriangleStripIndexCount(primitive_count);
++      cacheable.host_index_format = xenos::IndexFormat::kInt32;
++      cacheable.host_primitive_reset_enabled = true;
++      assert_true(builtin_ib_offset_two_triangle_strips_ != SIZE_MAX);
++      cacheable.host_index_buffer_handle = builtin_ib_offset_two_triangle_strips_;
+     }
+-    cacheable.host_draw_vertex_count = GetTwoTriangleStripIndexCount(primitive_count);
+-    cacheable.host_index_format = xenos::IndexFormat::kInt32;
+-    cacheable.host_primitive_reset_enabled = true;
+-    assert_true(builtin_ib_offset_two_triangle_strips_ != SIZE_MAX);
+-    cacheable.host_index_buffer_handle = builtin_ib_offset_two_triangle_strips_;
+     if (vgt_draw_initiator.source_select == xenos::SourceSelect::kAutoIndex) {
+       cacheable.index_buffer_type = ProcessedIndexBufferType::kHostBuiltinForAuto;
+       cacheable.host_shader_index_endian = xenos::Endian::kNone;
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
 index ec0df7c..7730c5b 100644
 --- a/src/graphics/shared_memory.cpp
@@ -1368,7 +1698,7 @@ index ec0df7c..7730c5b 100644
  
  bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..35ca34a 100644
+index 001f36b..9019d73 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,8 +11,11 @@
@@ -1392,7 +1722,17 @@ index 001f36b..35ca34a 100644
  #include <rex/graphics/registers.h>
  #include <rex/graphics/vulkan/command_processor.h>
  #include <rex/graphics/vulkan/pipeline_cache.h>
-@@ -60,6 +65,86 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+@@ -47,6 +52,9 @@
+ #include <rex/ui/vulkan/util.h>
+ 
+ // Legacy backend compatibility aliases for shared readback controls.
++REXCVAR_DECLARE(bool, vulkan_quad_patches_in_vs);
++REXCVAR_DECLARE(int32_t, vulkan_quad_patch_diagonals);
++
+ REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
+                     "Read render-to-texture results on the CPU")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -60,6 +68,86 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                      "used placeholder pipelines to avoid visible flashing")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -1479,7 +1819,7 @@ index 001f36b..35ca34a 100644
  REXCVAR_DEFINE_BOOL(vulkan_submit_on_primary_buffer_end, true, "GPU/Vulkan",
                      "Submit command buffer when PM4 primary buffer ends")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -69,6 +154,11 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
+@@ -69,6 +157,11 @@ REXCVAR_DEFINE_BOOL(vulkan_dynamic_rendering, true, "GPU/Vulkan",
                      "device (falls back to render passes otherwise)")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -1491,7 +1831,7 @@ index 001f36b..35ca34a 100644
  namespace rex::graphics::vulkan {
  
  namespace {
-@@ -547,6 +637,129 @@ bool CompileGlslToSpirvInternal(EShLanguage stage, std::string_view source,
+@@ -547,6 +640,129 @@ bool CompileGlslToSpirvInternal(EShLanguage stage, std::string_view source,
    return true;
  }
  
@@ -1621,7 +1961,7 @@ index 001f36b..35ca34a 100644
  }  // namespace
  
  // Generated with `xb buildshaders`.
-@@ -580,6 +793,7 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
+@@ -580,6 +796,7 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
                                                 system::KernelState* kernel_state)
      : CommandProcessor(graphics_system, kernel_state),
        deferred_command_buffer_(*this),
@@ -1629,7 +1969,7 @@ index 001f36b..35ca34a 100644
        transient_descriptor_allocator_uniform_buffer_(
            static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
                ->vulkan_device(),
-@@ -1898,6 +2112,7 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1898,6 +2115,7 @@ bool VulkanCommandProcessor::SetupContext() {
  
  void VulkanCommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
@@ -1637,7 +1977,7 @@ index 001f36b..35ca34a 100644
    InvalidateAllVertexBufferResidency();
    ShutdownOcclusionQueryResources();
  
-@@ -2272,6 +2487,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2272,6 +2490,7 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
@@ -1645,7 +1985,7 @@ index 001f36b..35ca34a 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -3058,8 +3274,12 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+@@ -3058,8 +3277,12 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
      if (force_end_render_pass) {
        EndRenderPass();
      }
@@ -1658,7 +1998,7 @@ index 001f36b..35ca34a 100644
    EndRenderPass();
    for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
      auto it_next = std::next(it);
-@@ -3255,9 +3475,12 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3255,9 +3478,12 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
  
  void VulkanCommandProcessor::EndRenderPass() {
    assert_true(submission_open_);
@@ -1671,7 +2011,7 @@ index 001f36b..35ca34a 100644
    if (current_render_pass_ == VK_NULL_HANDLE) {
      deferred_command_buffer_.CmdVkEndRendering();
    } else {
-@@ -3593,6 +3816,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3593,6 +3819,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -1683,7 +2023,7 @@ index 001f36b..35ca34a 100644
  
    const RegisterFile& regs = *register_file_;
    (void)index_buffer_info;
-@@ -3613,6 +3841,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3613,6 +3844,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
    if (edram_mode == xenos::EdramMode::kCopy) {
      // Special copy handling.
@@ -1693,7 +2033,7 @@ index 001f36b..35ca34a 100644
      return IssueCopy();
    }
  
-@@ -3681,6 +3912,49 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3681,6 +3915,49 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
  
@@ -1743,7 +2083,23 @@ index 001f36b..35ca34a 100644
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
        pixel_shader ? (vertex_shader->writes_interpolators() &
-@@ -3835,7 +4109,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3708,6 +3985,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     }
+ 
+     // Process primitives.
++    primitive_processor_->SetExpandQuadPatchesInVS(REXCVAR_GET(vulkan_quad_patches_in_vs));
+     if (!primitive_processor_->Process(primitive_processing_result)) {
+       return draw_fail("primitive_processing");
+     }
+@@ -3731,6 +4009,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+     if (host_vertex_shader_type != Shader::HostVertexShaderType::kVertex &&
+         host_vertex_shader_type != Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
+         host_vertex_shader_type != Shader::HostVertexShaderType::kRectangleListAsTriangleStrip &&
++        host_vertex_shader_type != Shader::HostVertexShaderType::kQuadPatchAsTriangleList &&
+         !Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
+       REXGPU_ERROR("Unsupported Vulkan host vertex shader type {}",
+                    uint32_t(host_vertex_shader_type));
+@@ -3835,7 +4114,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -1755,7 +2111,7 @@ index 001f36b..35ca34a 100644
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
-@@ -3849,18 +4126,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3849,18 +4131,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // textures.
    VkPipeline pipeline;
    void* pipeline_handle = nullptr;
@@ -1802,7 +2158,7 @@ index 001f36b..35ca34a 100644
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -3933,7 +4232,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3933,7 +4237,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
  
    // Update dynamic graphics pipeline state.
@@ -1811,7 +2167,7 @@ index 001f36b..35ca34a 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -4014,7 +4313,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4014,7 +4318,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
          continue;
        }
@@ -1820,7 +2176,7 @@ index 001f36b..35ca34a 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4032,7 +4331,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4336,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -1829,7 +2185,7 @@ index 001f36b..35ca34a 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4343,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4348,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -1838,7 +2194,7 @@ index 001f36b..35ca34a 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4072,6 +4371,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4072,6 +4376,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
  
        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1846,7 +2202,7 @@ index 001f36b..35ca34a 100644
        SubmitBarriers(true);
  
        VkBufferCopy guest_dma_index_copy_region = {};
-@@ -4111,9 +4411,37 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4111,14 +4416,46 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -1886,7 +2242,17 @@ index 001f36b..35ca34a 100644
  
    // Draw.
    if (primitive_processing_result.index_buffer_type ==
-@@ -4206,6 +4534,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
+           PrimitiveProcessor::ProcessedIndexBufferType::kNone ||
+-      shader_32bit_index_dma) {
++      shader_32bit_index_dma ||
++      primitive_processing_result.host_vertex_shader_type ==
++          Shader::HostVertexShaderType::kQuadPatchAsTriangleList) {
++    // Quad patches as triangle lists are not indexed on the host; the vertex
++    // shader loads the guest indices itself (kHostBuiltinForDMA) if needed.
+     deferred_command_buffer_.CmdVkDraw(primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
+   } else {
+     std::pair<VkBuffer, VkDeviceSize> index_buffer;
+@@ -4206,6 +4543,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1894,7 +2260,7 @@ index 001f36b..35ca34a 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4331,6 +4660,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4331,6 +4669,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -1902,7 +2268,7 @@ index 001f36b..35ca34a 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4350,12 +4680,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +4689,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -1932,7 +2298,7 @@ index 001f36b..35ca34a 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,22 +4727,142 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +4736,142 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -2040,13 +2406,13 @@ index 001f36b..35ca34a 100644
 +          ui::vulkan::util::MemoryPurpose::kReadback, dump.buffer, dump.memory)) {
 +    REXGPU_WARN("[frame] resolve {}: could not create a dump buffer", resolve_index);
 +    return;
-+  }
+   }
 +  if (dfn.vkMapMemory(device, dump.memory, 0, VK_WHOLE_SIZE, 0, &dump.mapping) != VK_SUCCESS) {
 +    dfn.vkDestroyBuffer(device, dump.buffer, nullptr);
 +    dfn.vkFreeMemory(device, dump.memory, nullptr);
 +    REXGPU_WARN("[frame] resolve {}: could not map a dump buffer", resolve_index);
 +    return;
-   }
++  }
 +  const RegisterFile& regs = *register_file_;
 +  auto copy_dest_info = regs.Get<reg::RB_COPY_DEST_INFO>();
 +  auto copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
@@ -2080,7 +2446,7 @@ index 001f36b..35ca34a 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +4881,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +4890,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -2088,7 +2454,7 @@ index 001f36b..35ca34a 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4579,6 +5040,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4579,6 +5049,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
  
      texture_cache_->UseScaledResolveBufferForRead();
@@ -2096,7 +2462,7 @@ index 001f36b..35ca34a 100644
      SubmitBarriers(true);
  
      VkBufferMemoryBarrier pre_barrier = {};
-@@ -4635,6 +5097,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4635,6 +5106,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                               readback.buffers[write_index], 1, &readback_region);
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -2104,7 +2470,7 @@ index 001f36b..35ca34a 100644
      SubmitBarriers(true);
  
      VkBufferCopy readback_region = {};
-@@ -4849,6 +5312,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4849,6 +5321,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -2112,7 +2478,7 @@ index 001f36b..35ca34a 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4874,6 +5338,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -4874,6 +5347,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
      return false;
    }
  
@@ -2120,7 +2486,7 @@ index 001f36b..35ca34a 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4944,6 +5409,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5418,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -2130,7 +2496,7 @@ index 001f36b..35ca34a 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +5438,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +5447,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -2146,7 +2512,7 @@ index 001f36b..35ca34a 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5111,7 +5582,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5591,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -2158,7 +2524,7 @@ index 001f36b..35ca34a 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5136,6 +5611,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +5620,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -2174,7 +2540,7 @@ index 001f36b..35ca34a 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5165,6 +5649,134 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +5658,134 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -2309,7 +2675,7 @@ index 001f36b..35ca34a 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +5842,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +5851,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -2317,7 +2683,7 @@ index 001f36b..35ca34a 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5308,9 +5921,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5308,9 +5930,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -2334,7 +2700,7 @@ index 001f36b..35ca34a 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5368,6 +5987,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5368,6 +5996,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        sparse_memory_binds_.clear();
      }
  
@@ -2343,7 +2709,7 @@ index 001f36b..35ca34a 100644
      SubmitBarriers(true);
  
      assert_false(command_buffers_writable_.empty());
-@@ -5385,6 +6006,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,6 +6015,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -2369,7 +2735,7 @@ index 001f36b..35ca34a 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5652,9 +6292,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5652,9 +6301,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
    swap_fxaa_source_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
  }
  
@@ -2487,7 +2853,7 @@ index 001f36b..35ca34a 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5718,6 +6465,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +6474,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
@@ -2499,7 +2865,7 @@ index 001f36b..35ca34a 100644
      // std::memcmp instead of != so in case of NaN, every draw won't be
      // invalidating it.
      dynamic_depth_bias_update_needed_ |=
-@@ -5990,6 +6742,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -5990,6 +6751,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (pa_cl_vte_cntl.vtx_w0_fmt) {
      flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
    }
@@ -2509,6 +2875,16 @@ index 001f36b..35ca34a 100644
    // Whether the primitive is polygonal, and gl_FrontFacing matters.
    if (primitive_polygonal) {
      flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
+@@ -6121,6 +6885,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+   dirty |= system_constants_.tessellation_factor_range_max != tessellation_factor_max;
+   system_constants_.tessellation_factor_range_min = tessellation_factor_min;
+   system_constants_.tessellation_factor_range_max = tessellation_factor_max;
++  uint32_t quad_patch_diagonals = uint32_t(REXCVAR_GET(vulkan_quad_patch_diagonals));
++  dirty |= system_constants_.quad_patch_diagonals != quad_patch_diagonals;
++  system_constants_.quad_patch_diagonals = quad_patch_diagonals;
+ 
+   // Conversion to host normalized device coordinates.
+   for (uint32_t i = 0; i < 3; ++i) {
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
 index 91ac08f..bde1394 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
@@ -2743,6 +3119,43 @@ index 91ac08f..bde1394 100644
  void VulkanPipelineCache::ProcessDeferredPipelineDestructions(bool force_all) {
    std::vector<VkPipeline> pipelines_to_destroy;
    uint64_t completed_submission = command_processor_.GetCompletedSubmission();
+diff --git a/src/graphics/vulkan/primitive_processor.cpp b/src/graphics/vulkan/primitive_processor.cpp
+index cdbedae..2f1c552 100644
+--- a/src/graphics/vulkan/primitive_processor.cpp
++++ b/src/graphics/vulkan/primitive_processor.cpp
+@@ -30,6 +30,24 @@ REXCVAR_DEFINE_BOOL(
+     "Force Vulkan rectangle list expansion in the vertex shader, even when geometry "
+     "shaders are available")
+     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
++#ifdef __APPLE__
++constexpr bool kQuadPatchesInVsDefault = true;
++#else
++constexpr bool kQuadPatchesInVsDefault = false;
++#endif
++REXCVAR_DEFINE_BOOL(
++    vulkan_quad_patches_in_vs, kQuadPatchesInVsDefault, "GPU/Vulkan",
++    "Draw non-adaptive quad patches with a uniform integer tessellation factor as triangle "
++    "lists, with the domain location computed in the vertex shader, instead of using host "
++    "tessellation (MoltenVK splits the render pass for every tessellated draw)");
++REXCVAR_DEFINE_INT32(vulkan_quad_patch_diagonals, 2, "GPU/Vulkan",
++                     "Which diagonal splits each grid cell of quad patches drawn as triangle "
++                     "lists (vulkan_quad_patches_in_vs): 0 all (1,0)-(0,1), 1 all (0,0)-(1,1), "
++                     "2 (0,0)-(1,1) in the top-left and bottom-right quarters, 3 the opposite of "
++                     "2. Must match the host tessellator, as other passes over the same surface "
++                     "may be tessellated and test depth for equality: 2 matches MoltenVK on "
++                     "Apple GPUs (Fable II ground lighting passes over an adaptive depth pass)")
++    .range(0, 3);
+ REXCVAR_DEFINE_BOOL(vulkan_force_convert_quad_lists_to_triangle_lists, false, "GPU/Vulkan",
+                     "Force Vulkan quad list conversion to triangle lists in primitive processing, "
+                     "even when geometry shaders are available")
+@@ -69,6 +87,7 @@ bool VulkanPrimitiveProcessor::Initialize() {
+     Shutdown();
+     return false;
+   }
++  SetExpandQuadPatchesInVS(REXCVAR_GET(vulkan_quad_patches_in_vs));
+   frame_index_buffer_pool_ = std::make_unique<ui::vulkan::VulkanUploadBufferPool>(
+       vulkan_device, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+       std::max(size_t(kMinRequiredConvertedIndexBufferSize),
 diff --git a/src/graphics/vulkan/render_target_cache.cpp b/src/graphics/vulkan/render_target_cache.cpp
 index 0298f06..55a8c73 100644
 --- a/src/graphics/vulkan/render_target_cache.cpp

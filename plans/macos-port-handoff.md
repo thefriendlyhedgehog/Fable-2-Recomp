@@ -139,11 +139,20 @@ number keys.
 `tools/mac_capture.sh` passes `--debug_command_file=out/capture/command`.
 The input poll reads and deletes that file every 250 ms (no window focus
 needed), one command per line: `report` (= 9), `sweep` (= 0), `quit`,
-`press <button> [ms]`, `wait <ms>`. Write it atomically, e.g.
+`press <button> [ms]`, `wait <ms>`, `dump <frames>`, `set <cvar> <value>`.
+Write it atomically, e.g.
 `printf 'sweep\n' > out/capture/command.tmp && mv out/capture/command.tmp out/capture/command`.
-Done this way, the user only loads the save; Claude sends `report`, then
-`sweep`, waits for `[sweep] done` in the log, then `quit`. (The keys 9 / 0
-only work while the game window has focus; twice they did not register.)
+(The keys 9 / 0 only work while the game window has focus.)
+
+**Unattended runs: `tools/mac_autotest.sh "<commands>" [game flags]`.** It
+starts the game, waits for the title screen (about 280 draws per frame in
+the FSI statistics; the logos draw about 25 and ignore input), loads the
+save with A, Down, A, waits for gameplay (over 1000 draws per frame), sends
+the `;`-separated commands (`sleep <s>` pauses between batches), waits for
+the sweep and a frame report, and quits. No user step, and the GPU is only
+busy for the test. Use it instead of asking the user to load the save. See
+its header for a sweep example and a frame rate A/B example (`set` a cvar,
+`sleep 45`, so each setting gets a full 300-frame statistics window).
 
 ## Debug switches (SDK/app cvars; hot-reloadable unless marked restart)
 
@@ -188,9 +197,26 @@ the same way as Xenia's ROV path.
 
 - GPU at 100%; ~28 fps in light scenes, 12-14 fps in heavy ones (with or
   without upload hoisting); heavy scenes were 130-400 ms per frame before
-  the fixes. A Metal System Trace put fragment work at 84% of GPU time
-  (FSI: every pixel shader does the EDRAM read-modify-write with
-  interlock).
+  the fixes. A Metal System Trace put fragment work at 84% of GPU time,
+  but the `fbo` path is no faster than `fsi` at the trail (14 fps both),
+  and no pixel shader takes over 7% of shader time.
+- **The GPU idles 41% of the time** (Metal System Trace at the trail,
+  2026-10-12, `out/profile`, summarized with `tools/summarize_gputrace.py`
+  plus per-encoder analysis): ~1000 encoder gaps per frame, from ~350 render
+  encoders and ~430 compute encoders per frame. 258 of them per frame were
+  MoltenVK's tessellation emulation (a compute pass for the vertex and
+  tessellation control stages of every tessellated draw, splitting the
+  render pass): Fable II draws the ground as quad patches (prim 18), 214
+  single-patch continuous draws at factor 16 (lighting passes) and 44
+  adaptive ones (depth pass and base color).
+- **Done: quad patches as triangle lists** (`vulkan_quad_patches_in_vs`, on
+  on macOS; `docs/macos_port.md`, "Quad patches without host
+  tessellation"): the 214 continuous draws no longer tessellate. Same run,
+  same spot: 10.8 fps tessellated, 13.1-13.7 fps with it. The 44 adaptive
+  draws still tessellate.
+- Next: the 253 SDK render pass (re)starts per frame (216 after a barrier,
+  copy or upload; `FSI stats` line); a new Metal System Trace with the
+  quad patch path to see what the remaining gaps are.
 - Done: pipeline store loading, thread QoS, async pipeline waits. Tried and
   dropped: upload hoisting (`vulkan_hoist_shared_memory_uploads`; no
   measurable gain, causes flicker).

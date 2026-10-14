@@ -15,8 +15,10 @@ for every EDRAM shader").
   `ps_jump_depth_{orig,split}.spv` and `depth_only_{orig,split}.spv`. Also a
   color-only variant (early depth / stencil, so it has the early quad skip)
   with `vulkan_fsi_quad_skip_quad_ops` off and on: `ps_color_{deriv,quad}.spv`.
-- `vstest.cpp` - a minimal vertex shader (`oPos = c0`), for checking vertex
-  shader epilogue changes (vertex position snapping was checked with it).
+- `vstest.cpp` - a minimal vertex shader (`oPos = max(r0, r1)`), translated
+  as a plain vertex shader (`vs_snap.spv`) and as a quad patch drawn as a
+  triangle list (`vs_quad_patch.spv`, `vulkan_quad_patches_in_vs`), for
+  checking vertex shader prologue and epilogue changes.
 - `stubs.cpp` - defines the `dump_shaders` cvar the translator objects
   reference (it lives in a file not linked here).
 

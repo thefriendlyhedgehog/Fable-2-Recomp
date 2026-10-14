@@ -1,5 +1,6 @@
-// Translates a minimal vertex shader (oPos = c0) to check the vertex position
-// snapping code validates and converts to MSL.
+// Translates a minimal vertex shader (oPos = max(r0, r1)), as a plain vertex shader and
+// as a quad patch drawn as a triangle list, to check vertex shader changes
+// validate and convert to MSL.
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -25,7 +26,9 @@ int main(int argc, char** argv) {
   ucode[2] = (uint32_t(b) >> 16) | (uint32_t(b >> 32) << 16);
   ucode[3] = 62 | (1u << 15) | (0xFu << 16) | (50u << 26);  // oPos, export, xyzw
   ucode[4] = 0;
-  ucode[5] = (0u << 8) | (0u << 16) | (2u << 24);  // max c0, c0
+  // max r0, r1 (registers, so the shader reads the vertex index or the patch
+  // index and domain location set up for it).
+  ucode[5] = (1u << 8) | (0u << 16) | (2u << 24) | (1u << 30) | (1u << 31);
   SpirvShaderTranslator::Features features(true);
   SpirvShaderTranslator translator(features, true, true, true, 1, 1);
   Shader shader(xenos::ShaderType::kVertex, 0x5678, ucode.data(), ucode.size(),
@@ -33,16 +36,28 @@ int main(int argc, char** argv) {
   rex::string::StringBuffer disasm;
   shader.AnalyzeUcode(disasm);
   std::printf("%s\n", shader.ucode_disassembly().c_str());
-  Shader::Translation& translation =
-      *shader.GetOrCreateTranslation(translator.GetDefaultVertexShaderModification(64));
-  if (!translator.TranslateAnalyzedShader(translation) || !translation.is_valid()) {
-    std::printf("translation failed\n");
-    return 1;
+  // A plain vertex shader, and the same shader as a quad patch drawn as a
+  // triangle list (domain location from the vertex index).
+  const struct {
+    Shader::HostVertexShaderType type;
+    const char* name;
+  } variants[] = {
+      {Shader::HostVertexShaderType::kVertex, "vs_snap.spv"},
+      {Shader::HostVertexShaderType::kQuadPatchAsTriangleList, "vs_quad_patch.spv"},
+  };
+  for (const auto& variant : variants) {
+    Shader::Translation& translation = *shader.GetOrCreateTranslation(
+        translator.GetDefaultVertexShaderModification(64, variant.type));
+    if (!translator.TranslateAnalyzedShader(translation) || !translation.is_valid()) {
+      std::printf("translation failed: %s\n", variant.name);
+      return 1;
+    }
+    std::string path = std::string(out_dir) + "/" + variant.name;
+    FILE* f = std::fopen(path.c_str(), "wb");
+    std::fwrite(translation.translated_binary().data(), 1, translation.translated_binary().size(),
+                f);
+    std::fclose(f);
+    std::printf("wrote %s\n", path.c_str());
   }
-  std::string path = std::string(out_dir) + "/vs_snap.spv";
-  FILE* f = std::fopen(path.c_str(), "wb");
-  std::fwrite(translation.translated_binary().data(), 1, translation.translated_binary().size(), f);
-  std::fclose(f);
-  std::printf("wrote %s\n", path.c_str());
   return 0;
 }

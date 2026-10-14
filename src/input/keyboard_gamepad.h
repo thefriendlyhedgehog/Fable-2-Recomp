@@ -736,6 +736,12 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
         return;
       }
       command_presses_.push_back({m.button, std::max(ms, 16)});
+    } else if (command == "set") {
+      std::string name, value;
+      words >> name >> value;
+      if (name.empty() || !rex::cvar::SetFlagByName(name, value)) {
+        REXSYS_WARN("[input] command file: could not set '{}' to '{}'", name, value);
+      }
     } else if (command == "wait") {
       int32_t ms = 0;
       words >> ms;

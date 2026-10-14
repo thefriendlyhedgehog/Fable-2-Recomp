@@ -487,6 +487,48 @@ that matter on macOS are in the SDK patch:
   `readback_resolve_half_pixel_offset` on by default, and
   `readback_memexport_fast_wait`.
 
+### Quad patches without host tessellation
+
+MoltenVK has no tessellation in Metal's render pipeline order: for every
+tessellated draw it ends the render encoder, runs the vertex and
+tessellation control stages as a compute pass ("vkCmdDraw (vertex and tess
+control stages) ComputeEncoder" in a Metal System Trace), and starts a new
+render encoder. Fable II draws its ground as quad patches, 258 draws per
+frame at the trail, so this split the frame into hundreds of encoders with
+the GPU idle between them.
+
+The non-adaptive ones (continuous, factor 16 = `VGT_HOS_MAX_TESS_LEVEL` + 1,
+one patch per draw: the ground lighting passes) produce a uniform grid: a
+quad domain with all factors an even integer N under fractional-even
+spacing (or any integer under equal spacing) is N x N equal cells. The
+primitive processor now turns such draws into
+`HostVertexShaderType::kQuadPatchAsTriangleList`: a non-indexed triangle
+list of N * N * 6 vertices per patch, with the guest index (the patch
+index) loaded in the vertex shader like for point sprite expansion
+(`kHostBuiltinForDMA`, no host index buffer). The translated guest domain
+shader runs as a vertex shader with the same registers as
+`kQuadDomainPatchIndexed` (r0.x patch index, r0.yz domain location, r1.x
+0), the location computed from the vertex index, the factor read from the
+system constants (`tessellation_factor_range_max`, now also in the SPIR-V
+system constant block). Adaptive draws still tessellate.
+
+The cell diagonals must be the tessellator's: the lighting passes draw over
+the depth of the adaptive (still tessellated) depth pass with a "greater or
+equal" test, and the two triangulations of a non-planar cell lie wholly
+above or below each other, so a wrong diagonal fails whole cells (the
+ground turned into blue and white squares: blue is the ground with no
+light added). `vulkan_quad_patch_diagonals` picks the pattern, live; a
+sweep of all four against the tessellator found pattern 2, (0,0)-(1,1) in
+the top-left and bottom-right quarters of the patch and (1,0)-(0,1) in the
+other two (1.8% of pixels differ from the tessellator, the same as two
+tessellated shots: falling snow). Both switches are live, for A/B sweeps.
+`tools/sdk_offline/vstest.cpp` translates a shader in this mode.
+
+Result at the trail, one run: 10.8 fps tessellated, 13.1-13.7 fps with the
+grid. Related: where the adaptive depth pass uses a lower factor than the
+lighting passes, their surfaces differ in the same way, which may be what
+the original flickering dark squares on the ground were (not verified).
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:
