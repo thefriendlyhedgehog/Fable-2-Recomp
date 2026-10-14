@@ -152,7 +152,12 @@ the `;`-separated commands (`sleep <s>` pauses between batches), waits for
 the sweep and a frame report, and quits. No user step, and the GPU is only
 busy for the test. Use it instead of asking the user to load the save. See
 its header for a sweep example and a frame rate A/B example (`set` a cvar,
-`sleep 45`, so each setting gets a full 300-frame statistics window).
+`sleep 45`, so each setting gets a full 300-frame statistics window). In
+gameplay it caps the frame rate to 5 fps (`vulkan_min_frame_time_ms` =
+`AUTOTEST_FRAME_MS`, default 200) so test runs do not load the GPU fully;
+pass `AUTOTEST_FRAME_MS=0` for frame rate measurements. (macOS still
+reports ~89% "Device Utilization" at 5 fps, presumably at a lower clock;
+GPU power needs `sudo powermetrics`.)
 
 ## Debug switches (SDK/app cvars; hot-reloadable unless marked restart)
 
@@ -214,9 +219,16 @@ the same way as Xenia's ROV path.
   tessellation"): the 214 continuous draws no longer tessellate. Same run,
   same spot: 10.8 fps tessellated, 13.1-13.7 fps with it. The 44 adaptive
   draws still tessellate.
-- Next: the 253 SDK render pass (re)starts per frame (216 after a barrier,
-  copy or upload; `FSI stats` line); a new Metal System Trace with the
-  quad patch path to see what the remaining gaps are.
+- Metal System Trace with the quad patch path (`out/profile/grid.trace`,
+  10 s): tessellation compute passes 17522 -> 5236 (the 44 adaptive draws
+  per frame), but **~32000 `vkCmdCopyBuffer` blit encoders** (~250 per
+  frame): shared memory uploads, each ending the render pass (the 216
+  restarts "after a barrier, copy or upload" per frame). Fragment work is
+  ~70% of the time.
+- Next: remove the uploads instead of hoisting them: xenia-edge's zero-copy
+  shared memory (`VK_EXT_external_memory_host`, on by default on ARM64
+  there) imports guest memory as the shared memory buffer, so the CPU's
+  writes need no copy.
 - Done: pipeline store loading, thread QoS, async pipeline waits. Tried and
   dropped: upload hoisting (`vulkan_hoist_shared_memory_uploads`; no
   measurable gain, causes flicker).

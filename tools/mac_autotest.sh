@@ -21,6 +21,11 @@
 # logos draw about 25 draws per frame, the title screen about 280 (input is
 # only taken from then on), gameplay over a thousand.
 # Results: out/capture (summary.txt, sweep/, dumps/), as with mac_capture.sh.
+# GPU load: once in gameplay the frame rate is capped to AUTOTEST_FRAME_MS
+# per frame (vulkan_min_frame_time_ms, default 200 = 5 fps, about a third of
+# the GPU at the trail); AUTOTEST_FRAME_MS=0 for frame rate measurements.
+# Sweeps then need --debug_sweep_settle_ms of a few frames (default here
+# 2500).
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -31,7 +36,8 @@ LOGS=out/build/mac-arm64-release/logs
 COMMAND_FILE="$OUT/command"
 BOOT_TIMEOUT=180
 LOAD_TIMEOUT=240
-TEST_TIMEOUT=300
+TEST_TIMEOUT=600
+FRAME_MS="${AUTOTEST_FRAME_MS:-200}"
 
 send() {
     mkdir -p "$OUT"
@@ -52,7 +58,7 @@ count() {
 newest_log() { ls -t "$LOGS"/*.log 2>/dev/null | head -1; }
 
 BEFORE="$(newest_log)"
-tools/mac_capture.sh "$@" > out/autotest_capture.log 2>&1 &
+tools/mac_capture.sh --debug_sweep_settle_ms=2500 "$@" > out/autotest_capture.log 2>&1 &
 CAPTURE_PID=$!
 
 finish() {
@@ -95,6 +101,10 @@ until [ "$(draws_per_frame)" -ge 1000 ]; do
     sleep 2
 done
 echo "autotest: in gameplay ($(draws_per_frame) draws per frame)"
+if [ "$FRAME_MS" -gt 0 ]; then
+    send "set vulkan_min_frame_time_ms $FRAME_MS"
+    echo "autotest: frame time capped to $FRAME_MS ms"
+fi
 
 # The test.
 sweeps_before=$(count "\[sweep\] done")
