@@ -179,6 +179,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 | - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
+| - | `vulkan_fsi_specialize` | FSI pixel shaders built for the draw's render target formats, 1x MSAA and no blending (restart; no fps change at the trail) |
 | - | `vulkan_gpu_progress_wait` | submit and wait for the host GPU before every guest-visible GPU progress write (fixes zero-copy corruption, costs ~35% fps) |
 | - | `vulkan_zero_copy_race_log` | every 5 s, `[race]` lines: guest pages the CPU rewrote while a pending submission read them, with what for and how many used bytes changed (restart; works with or without zero-copy) |
 
@@ -333,8 +334,19 @@ useful first (taken: the two bugs in the fixed list):
   sync/lwsync/eieio, 7f7c92ef stwcx. as a compare-and-swap, issue #462);
   needs `generated/` regenerated.
 - xenia-edge 8d75a1779 / 830e60518: FSI pixel shaders specialized for the
-  render target formats, blending and sample count (we are mostly
-  fragment-bound); large, conflicts with our translator changes.
+  render target formats, blending and sample count. **Done our way and
+  measured, no gain** (`vulkan_fsi_specialize`, restart, off): the
+  pixel modification carries each written target's format, "guest MSAA
+  is 1x" and "nothing blends" (18 bits: the 15 free ones plus
+  depth_stencil_mode's, which only the host render target path uses;
+  modification version 13), and the translator emits them as constants
+  so Metal's compiler drops the other formats, samples and the blending
+  path. Shaders are specialized (dumps under `--dump_shaders`), the image
+  is unchanged (1.8% vs. unspecialized, snow), but the trail stays at
+  12.6-13.0 fps (12.7-12.8 without; `fable_2_097`/`098`). So FSI
+  branching is not what costs GPU time there; likely the EDRAM buffer
+  traffic itself and the ~268 render pass restarts per frame (removing
+  most restarts is what gave zero-copy its +30%).
 - PR #501: WaitMultiple sleeps instead of polling (audio worker 75% of a
   core to 2%).
 - PR #490: texture `exp_adjust` read from the wrong fetch constant word

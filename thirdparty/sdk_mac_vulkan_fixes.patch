@@ -190,10 +190,54 @@ index 4cf3854..c1a662b 100644
    // For packing HostVertexShaderType in bit fields.
    static constexpr uint32_t kHostVertexShaderTypeBitCount = 4;
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..a46c7ba 100644
+index dce3dbf..ff34f74 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
-@@ -151,6 +151,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -33,7 +33,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+     // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
+     // prototyping stage (easier to do small granular updates with an
+     // incremental counter).
+-    static constexpr uint32_t kVersion = 12;
++    static constexpr uint32_t kVersion = 13;
+ 
+     enum class DepthStencilMode : uint32_t {
+       kNoModifiers,
+@@ -88,6 +88,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+       uint32_t param_gen_point : 1;
+       // For host render targets - depth / stencil output mode.
+       DepthStencilMode depth_stencil_mode : 3;
++      // With fragment shader interlock, the low 15 bits of the FSI
++      // specialization (see GetFsiSpecialization).
++      uint32_t fsi_specialization_low : 15;
+     } pixel;
+     uint64_t value = 0;
+ 
+@@ -95,6 +98,24 @@ class SpirvShaderTranslator : public ShaderTranslator {
+       static_assert_size(*this, sizeof(value));
+     }
+ 
++    // Fragment shader interlock pixel shader specialization
++    // (SetFsiSpecialize), which the host render target path does not use, so
++    // it also takes depth_stencil_mode's bits: the format of each color render
++    // target the shader writes (4 bits each), whether the guest MSAA is 1x and
++    // whether no render target blends. The shader is then built with these as
++    // constants instead of reading them from the system constants, and the
++    // host compiler drops the code for the other formats, samples and
++    // blending.
++    static constexpr uint32_t kFsiSpecializationMsaa1x = uint32_t(1) << 16;
++    static constexpr uint32_t kFsiSpecializationNoBlending = uint32_t(1) << 17;
++    uint32_t GetFsiSpecialization() const {
++      return pixel.fsi_specialization_low | (uint32_t(pixel.depth_stencil_mode) << 15);
++    }
++    void SetFsiSpecialization(uint32_t specialization) {
++      pixel.fsi_specialization_low = specialization & 0x7FFF;
++      pixel.depth_stencil_mode = DepthStencilMode((specialization >> 15) & 0b111);
++    }
++
+     uint32_t GetVertexClipDistanceCount() const {
+       return vertex.user_clip_plane_cull ? 0 : vertex.user_clip_plane_count;
+     }
+@@ -151,6 +172,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
      // taking into account the potential relation with occlusion queries (but
      // should be safe at least temporarily).
      kSysFlag_FSIDepthStencilEarlyWrite_Shift,
@@ -204,7 +248,7 @@ index dce3dbf..a46c7ba 100644
  
      kSysFlag_Count,
  
-@@ -199,6 +203,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -199,6 +224,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSysFlag_FSIDepthWrite = 1u << kSysFlag_FSIDepthWrite_Shift,
      kSysFlag_FSIStencilTest = 1u << kSysFlag_FSIStencilTest_Shift,
      kSysFlag_FSIDepthStencilEarlyWrite = 1u << kSysFlag_FSIDepthStencilEarlyWrite_Shift,
@@ -212,7 +256,7 @@ index dce3dbf..a46c7ba 100644
    };
    static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
  
-@@ -307,6 +312,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -307,6 +333,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
      uint32_t vertex_index_max;
      float tessellation_factor_range_min;
      float tessellation_factor_range_max;
@@ -222,7 +266,7 @@ index dce3dbf..a46c7ba 100644
    };
  
    enum ConstantBuffer : uint32_t {
-@@ -399,6 +407,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -399,6 +428,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
      bool demote_to_helper_invocation;
      bool sample_rate_shading;
@@ -232,7 +276,30 @@ index dce3dbf..a46c7ba 100644
    };
  
    SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
-@@ -879,6 +890,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -415,6 +447,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+       uint32_t dynamic_addressable_register_count,
+       Shader::HostVertexShaderType host_vertex_shader_type =
+           Shader::HostVertexShaderType::kVertex) const override;
++
++  // Build fragment shader interlock pixel shaders with the render target
++  // formats, MSAA and blending from Modification::GetFsiSpecialization.
++  void SetFsiSpecialize(bool fsi_specialize) { fsi_specialize_ = fsi_specialize; }
++  bool IsFsiSpecialized() const {
++    return fsi_specialize_ && edram_fragment_shader_interlock_ && is_pixel_shader() &&
++           !is_depth_only_fragment_shader_;
++  }
+   uint64_t GetDefaultPixelShaderModification(
+       uint32_t dynamic_addressable_register_count) const override;
+ 
+@@ -756,6 +796,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   // flow of the main function, and that there are no returns before either
+   // (there's a single return from the shader).
+   bool edram_fragment_shader_interlock_;
++  bool fsi_specialize_ = false;
+   uint32_t draw_resolution_scale_x_;
+   uint32_t draw_resolution_scale_y_;
+ 
+@@ -879,6 +920,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSystemConstantEdramRTKeepMask,
      kSystemConstantEdramRTClamp,
      kSystemConstantEdramBlendConstant,
@@ -1482,7 +1549,7 @@ index 8f2fcb0..c7f886a 100644
          return 0;
        }));
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..02ed274 100644
+index 1774f97..b552ae0 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
 @@ -21,11 +21,44 @@
@@ -1570,6 +1637,15 @@ index 1774f97..02ed274 100644
    };
    id_vector_temp_.clear();
    id_vector_temp_.reserve(rex::countof(system_constants));
+@@ -1157,7 +1198,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
+     builder_->addExecutionMode(function_main_, spv::ExecutionModeOriginUpperLeft);
+     if (output_fragment_depth_ != spv::NoResult) {
+       builder_->addExecutionMode(function_main_, spv::ExecutionModeDepthReplacing);
+-      if (!current_shader().writes_depth() &&
++      if (!current_shader().writes_depth() && !edram_fragment_shader_interlock_ &&
+           GetSpirvShaderModification().pixel.depth_stencil_mode ==
+               Modification::DepthStencilMode::kFloat24Truncating) {
+         builder_->addExecutionMode(function_main_, spv::ExecutionModeDepthLess);
 @@ -1750,6 +1791,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
    builder_->addMemberName(type_struct_per_vertex, kOutputPerVertexMemberPosition, "gl_Position");
    builder_->addMemberDecoration(type_struct_per_vertex, kOutputPerVertexMemberPosition,
@@ -1862,7 +1938,7 @@ index 1774f97..02ed274 100644
        main_fsi_early_depth_stencil_execute_quad_merge_ = &builder_->makeNewBlock();
        builder_->createSelectionMerge(main_fsi_early_depth_stencil_execute_quad_merge_,
 diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
-index 765c141..3dfd11a 100644
+index 765c141..146b763 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
 @@ -12,15 +12,19 @@
@@ -1885,7 +1961,50 @@ index 765c141..3dfd11a 100644
  namespace rex::graphics {
  
  spv::Id SpirvShaderTranslator::PreClampedFloat32To7e3(SpirvBuilder& builder, spv::Id f32_scalar,
-@@ -1421,7 +1425,29 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+@@ -987,13 +991,21 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+ 
+         // Load the information about the render target.
+ 
+-        id_vector_temp_.clear();
+-        id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantEdramRTFormatFlags));
+-        id_vector_temp_.push_back(const_int_rt_index);
+-        spv::Id rt_format_with_flags = builder_->createLoad(
+-            builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
+-                                        id_vector_temp_),
+-            spv::NoPrecision);
++        spv::Id rt_format_with_flags;
++        if (IsFsiSpecialized()) {
++          rt_format_with_flags = builder_->makeUintConstant(RenderTargetCache::AddPSIColorFormatFlags(
++              xenos::ColorRenderTargetFormat(
++                  (GetSpirvShaderModification().GetFsiSpecialization() >> (4 * color_target_index)) &
++                  0xF)));
++        } else {
++          id_vector_temp_.clear();
++          id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantEdramRTFormatFlags));
++          id_vector_temp_.push_back(const_int_rt_index);
++          rt_format_with_flags = builder_->createLoad(
++              builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
++                                          id_vector_temp_),
++              spv::NoPrecision);
++        }
+ 
+         spv::Id rt_is_64bpp = builder_->createBinOp(
+             spv::OpINotEqual, type_bool_,
+@@ -1032,8 +1044,11 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
+ 
+         // Check if blending (the blending is not 1 * source + 0 * destination).
+         spv::Id rt_blend_enabled =
+-            builder_->createBinOp(spv::OpINotEqual, type_bool_, rt_blend_factors_equations,
+-                                  builder_->makeUintConstant(0x00010001));
++            IsFsiSpecialized() && (GetSpirvShaderModification().GetFsiSpecialization() &
++                                   Modification::kFsiSpecializationNoBlending)
++                ? builder_->makeBoolConstant(false)
++                : builder_->createBinOp(spv::OpINotEqual, type_bool_, rt_blend_factors_equations,
++                                        builder_->makeUintConstant(0x00010001));
+         SpirvBuilder::IfBuilder if_rt_blend_enabled(
+             rt_blend_enabled, spv::SelectionControlDontFlattenMask, *builder_);
+         {
+@@ -1421,11 +1436,37 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
        builder_->setBuildPoint(main_fsi_early_depth_stencil_execute_quad_merge_);
      }
  
@@ -1916,6 +2035,14 @@ index 765c141..3dfd11a 100644
    }
  }
  
+ spv::Id SpirvShaderTranslator::LoadMsaaSamplesFromFlags() {
++  if (IsFsiSpecialized() &&
++      (GetSpirvShaderModification().GetFsiSpecialization() & Modification::kFsiSpecializationMsaa1x)) {
++    return builder_->makeUintConstant(uint32_t(xenos::MsaaSamples::k1X));
++  }
+   return builder_->createTriOp(spv::OpBitFieldUExtract, type_uint_, main_system_constant_flags_,
+                                builder_->makeUintConstant(kSysFlag_MsaaSamples_Shift),
+                                builder_->makeUintConstant(2));
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
 index 76f5600..d0adcd6 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
@@ -3564,7 +3691,7 @@ index 001f36b..aa783dc 100644
    // Conversion to host normalized device coordinates.
    for (uint32_t i = 0; i < 3; ++i) {
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..bde1394 100644
+index 91ac08f..817a0d6 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -12,12 +12,14 @@
@@ -3582,7 +3709,20 @@ index 91ac08f..bde1394 100644
  #include <utility>
  #include <vector>
  
-@@ -91,7 +93,17 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
+@@ -55,6 +57,12 @@ REXCVAR_DEFINE_INT32(
+     .range(-1, 32)
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
++REXCVAR_DEFINE_BOOL(vulkan_fsi_specialize, false, "GPU/Vulkan",
++                    "Build fragment shader interlock pixel shaders for the render target formats, "
++                    "the guest MSAA sample count (1x) and blending of the draw, so the host "
++                    "compiler drops the code for the others (more pipelines, smaller shaders)")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
+ REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
+                     "Render tessellation as wireframe")
+     .lifecycle(rex::cvar::Lifecycle::kHotReload);
+@@ -91,7 +99,17 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
  
  std::string GetTessellationSystemConstantsBlockGlsl() {
    std::string source;
@@ -3601,7 +3741,16 @@ index 91ac08f..bde1394 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -420,6 +432,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -297,6 +315,8 @@ bool VulkanPipelineCache::Initialize() {
+       render_target_cache_.msaa_2x_no_attachments_supported(), edram_fragment_shader_interlock,
+       render_target_cache_.draw_resolution_scale_x(),
+       render_target_cache_.draw_resolution_scale_y());
++  shader_translator_->SetFsiSpecialize(edram_fragment_shader_interlock &&
++                                       REXCVAR_GET(vulkan_fsi_specialize));
+ 
+   if (edram_fragment_shader_interlock) {
+     std::vector<uint8_t> depth_only_fragment_shader_code =
+@@ -420,6 +440,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
        shader_storage_shareable_root /
        fmt::format("{:08X}.{}.vk.xpso", title_id, edram_fragment_shader_interlock ? "fsi" : "fbo");
    pipeline_storage_file_ = rex::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
@@ -3615,7 +3764,7 @@ index 91ac08f..bde1394 100644
    if (!pipeline_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the Vulkan pipeline description storage file for "
-@@ -503,6 +522,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -503,6 +530,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
    auto shader_storage_file_path =
        shader_storage_shareable_root / fmt::format("{:08X}.xsh", title_id);
    shader_storage_file_ = rex::filesystem::OpenFile(shader_storage_file_path, "a+b");
@@ -3626,7 +3775,41 @@ index 91ac08f..bde1394 100644
    if (!shader_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the guest shader storage file for writing, persistent "
-@@ -1111,8 +1134,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
+@@ -987,6 +1018,33 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
+     modification.pixel.param_gen_point = 0;
+   }
+ 
++  if (render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock &&
++      REXCVAR_GET(vulkan_fsi_specialize)) {
++    uint32_t specialization = 0;
++    bool blending = false;
++    uint32_t color_targets = shader.writes_color_targets();
++    for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++      if (!(color_targets & (uint32_t(1) << i))) {
++        continue;
++      }
++      specialization |=
++          uint32_t(regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i])
++                       .color_format)
++          << (4 * i);
++      // As the shader's own check: not 1 * source + 0 * destination.
++      if ((regs[reg::RB_BLENDCONTROL::rt_register_indices[i]] & 0x1FFF1FFF) != 0x00010001) {
++        blending = true;
++      }
++    }
++    if (regs.Get<reg::RB_SURFACE_INFO>().msaa_samples == xenos::MsaaSamples::k1X) {
++      specialization |= SpirvShaderTranslator::Modification::kFsiSpecializationMsaa1x;
++    }
++    if (!blending) {
++      specialization |= SpirvShaderTranslator::Modification::kFsiSpecializationNoBlending;
++    }
++    modification.SetFsiSpecialization(specialization);
++  }
++
+   if (render_target_cache_.GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
+     using DepthStencilMode = SpirvShaderTranslator::Modification::DepthStencilMode;
+     if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
+@@ -1111,8 +1169,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
      }
    }
  
@@ -3642,7 +3825,7 @@ index 91ac08f..bde1394 100644
    uint8_t async_priority = pipeline_util::kPriorityLowest;
    if (use_async) {
      uint32_t bound_rts =
-@@ -1215,13 +1243,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -1215,13 +1278,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
  
  void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
      void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
@@ -3660,7 +3843,7 @@ index 91ac08f..bde1394 100644
      return;
    }
    const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
-@@ -1230,6 +1261,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -1230,6 +1296,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
    if (is_placeholder_out) {
      *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
    }
@@ -3670,7 +3853,7 @@ index 91ac08f..bde1394 100644
  }
  
  bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
-@@ -1246,6 +1280,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
+@@ -1246,6 +1315,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
      return false;
    }
  
@@ -3686,7 +3869,7 @@ index 91ac08f..bde1394 100644
    // TODO(Triang3l): Log that the shader has been successfully translated in
    // common code.
  
-@@ -2964,11 +3007,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -2964,11 +3042,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    bool use_dynamic_rendering =
        REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
@@ -3710,7 +3893,7 @@ index 91ac08f..bde1394 100644
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3205,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3240,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -3723,7 +3906,7 @@ index 91ac08f..bde1394 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
-@@ -3268,9 +3328,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3268,9 +3363,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    VkSampleMask sample_mask = UINT32_MAX;
    VkPipelineMultisampleStateCreateInfo multisample_state = {};
    multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -3738,7 +3921,7 @@ index 91ac08f..bde1394 100644
      multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
    } else if (!edram_fragment_shader_interlock && !subpass_has_attachments) {
      // Keep parity with D3D12 host-render-target path, where draws without
-@@ -3588,6 +3651,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3588,6 +3686,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
    }
  }
  
