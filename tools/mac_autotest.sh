@@ -44,6 +44,21 @@ send() {
     printf '%s\n' "$@" > "$COMMAND_FILE.tmp" && mv "$COMMAND_FILE.tmp" "$COMMAND_FILE"
 }
 
+# The game reads and deletes the command file every 250 ms; if it does not,
+# it did not get --debug_command_file (a flag parse error drops all flags).
+expect_read() {
+    for _ in $(seq 1 20); do
+        [ -e "$COMMAND_FILE" ] || return 0
+        sleep 1
+    done
+    echo "autotest: the game is not reading $COMMAND_FILE; its flag errors:"
+    grep -i "error" "$OUT/stdout.log" 2>/dev/null | head -5
+    rm -f "$COMMAND_FILE"
+    pkill -x fable_2
+    wait "$CAPTURE_PID" 2>/dev/null
+    exit 1
+}
+
 # Draws per frame of the newest FSI statistics line in the log (0 if none).
 draws_per_frame() {
     grep -h "FSI stats" "$LOG" 2>/dev/null | tail -1 | sed -nE 's/.*: ([0-9]+) draws\/frame.*/\1/p' |
@@ -58,7 +73,11 @@ count() {
 newest_log() { ls -t "$LOGS"/*.log 2>/dev/null | head -1; }
 
 BEFORE="$(newest_log)"
-tools/mac_capture.sh --debug_sweep_settle_ms=2500 "$@" > out/autotest_capture.log 2>&1 &
+# A flag given twice is a parse error that drops every flag, so only add
+# defaults the caller does not pass.
+defaults=()
+case " $* " in *" --debug_sweep_settle_ms="*) ;; *) defaults+=(--debug_sweep_settle_ms=2500) ;; esac
+tools/mac_capture.sh ${defaults[@]+"${defaults[@]}"} "$@" > out/autotest_capture.log 2>&1 &
 CAPTURE_PID=$!
 
 finish() {
@@ -95,6 +114,7 @@ done
 # Title screen: A, Down, A (continue the last save).
 echo "autotest: loading the save"
 send "wait 3000" "press A" "wait 4000" "press DOWN" "wait 1500" "press A"
+expect_read
 start=$SECONDS
 until [ "$(draws_per_frame)" -ge 1000 ]; do
     [ $((SECONDS - start)) -lt $LOAD_TIMEOUT ] || finish "gameplay did not start (last statistics: $(draws_per_frame) draws per frame)" 1

@@ -225,10 +225,21 @@ the same way as Xenia's ROV path.
   frame): shared memory uploads, each ending the render pass (the 216
   restarts "after a barrier, copy or upload" per frame). Fragment work is
   ~70% of the time.
-- Next: remove the uploads instead of hoisting them: xenia-edge's zero-copy
-  shared memory (`VK_EXT_external_memory_host`, on by default on ARM64
-  there) imports guest memory as the shared memory buffer, so the CPU's
-  writes need no copy.
+- **Zero-copy shared memory, ported from xenia-edge, opt-in**
+  (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
+  (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
+  with `VK_EXT_external_memory_host` as the shared memory buffer; uploads
+  only mark pages valid. At the trail: **17.4 fps** (from ~13.4), render
+  pass (re)starts 253 -> 76 per frame, picture correct
+  (`fable_2_080.log`). But the flicker test (16 shots, capped, log
+  `fable_2_082.log`) had **2 corrupted frames** (shots 02 and 12: blue hair
+  and lantern, stray light shafts; 13-16% of pixels): presumably the GPU
+  now reads memory the CPU rewrites after the draw was recorded (the copy
+  used to snapshot it). Next: run the same flicker test without zero-copy
+  to confirm the corruption is zero-copy's; then find which data races
+  (e.g. dynamic vertex or constant buffers the game rewrites per frame),
+  and either snapshot those ranges or delay CPU writes until the GPU is
+  done with them.
 - Done: pipeline store loading, thread QoS, async pipeline waits. Tried and
   dropped: upload hoisting (`vulkan_hoist_shared_memory_uploads`; no
   measurable gain, causes flicker).

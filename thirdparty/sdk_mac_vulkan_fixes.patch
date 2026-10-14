@@ -538,7 +538,7 @@ index 34f7033..57a6ffa 100644
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
 diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
-index 104bdad..6fdc573 100644
+index 104bdad..0d936ed 100644
 --- a/include/rex/graphics/vulkan/shared_memory.h
 +++ b/include/rex/graphics/vulkan/shared_memory.h
 @@ -54,8 +54,21 @@ class VulkanSharedMemory : public SharedMemory {
@@ -563,6 +563,19 @@ index 104bdad..6fdc573 100644
    void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
                       VkAccessFlags& access_mask) const;
  
+@@ -72,6 +85,12 @@ class VulkanSharedMemory : public SharedMemory {
+ 
+   std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
+   std::vector<VkBufferCopy> upload_regions_;
++
++  // vulkan_shared_memory_zero_copy: buffer_ is guest physical memory itself
++  // (imported with VK_EXT_external_memory_host), so uploads only make the
++  // pages valid.
++  bool TryInitializeZeroCopy();
++  bool zero_copy_ = false;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
 diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
 index 1cb3faa..be34c10 100644
 --- a/include/rex/input/input_system.h
@@ -588,10 +601,10 @@ index 1cb3faa..be34c10 100644
  
  /// Create a default InputSystem with SDL + NOP drivers.
 diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
-index 947817f..2401b34 100644
+index 947817f..dd495a3 100644
 --- a/include/rex/ui/vulkan/device.h
 +++ b/include/rex/ui/vulkan/device.h
-@@ -168,6 +168,11 @@ class VulkanDevice {
+@@ -168,6 +168,15 @@ class VulkanDevice {
      // VK_EXT_robustness2
  
      bool nullDescriptor = false;
@@ -600,9 +613,21 @@ index 947817f..2401b34 100644
 +    // (OpGroupNonUniformQuad*) are supported in fragment shaders.
 +
 +    bool subgroupQuadOperationsInFragment = false;
++
++    // VK_EXT_external_memory_host: alignment of host pointers and sizes that
++    // can be imported (0 if the extension is not enabled).
++    VkDeviceSize minImportedHostPointerAlignment = 0;
    };
  
    // Properties of the core API and enabled extensions, and enabled features.
+@@ -199,6 +208,7 @@ class VulkanDevice {
+     bool ext_1_3_KHR_maintenance4 = false;  // #414
+     // Has optional features not implied by this being true.
+     bool ext_1_3_KHR_dynamic_rendering = false;  // #55
++    bool ext_EXT_external_memory_host = false;   // #179
+   };
+ 
+   const Extensions& extensions() const { return extensions_; }
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..2e0070a 100644
 --- a/src/codegen/builders/vector.cpp
@@ -3271,10 +3296,150 @@ index 0298f06..55a8c73 100644
          command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
          MarkEdramBufferModified();
 diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
-index 6788214..44c048f 100644
+index 6788214..3ccb02a 100644
 --- a/src/graphics/vulkan/shared_memory.cpp
 +++ b/src/graphics/vulkan/shared_memory.cpp
-@@ -197,10 +197,70 @@ void VulkanSharedMemory::EndSubmission() {
+@@ -26,6 +26,12 @@
+ REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
+                     "Use sparse shared memory on Vulkan")
+     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++REXCVAR_DEFINE_BOOL(vulkan_shared_memory_zero_copy, false, "GPU/Vulkan",
++                    "Import guest physical memory as the shared memory buffer "
++                    "(VK_EXT_external_memory_host) instead of copying CPU-written pages into a "
++                    "separate buffer. No uploads (each of which ends the render pass); the GPU "
++                    "reads and writes guest memory directly, as on the console")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+ 
+ namespace rex::graphics::vulkan {
+ 
+@@ -47,6 +53,16 @@ bool VulkanSharedMemory::Initialize() {
+   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
+   const VkDevice device = vulkan_device->device();
+ 
++  if (REXCVAR_GET(vulkan_shared_memory_zero_copy) && TryInitializeZeroCopy()) {
++    last_usage_ = Usage::kTransferDestination;
++    last_written_range_ = std::make_pair<uint32_t, uint32_t>(0, 0);
++    upload_buffer_pool_ = std::make_unique<ui::vulkan::VulkanUploadBufferPool>(
++        vulkan_device, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
++        rex::align(ui::vulkan::VulkanUploadBufferPool::kDefaultPageSize,
++                   size_t(1) << page_size_log2()));
++    return true;
++  }
++
+   const VkBufferCreateFlags sparse_flags =
+       VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+ 
+@@ -169,6 +185,101 @@ bool VulkanSharedMemory::Initialize() {
+   return true;
+ }
+ 
++bool VulkanSharedMemory::TryInitializeZeroCopy() {
++  // As in xenia-edge (VulkanSharedMemory::CreateImportedGuestRamBuffer).
++  const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
++  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
++  const VkDevice device = vulkan_device->device();
++  if (!vulkan_device->extensions().ext_EXT_external_memory_host) {
++    REXGPU_WARN("Shared memory zero-copy: VK_EXT_external_memory_host not available");
++    return false;
++  }
++  auto get_host_pointer_properties = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
++      vulkan_device->vulkan_instance()->functions().vkGetDeviceProcAddr(
++          device, "vkGetMemoryHostPointerPropertiesEXT"));
++  if (!get_host_pointer_properties) {
++    REXGPU_WARN("Shared memory zero-copy: vkGetMemoryHostPointerPropertiesEXT not found");
++    return false;
++  }
++
++  // The 512 MB physical memory view: both the pointer and the size must be
++  // aligned to the import granularity (the page size, 16 KB on macOS).
++  void* guest_memory = memory().TranslatePhysical(0);
++  VkDeviceSize alignment =
++      std::max(vulkan_device->properties().minImportedHostPointerAlignment, VkDeviceSize(1));
++  if (reinterpret_cast<uintptr_t>(guest_memory) % alignment ||
++      VkDeviceSize(kBufferSize) % alignment) {
++    REXGPU_WARN("Shared memory zero-copy: guest memory {} not aligned to {}", guest_memory,
++                alignment);
++    return false;
++  }
++  VkMemoryHostPointerPropertiesEXT host_pointer_properties = {
++      VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
++  if (get_host_pointer_properties(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++                                  guest_memory, &host_pointer_properties) != VK_SUCCESS) {
++    REXGPU_WARN("Shared memory zero-copy: vkGetMemoryHostPointerPropertiesEXT failed");
++    return false;
++  }
++
++  VkExternalMemoryBufferCreateInfo external_memory_buffer_create_info = {
++      VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
++  external_memory_buffer_create_info.handleTypes =
++      VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++  VkBufferCreateInfo buffer_create_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++  buffer_create_info.pNext = &external_memory_buffer_create_info;
++  buffer_create_info.size = kBufferSize;
++  buffer_create_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
++                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
++  buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++  VkBuffer buffer;
++  if (dfn.vkCreateBuffer(device, &buffer_create_info, nullptr, &buffer) != VK_SUCCESS) {
++    REXGPU_WARN("Shared memory zero-copy: failed to create the buffer");
++    return false;
++  }
++  VkMemoryRequirements buffer_memory_requirements;
++  dfn.vkGetBufferMemoryRequirements(device, buffer, &buffer_memory_requirements);
++  // Host-visible and coherent so the CPU and the GPU see the same bytes.
++  uint32_t memory_type_bits = buffer_memory_requirements.memoryTypeBits &
++                              host_pointer_properties.memoryTypeBits &
++                              vulkan_device->memory_types().host_visible &
++                              vulkan_device->memory_types().host_coherent;
++  uint32_t memory_type;
++  if (!rex::bit_scan_forward(memory_type_bits, &memory_type)) {
++    REXGPU_WARN("Shared memory zero-copy: no host-visible coherent memory type for guest memory");
++    dfn.vkDestroyBuffer(device, buffer, nullptr);
++    return false;
++  }
++  VkImportMemoryHostPointerInfoEXT import_info = {
++      VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT};
++  import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++  import_info.pHostPointer = guest_memory;
++  VkMemoryAllocateInfo memory_allocate_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++  memory_allocate_info.pNext = &import_info;
++  memory_allocate_info.allocationSize = kBufferSize;
++  memory_allocate_info.memoryTypeIndex = memory_type;
++  VkDeviceMemory imported_memory;
++  if (dfn.vkAllocateMemory(device, &memory_allocate_info, nullptr, &imported_memory) !=
++      VK_SUCCESS) {
++    REXGPU_WARN("Shared memory zero-copy: failed to import {} MB of guest memory",
++                kBufferSize >> 20);
++    dfn.vkDestroyBuffer(device, buffer, nullptr);
++    return false;
++  }
++  if (dfn.vkBindBufferMemory(device, buffer, imported_memory, 0) != VK_SUCCESS) {
++    REXGPU_WARN("Shared memory zero-copy: failed to bind the imported memory");
++    dfn.vkFreeMemory(device, imported_memory, nullptr);
++    dfn.vkDestroyBuffer(device, buffer, nullptr);
++    return false;
++  }
++  buffer_ = buffer;
++  buffer_memory_type_ = memory_type;
++  buffer_memory_.push_back(imported_memory);
++  zero_copy_ = true;
++  REXGPU_INFO("Shared memory: zero-copy, guest physical memory {} imported as the buffer",
++              guest_memory);
++  return true;
++}
++
+ void VulkanSharedMemory::Shutdown(bool from_destructor) {
+   upload_buffer_pool_.reset();
+ 
+@@ -181,6 +292,7 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
+     dfn.vkFreeMemory(device, memory, nullptr);
+   }
+   buffer_memory_.clear();
++  zero_copy_ = false;
+ 
+   // If calling from the destructor, the SharedMemory destructor will call
+   // ShutdownCommon.
+@@ -197,10 +309,70 @@ void VulkanSharedMemory::EndSubmission() {
    upload_buffer_pool_->FlushWrites();
  }
  
@@ -3345,7 +3510,7 @@ index 6788214..44c048f 100644
    if (last_usage_ != usage || last_written_range_.second) {
      VkPipelineStageFlags src_stage_mask, dst_stage_mask;
      VkAccessFlags src_access_mask, dst_access_mask;
-@@ -273,15 +333,40 @@ bool VulkanSharedMemory::UploadRanges(
+@@ -273,15 +445,49 @@ bool VulkanSharedMemory::UploadRanges(
    if (upload_page_ranges.empty()) {
      return true;
    }
@@ -3358,6 +3523,15 @@ index 6788214..44c048f 100644
 -                         << page_size_log2()));
 -  command_processor_.SubmitBarriers(true);
 -  DeferredCommandBuffer& command_buffer = command_processor_.deferred_command_buffer();
++  if (zero_copy_) {
++    // The buffer is guest memory: nothing to copy, the pages only need to be
++    // marked valid (and watched) again.
++    for (const std::pair<uint32_t, uint32_t>& upload_range : upload_page_ranges) {
++      MakeRangeValid(upload_range.first << page_size_log2(),
++                     upload_range.second << page_size_log2(), false);
++    }
++    return true;
++  }
 +  // Hoisted uploads (vulkan_hoist_shared_memory_uploads) run at the start of
 +  // the submission, ordered by barriers around them there, so they need no
 +  // barrier and no render pass end here. Only uploads whose pages nothing
@@ -3570,19 +3744,31 @@ index 813bb1c..4b46c83 100644
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index 8197bb4..d22286d 100644
+index 8197bb4..a0afb57 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
-@@ -330,6 +330,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -236,6 +236,9 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_custom_border_color)
+       // Required for true null descriptors in bindless texture bindings.
+       XE_UI_VULKAN_STRUCT_EXTENSION(EXT_robustness2)
++      // #179. Guest memory imported as the shared memory buffer
++      // (vulkan_shared_memory_zero_copy).
++      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_external_memory_host)
+     }
+     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
+       // #237.
+@@ -330,6 +333,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
    VulkanFeatures<VkPhysicalDeviceCustomBorderColorFeaturesEXT,
                   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT>
        features_EXT_custom_border_color;
 +  VkPhysicalDeviceSubgroupProperties properties_1_1_subgroup = {
 +      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
++  VkPhysicalDeviceExternalMemoryHostPropertiesEXT properties_EXT_external_memory_host = {
++      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
    VkPhysicalDeviceCustomBorderColorPropertiesEXT properties_EXT_custom_border_color = {
        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT};
    VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
-@@ -376,6 +378,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -376,6 +383,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      if (device->extensions_.ext_EXT_robustness2) {
        features_EXT_robustness2.Link(supported_features_2, device_create_info);
      }
@@ -3590,10 +3776,14 @@ index 8197bb4..d22286d 100644
 +      properties_1_1_subgroup.pNext = properties_2.pNext;
 +      properties_2.pNext = &properties_1_1_subgroup;
 +    }
++    if (device->extensions_.ext_EXT_external_memory_host) {
++      properties_EXT_external_memory_host.pNext = properties_2.pNext;
++      properties_2.pNext = &properties_EXT_external_memory_host;
++    }
      ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
      ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
    }
-@@ -731,6 +737,13 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -731,6 +746,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  
@@ -3603,6 +3793,12 @@ index 8197bb4..d22286d 100644
 +  REXLOG_INFO("* subgroupSize: {}, subgroup quad operations in fragment shaders: {}",
 +              properties_1_1_subgroup.subgroupSize,
 +              device->properties_.subgroupQuadOperationsInFragment);
++  if (device->extensions_.ext_EXT_external_memory_host) {
++    device->properties_.minImportedHostPointerAlignment =
++        properties_EXT_external_memory_host.minImportedHostPointerAlignment;
++    REXLOG_INFO("* VK_EXT_external_memory_host: minImportedHostPointerAlignment {}",
++                device->properties_.minImportedHostPointerAlignment);
++  }
 +
  #undef XE_UI_VULKAN_LIMIT
  #undef XE_UI_VULKAN_ENUM_LIMIT
