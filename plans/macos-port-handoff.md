@@ -402,6 +402,23 @@ the same way as Xenia's ROV path.
      40 s each, uncapped: `fable_2_124`-`127`; frame 47.7 -> 35.2 ms).
      Six shots each way within 1.7-1.9% (snow), no z-fighting stripes on
      walls, ground or roofs (`out/contract_off`, `out/contract_on`).
+  8. **Trace after contraction (2026-10-15,
+     `out/profile/contract_1015.trace`, 5 s at the trail, uncapped,
+     `fable_2_128.log` 29.1 fps).** GPU time per game frame 29.1-31.2 ms
+     (p10-p90, max 32.6): under the game's 33.3 ms, so the trail is at
+     the cap on average. The main color pass is 7.2 ms (was 17.7), the
+     next 1.5 and 1.4 ms (was 4.1), the post-processing chain 1.6 ms. The
+     GPU is busy 86% of the time; the idle is mostly 1-10 ms gaps.
+     **What's left is pacing:** frame start to start is 34.8 ms median
+     but 68 ms at p90 (24 of ~140 frames took 40-105 ms) while their GPU
+     time was a normal 29-32 ms: they missed the 33 ms interval and
+     waited for the next. A frame is two submissions, and the GPU idles
+     between them for 4.2 ms median (6.5 p90, up to 10): it finishes the
+     first (~10 ms of work) before the CPU has recorded and submitted
+     the second (~19 ms of work). 29.7 + 4.2 ms > 33.3 ms. Next: find
+     why the frame is split there and submit the second part in pieces
+     (or earlier) so the GPU doesn't wait for the CPU's recording; and
+     the CPU cost of recording the main pass.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
