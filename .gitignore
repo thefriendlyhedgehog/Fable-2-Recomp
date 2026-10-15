@@ -82,3 +82,4 @@ XenonRecomp
 TODO.md
 !tools/shot_diff.py
 !tools/gputrace_timeline.py
+!tools/phase_fps.py

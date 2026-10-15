@@ -55,6 +55,20 @@ longer do. Making it safe is only worth it if a profile shows the pass
 restarts it avoids matter; xenia-edge's zero-copy shared memory
 (`VK_EXT_external_memory_host`) would remove most uploads instead.
 
+**Fixed (2026-10-14):** vertex buffers that skip their shared memory
+request (same address and size as before, an upstream shortcut that lasts
+across frames) did not mark their pages used in the submission, so an
+upload of those pages could be hoisted ahead of an earlier draw that read
+the old data. `VulkanSharedMemory::NoteRangeUsed` now marks them. Two
+flicker tests with hoisting (`fable_2_102`, `fable_2_105`): all 30 shots
+within 1.0-2.1% of shot 00 (snow), picture correct. And hoisting now pays:
+**+38% fps** (9.09 vs. 6.57, 81 vs. 258 render pass restarts per frame;
+`fable_2_104.log`, eight alternating 30 s phases with 60-frame statistics,
+`tools/phase_fps.py`; absolute numbers low because another process held
+~49% of the GPU). The earlier "no measurable speed" was before the quad
+patch fix, when tessellation passes dominated. Still opt-in until it has
+been played with for a while.
+
 Ordering holes found by a review against upstream Xenia and xenia-edge and
 fixed anyway (see `docs/macos_port.md`, "Shared memory and texture load
 ordering"):
@@ -176,7 +190,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
-| - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; **causes the flickering dark ground areas, do not pass it**) |
+| - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 | - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
@@ -265,6 +279,7 @@ the same way as Xenia's ROV path.
   the race log). An upload of such a page can then overtake an earlier
   draw that read the old data. Marking those pages too, then rerunning the
   flicker test with `vulkan_hoist_shared_memory_uploads`, is the next step.
+  (Done: that was it, see "Fixed (2026-10-14)" under problem 1.)
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
@@ -414,6 +429,10 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- Upload hoisting flicker: vertex buffers that skip their request now mark
+  their pages used in the submission, so no hoisted upload overtakes their
+  reads; hoisting is clean in two flicker tests and +38% fps (still
+  opt-in).
 - Two upstream bugs (found by checking xenia-edge and the ReXGlue
   issues): the presenter never recorded the format of its final effect
   pipeline, so every paint waited for the previous one and recreated it
