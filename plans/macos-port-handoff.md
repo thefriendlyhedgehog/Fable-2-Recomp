@@ -336,6 +336,19 @@ the same way as Xenia's ROV path.
      orbs come and go with the animation in both).
      Remaining render pass ends per frame: 33 resolves/transfers, 24 FSI
      barriers, 7 texture loads, ~5 uploads.
+  4. **Resolve batching: not possible (checked 2026-10-15)** on the trail
+     frame of `fable_2_109.log` (frame report). Moving a resolve later
+     to share one render pass end with the next requires no draw in
+     between to overwrite its EDRAM source or sample its result; for all
+     33 resolves the blocking draw comes before the next resolve,
+     usually the first draw after it. ~20 of them are one-draw
+     post-processing steps (mip/blur chains: a draw renders into EDRAM,
+     the resolve copies it out, the next draw samples the copy and
+     renders into the same EDRAM). What could still be cut is the cost
+     of each step (render pass, resolve dispatch, texture load dispatch,
+     copy into the image, each a separate Metal encoder), e.g. a load
+     writing the image directly instead of through a scratch buffer and
+     a copy; measure the chain's GPU time with a trace first.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
