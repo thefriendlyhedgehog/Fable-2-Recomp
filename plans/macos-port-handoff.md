@@ -194,6 +194,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 | - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
+| - | `vulkan_debug_skip_adaptive_patches` | skip adaptively tessellated patch draws (the ground goes missing), to measure what they cost |
 | - | `vulkan_debug_end_render_pass_every` | end the render pass before every Nth draw, to measure what restarts cost (~0.12 ms each) |
 | - | `vulkan_fsi_specialize` | FSI pixel shaders built for the draw's render target formats, 1x MSAA and no blending (restart; no fps change at the trail) |
 | - | `vulkan_gpu_progress_wait` | submit and wait for the host GPU before every guest-visible GPU progress write (fixes zero-copy corruption, costs ~35% fps) |
@@ -280,6 +281,28 @@ the same way as Xenia's ROV path.
   draw that read the old data. Marking those pages too, then rerunning the
   flicker test with `vulkan_hoist_shared_memory_uploads`, is the next step.
   (Done: that was it, see "Fixed (2026-10-14)" under problem 1.)
+- **With upload hoisting, where frames go (2026-10-14, `fable_2_107.log`,
+  GPU free of other load, uncapped, 60-frame windows):** the trail runs at
+  **16.9 fps** (59 ms per frame). Remaining render pass ends per frame: 52
+  barriers, 33 resolves/transfers, 20 texture loads, 2 uploads, 1
+  submission (~0.12 ms each). Next levers, largest first:
+  1. **The 44 adaptive quad patch draws** (depth prepass, base color) still
+     use MoltenVK tessellation: skipping them (`vulkan_debug_skip_adaptive_patches`,
+     alternated 4x) gives 20.4 fps, so they cost **~10 ms per frame
+     (17%)**, most of it the tessellation compute passes and the render
+     pass splits around them. Drawing them with the vertex shader grid at
+     factor 16, like the continuous lighting draws, would also make all
+     ground passes build the same geometry.
+  2. **Barrier ends by source** (`Barrier render pass ends per frame by
+     pushing code`, symbolize with `xcrun atos -o
+     out/build/mac-arm64-release/librexgpu-xenos.dylib -arch arm64 -l 0x0
+     <offset>`): `VulkanSharedMemory::Use` 28 per frame (~3.4 ms; the
+     draw's switch between kRead and kGuestDrawReadWrite: after a draw with
+     memory export, every next draw gets a barrier whether or not it reads
+     the exported range, which an overlap check could skip);
+     `VulkanRenderTargetCache::RequestPixelShaderInterlockBarrier` 24 per
+     frame (~2.9 ms; render target layouts changing over EDRAM written
+     before, inherent to FSI); `VulkanTextureCache::RequestTextures` 1.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
