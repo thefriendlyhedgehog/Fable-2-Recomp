@@ -366,6 +366,30 @@ the same way as Xenia's ROV path.
      pass), so they are not wall time. Next: what costs inside that pass
      (shader profiler, or the frame report's draws of that pass by
      shader), not render pass ends.
+  6. **Cost by pixel shader (2026-10-15, `vulkan_debug_skip_ps` groups
+     alternated twice for 15 s each, uncapped; `fable_2_118.log`,
+     `fable_2_119.log`; frame 46.7-47.8 ms).** Frame time saved by
+     skipping: the snow (`718C12FF9E1B888B`, 22 point list draws x 4096
+     points, additive, 64x64 texture) **6.4 ms**; `A4A965C189287B99`
+     (48 one-point draws writing neither color nor depth, likely the
+     memory export draws, plus ~12 clear rectangles) 5.7 ms; the main
+     geometry (`8D900846800943C8`, ~680 draws) 7.4 ms; the terrain patch
+     shaders 1.7 + 1.8 ms; the hero/house shader ~0. The snow's cost does
+     not depend on its size (`vulkan_debug_point_size_scale` 1 / 0.25 /
+     0.02: 21.4 / 21.2 / 21.4 fps, `fable_2_120.log`; shots confirm the
+     flakes shrink), so it is vertex work: each point runs the procedural
+     vertex shader (`19A01C01290E20A7`, 581 ALU instructions, no fetches,
+     262 KB of SPIR-V, the largest of 70) 4 times. **Its MSL (SPIRV-Cross)
+     has 511 calls to the `optnone` precise-math helpers** (`spvFMul`,
+     `spvFAdd`, ...) generated for the translator's NoContraction
+     decorations: nearly every instruction becomes a call Metal's compiler
+     can't optimize. The FSI pixel shaders too: all 89 checked, ~45000
+     calls in total, 495 in the main geometry shader, 1166 in the terrain
+     one, up to 2198. (Checked with the local `spirv-cross`; confirm at
+     MoltenVK's pinned commit, `tools/sdk_offline/README.md`.) **Next
+     lever: xenia-edge 3ec3e8a05 `spirv_moltenvk_allow_contraction`**
+     (drop NoContraction on MoltenVK), checking the depth prepass still
+     matches the later passes (z-fighting) first.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
