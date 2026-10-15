@@ -419,6 +419,27 @@ the same way as Xenia's ROV path.
      why the frame is split there and submit the second part in pieces
      (or earlier) so the GPU doesn't wait for the CPU's recording; and
      the CPU cost of recording the main pass.
+  9. **Why the frame is split (2026-10-15, `vulkan_submission_log` +
+     `vulkan_long_frame_log`, `gpu_wait_reg_mem_log`; `fable_2_129`,
+     `fable_2_130`).** Every frame: the first submission at +1.2 ms (446
+     draws, sent at the end of the primary buffer, `ExecutePrimaryBuffer`
+     -> `OnPrimaryBufferEnd`), then the CP sits in **WAIT_REG_MEM for
+     16-20 ms on guest memory 0x1FC83004 == 0** (15-17 polls, the handler
+     sleeps 1 ms between polls), then records the other ~1960 draws and
+     submits them with the swap at +27-29 ms. So the CP isn't slow to
+     record: the guest releases the rest of the frame late, and a
+     submission split can't raise the frame rate. A `sample` of the
+     process (5 s at the trail) shows why: the game's render thread
+     ("3D Engine") is 96% busy, of which `fable2::functrace::trace` is
+     21% of all samples (the app's REX_FUNC_PROLOGUE hook, called on every
+     guest function entry even with tracing off), `GpuProgressCheck_82B9BF90`
+     18% (spinning on GPU progress) and `FrameLimiterWait_82242628` 5%;
+     GameThread is 55% busy (functrace its top leaf too), the CP 59%.
+     **Next:** make the hook free when tracing is off (an inline check of
+     a global flag in the macro instead of a call; changes the PCH, so the
+     whole recompiled code rebuilds), then remeasure the render thread and
+     the WAIT_REG_MEM time; the 1 ms poll sleep may also add up to ~1 ms of
+     latency per frame.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
