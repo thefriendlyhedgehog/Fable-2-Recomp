@@ -66,8 +66,8 @@ within 1.0-2.1% of shot 00 (snow), picture correct. And hoisting now pays:
 `fable_2_104.log`, eight alternating 30 s phases with 60-frame statistics,
 `tools/phase_fps.py`; absolute numbers low because another process held
 ~49% of the GPU). The earlier "no measurable speed" was before the quad
-patch fix, when tessellation passes dominated. Still opt-in until it has
-been played with for a while.
+patch fix, when tessellation passes dominated. **On by default on macOS**
+since then (`fable_2_106.log`: 80 restarts per frame without the flag).
 
 Ordering holes found by a review against upstream Xenia and xenia-edge and
 fixed anyway (see `docs/macos_port.md`, "Shared memory and texture load
@@ -190,7 +190,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
-| - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (opt-in; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
+| - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 | - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
@@ -431,8 +431,8 @@ luminance at 280x180 / 560x360).
 
 - Upload hoisting flicker: vertex buffers that skip their request now mark
   their pages used in the submission, so no hoisted upload overtakes their
-  reads; hoisting is clean in two flicker tests and +38% fps (still
-  opt-in).
+  reads; hoisting is clean in two flicker tests and +38% fps, and on by
+  default on macOS.
 - Two upstream bugs (found by checking xenia-edge and the ReXGlue
   issues): the presenter never recorded the format of its final effect
   pipeline, so every paint waited for the previous one and recreated it
