@@ -54,20 +54,34 @@
 
 namespace fable2::functrace {
 
-inline std::atomic<bool>& enabled() {
-  static std::atomic<bool> e{[] {
+// Whether tracing is on. A constant-initialized global, not a function-local
+// static: REX_FUNC_PROLOGUE() reads it inline on every guest function entry,
+// so with tracing off the hook costs one load and a branch rather than a call
+// and a static-initialization guard check (which took ~20% of the render
+// thread's time at the trail on macOS).
+inline std::atomic<bool> g_enabled{false};
+
+namespace detail {
+inline bool enabled_from_env() {
 #ifdef _WIN32
-    char v[8] = {};
-    size_t n = 0;
-    return ::getenv_s(&n, v, sizeof(v), "FABLE2_FUNC_TRACE") == 0 &&
-           v[0] == '1';
+  char v[8] = {};
+  size_t n = 0;
+  return ::getenv_s(&n, v, sizeof(v), "FABLE2_FUNC_TRACE") == 0 && v[0] == '1';
 #else
-    const char* v = std::getenv("FABLE2_FUNC_TRACE");
-    return v != nullptr && v[0] == '1';
+  const char* v = std::getenv("FABLE2_FUNC_TRACE");
+  return v != nullptr && v[0] == '1';
 #endif
-  }()};
-  return e;
 }
+// Applies FABLE2_FUNC_TRACE at static initialization, before guest code runs.
+inline const bool g_enabled_env_applied = [] {
+  if (enabled_from_env()) {
+    g_enabled.store(true, std::memory_order_relaxed);
+  }
+  return true;
+}();
+}  // namespace detail
+
+inline std::atomic<bool>& enabled() { return g_enabled; }
 
 inline std::string& filter() {
   static std::string f = [] {
@@ -478,14 +492,23 @@ inline void Fable2FuncTraceFlush() {
 #if defined(__clang__)
 #define REX_FUNC_PROLOGUE()                                            \
   __builtin_assume(((size_t)base & 0x1F) == 0),                        \
-      Fable2FuncTraceCall(__func__)
+      (__builtin_expect(fable2::functrace::g_enabled.load(               \
+                            std::memory_order_relaxed),                \
+                        0)                                             \
+           ? Fable2FuncTraceCall(__func__)                             \
+           : (void)0)
 #elif defined(__GNUC__)
 #define REX_FUNC_PROLOGUE()                                            \
   do {                                                                 \
     if (((size_t)base & 0x1F) != 0) __builtin_unreachable();           \
-    Fable2FuncTraceCall(__func__);                                     \
+    if (__builtin_expect(fable2::functrace::g_enabled.load(            \
+                             std::memory_order_relaxed),               \
+                         0))                                           \
+      Fable2FuncTraceCall(__func__);                                   \
   } while (0)
 #else
-#define REX_FUNC_PROLOGUE() Fable2FuncTraceCall(__func__)
+#define REX_FUNC_PROLOGUE()                                            \
+  if (fable2::functrace::g_enabled.load(std::memory_order_relaxed))    \
+  Fable2FuncTraceCall(__func__)
 #endif
 #endif

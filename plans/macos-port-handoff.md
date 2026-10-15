@@ -440,6 +440,23 @@ the same way as Xenia's ROV path.
      whole recompiled code rebuilds), then remeasure the render thread and
      the WAIT_REG_MEM time; the 1 ms poll sleep may also add up to ~1 ms of
      latency per frame.
+  10. **Hook made free when off (2026-10-15):** `REX_FUNC_PROLOGUE()` now
+     reads a constant-initialized global (`fable2::functrace::g_enabled`,
+     set from `FABLE2_FUNC_TRACE` at static initialization) inline and
+     calls `Fable2FuncTraceCall` only when tracing is on (it was a call plus
+     a function-local static's guard check on every guest function entry:
+     a 25 s traced run counts 55 M entries of `__savegprlr_29` alone).
+     Rebuilds all recompiled code (13 min). Samples at the trail
+     (`fable_2_133`): the hook is gone; GameThread 518 -> 435 busy
+     samples of 939; the render thread stays 96% busy, but the freed time
+     went into waiting: `GpuProgressCheck_82B9BF90` 165 -> 236 samples,
+     `FrameLimiterWait_82242628` 49 -> 76. So the trail is unchanged
+     (29.0-29.1 fps, 11-17 frames of 120 over 40 ms, WAIT_REG_MEM 18.9 ms
+     median); the gain is CPU headroom for heavier scenes. At the trail
+     the render thread waits for GPU progress (written by the CP as it
+     processes the ring) about a quarter of its time: what it waits for
+     is next. Tracing still works (`FABLE2_FUNC_TRACE=1` writes the
+     summary).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
