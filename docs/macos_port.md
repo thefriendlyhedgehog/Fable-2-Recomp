@@ -560,6 +560,25 @@ read. Unknown reads (compute, transfer, the guest DMA index copy, pixel
 shader vertex fetch) and non-draw writes keep the old behavior. 28 fewer
 render pass ends per frame, 19.8 fps vs. 19.4 at the trail, same picture.
 
+### Hoisted texture loads
+
+A texture load (compute from the shared memory into a scratch buffer, then
+a copy into the image) in the middle of a frame ends the render pass.
+`vulkan_hoist_texture_loads` (default on macOS) records a load into a
+separate list replayed at the start of the submission, after the hoisted
+uploads and their barriers, when moving it there can't change what any
+command sees: the image wasn't sampled or loaded in the command stream of
+this submission yet (`VulkanTexture::main_stream_submission`), and the
+GPU wrote none of its guest memory in this submission so far
+(`VulkanSharedMemory::AreBytesWrittenInSubmission`, set by every `Use`
+with a written range: resolves, memory export, uploads that stayed in the
+stream). Hoisted loads bind their pipelines directly, take scratch memory
+from their own pool (32 MB pages, reclaimed when the submission
+completes; larger loads stay in the stream) and transition the image to
+the sampled layout themselves, so the draws need no barrier. At the trail
+21 of ~61 loads per frame qualify: the others reload textures sampled
+earlier in the submission or read data resolved in it. 20.8 fps vs. 20.1.
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:

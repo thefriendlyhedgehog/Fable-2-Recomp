@@ -319,6 +319,23 @@ the same way as Xenia's ROV path.
      sweep shots off/on all within 1.7-2.0% (snowflakes). The "render pass
      (re)starts" counter doesn't move: these ends weren't counted as
      restarts (separate passes around the export draws).
+  3. **Texture loads: done (2026-10-15), `vulkan_hoist_texture_loads`**
+     (default on macOS, takes effect from the next submission). Loads
+     whose result nothing earlier in the submission can affect (the image
+     not sampled or loaded in the command stream yet, its guest memory not
+     written by the GPU in the submission: resolves, memory export,
+     uploads that stayed in the stream; not scaled resolve, not 3D) are
+     recorded into a second list replayed at the start of the submission,
+     after the hoisted uploads, with scratch memory from their own pool;
+     they leave the image in the sampled layout. Of ~61 loads per frame,
+     21 are hoisted, 25 reload a texture already sampled earlier in the
+     submission, 15 read what a resolve wrote in it (`Texture loads
+     hoisted per frame` line). Texture load render pass ends 20 -> 7,
+     restarts 82 -> 69 per frame: **20.83 fps vs. 20.10** (alternated 3x,
+     `fable_2_114.log`); 12 sweep shots off/on within 1.8-2.1% (the trail
+     orbs come and go with the animation in both).
+     Remaining render pass ends per frame: 33 resolves/transfers, 24 FSI
+     barriers, 7 texture loads, ~5 uploads.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
