@@ -349,6 +349,23 @@ the same way as Xenia's ROV path.
      copy into the image, each a separate Metal encoder), e.g. a load
      writing the image directly instead of through a scratch buffer and
      a copy; measure the chain's GPU time with a trace first.
+  5. **Trace of the chain (2026-10-15, `out/profile/chain_1015.trace`,
+     5 s at the trail, uncapped, ~21 fps, GPU 96.5% busy with the game;
+     `tools/gputrace_frame.py` prints a frame's encoders in wall-clock
+     order).** A game frame is two command buffers, 13.2 + 33.7 ms. The
+     post-processing chain (resolves 17-31) is one 2.0 ms run of 55 short
+     encoders near the end, plus ~1 ms of shorter runs earlier: **~3 ms,
+     ~6% of the frame**, so even a perfect resolve/load path gains at
+     most that. **One render encoder takes 17.7 ms (38% of the frame)**:
+     most likely the main color pass (~1024 draws at 1120x720, 1x MSAA,
+     targets alternating between formats 3 and 12, FSI); then passes of
+     4.1, 2.1, 2.1 ms and many of 0.3-0.9 ms. Fragment work is 59% of
+     channel time. The unlabeled "Blit Command" intervals that
+     `gputrace_timeline.py` counts as 14% of GPU time overlap the other
+     encoders (they start with a dispatch and run on past the next render
+     pass), so they are not wall time. Next: what costs inside that pass
+     (shader profiler, or the frame report's draws of that pass by
+     shader), not render pass ends.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
