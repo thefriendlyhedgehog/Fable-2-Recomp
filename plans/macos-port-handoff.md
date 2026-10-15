@@ -306,6 +306,19 @@ the same way as Xenia's ROV path.
      `VulkanRenderTargetCache::RequestPixelShaderInterlockBarrier` 24 per
      frame (~2.9 ms; render target layouts changing over EDRAM written
      before, inherent to FSI); `VulkanTextureCache::RequestTextures` 1.
+     **Done (2026-10-15): `vulkan_skip_disjoint_draw_barriers`** (default
+     on, live). By transition (`Shared memory usage barriers per frame`):
+     ~26 memory export draws per frame, 23 of them right after another
+     one, 3 reads after one. `VulkanSharedMemory::UseForDraw` now tracks
+     the ranges draws read (vertex fetch, guest DMA indices) and write
+     (memory export) since the last barrier, and inserts one only on an
+     overlap (read or write after a draw write, write after a draw read),
+     after untracked reads (compute, transfer, pixel shader vertex fetch)
+     or other writes. Barrier render pass ends 52 -> 24 per frame;
+     **19.80 fps vs. 19.44** (alternated 3x, `fable_2_111.log`); 12
+     sweep shots off/on all within 1.7-2.0% (snowflakes). The "render pass
+     (re)starts" counter doesn't move: these ends weren't counted as
+     restarts (separate passes around the export draws).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

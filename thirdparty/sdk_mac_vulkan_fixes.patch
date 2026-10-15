@@ -414,7 +414,7 @@ index 4d85a2b..c42a29d 100644
    std::vector<uint64_t> host_gpu_memory_sparse_allocated_;
    uint32_t host_gpu_memory_sparse_allocations_ = 0;
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..19db77e 100644
+index 696ff48..92dfea0 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -519,7 +519,17 @@ index 696ff48..19db77e 100644
  
    std::vector<VkSparseMemoryBind> sparse_memory_binds_;
    std::vector<SparseBufferBind> sparse_buffer_binds_;
-@@ -801,6 +849,49 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -747,6 +795,9 @@ class VulkanCommandProcessor : public CommandProcessor {
+   };
+   std::array<VertexBufferState, 96> vertex_buffer_states_{};
+   uint64_t vertex_buffers_in_sync_[2] = {};
++  // Shared memory ranges (start, length) the current draw reads, for
++  // VulkanSharedMemory::UseForDraw.
++  std::vector<std::pair<uint32_t, uint32_t>> draw_shared_memory_reads_;
+   std::unordered_map<uint64_t, ReadbackBuffer> readback_buffers_;
+   std::unordered_map<uint64_t, ReadbackBuffer> memexport_readback_buffers_;
+ 
+@@ -801,6 +852,49 @@ class VulkanCommandProcessor : public CommandProcessor {
    // (current_guest_graphics_pipeline_ is VK_NULL_HANDLE in this case).
    // TODO(Triang3l): Change to a deferred compilation handle.
    VkPipeline current_guest_graphics_pipeline_;
@@ -569,7 +579,7 @@ index 696ff48..19db77e 100644
    VkPipeline current_external_graphics_pipeline_;
    VkPipeline current_external_compute_pipeline_;
  
-@@ -839,6 +930,41 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -839,6 +933,41 @@ class VulkanCommandProcessor : public CommandProcessor {
  
    // Temporary storage for memexport stream constants used in the draw.
    std::vector<draw_util::MemExportRange> memexport_ranges_;
@@ -739,10 +749,18 @@ index 34f7033..57a6ffa 100644
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
 diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
-index 104bdad..8e0486a 100644
+index 104bdad..d6b8fd7 100644
 --- a/include/rex/graphics/vulkan/shared_memory.h
 +++ b/include/rex/graphics/vulkan/shared_memory.h
-@@ -19,6 +19,12 @@
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <algorithm>
++#include <array>
+ #include <memory>
+ #include <utility>
+ #include <vector>
+@@ -19,6 +20,12 @@
  #include <rex/memory.h>
  #include <rex/ui/vulkan/upload_buffer_pool.h>
  
@@ -755,10 +773,50 @@ index 104bdad..8e0486a 100644
  namespace rex::graphics::vulkan {
  
  class VulkanCommandProcessor;
-@@ -49,13 +55,38 @@ class VulkanSharedMemory : public SharedMemory {
+@@ -45,17 +52,77 @@ class VulkanSharedMemory : public SharedMemory {
+   };
+   // Inserts a pipeline barrier for the target usage, also ensuring consecutive
+   // read-write accesses are ordered with each other.
+-  void Use(Usage usage, std::pair<uint32_t, uint32_t> written_range = {});
++  void Use(Usage usage, std::pair<uint32_t, uint32_t> written_range = {}) {
++    UseImpl(usage, written_range, nullptr);
++  }
++  // The shared memory accesses of a draw, for vulkan_skip_disjoint_draw_barriers:
++  // byte ranges (start, length) it reads (vertex fetch, guest DMA indices),
++  // or reads_known false if it may read elsewhere.
++  struct DrawReads {
++    const std::pair<uint32_t, uint32_t>* ranges = nullptr;
++    size_t count = 0;
++    bool reads_known = true;
++  };
++  // Use for a draw (kGuestDrawReadWrite if written_range is not empty, kRead
++  // otherwise). With vulkan_skip_disjoint_draw_barriers, no barrier is
++  // inserted between draws whose ranges don't conflict (no draw reads or
++  // writes bytes another draw wrote, no draw writes bytes another draw read,
++  // since the last barrier) - such a barrier ends the render pass.
++  void UseForDraw(std::pair<uint32_t, uint32_t> written_range, const DrawReads& reads) {
++    UseImpl(written_range.second ? Usage::kGuestDrawReadWrite : Usage::kRead, written_range,
++            &reads);
++  }
  
    VkBuffer buffer() const { return buffer_; }
  
++  // Barriers Use has pushed, by previous usage, new usage and whether the
++  // previous use wrote (statistics); TakeUseBarrierCounts returns and resets.
++  using UseBarrierCounts = std::array<std::array<std::array<uint32_t, 2>, 4>, 4>;
++  UseBarrierCounts TakeUseBarrierCounts() {
++    UseBarrierCounts counts = use_barrier_counts_;
++    use_barrier_counts_ = {};
++    return counts;
++  }
++  // Draw barriers vulkan_skip_disjoint_draw_barriers has skipped (statistics);
++  // returns and resets.
++  uint32_t TakeDrawBarriersSkipped() {
++    uint32_t count = draw_barriers_skipped_;
++    draw_barriers_skipped_ = 0;
++    return count;
++  }
++
 +  // The range is read by the current submission without a RequestRanges call
 +  // (a vertex buffer already requested): marks its pages used in the
 +  // submission, so a hoisted upload of them does not overtake this read
@@ -794,7 +852,7 @@ index 104bdad..8e0486a 100644
    void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
                       VkAccessFlags& access_mask) const;
  
-@@ -72,6 +103,68 @@ class VulkanSharedMemory : public SharedMemory {
+@@ -72,6 +139,79 @@ class VulkanSharedMemory : public SharedMemory {
  
    std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
    std::vector<VkBufferCopy> upload_regions_;
@@ -804,6 +862,17 @@ index 104bdad..8e0486a 100644
 +  // pages valid.
 +  bool TryInitializeZeroCopy();
 +  bool zero_copy_ = false;
++
++  UseBarrierCounts use_barrier_counts_ = {};
++  uint32_t draw_barriers_skipped_ = 0;
++
++  void UseImpl(Usage usage, std::pair<uint32_t, uint32_t> written_range, const DrawReads* draw);
++  // Draw accesses since the last barrier (vulkan_skip_disjoint_draw_barriers),
++  // as (start, end) byte ranges; untracked_reads_ if anything read the buffer
++  // since then without its range being known (non-draw reads too).
++  std::vector<std::pair<uint32_t, uint32_t>> draw_pending_writes_;
++  std::vector<std::pair<uint32_t, uint32_t>> draw_pending_reads_;
++  bool untracked_reads_ = true;
 +
 +  // vulkan_zero_copy_race_log: finds guest memory the CPU rewrites while a
 +  // submission that reads it is not complete yet (what the GPU then reads with
@@ -2280,7 +2349,7 @@ index ec0df7c..d5555c2 100644
  
    if (!exact_range) {
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..525586d 100644
+index 001f36b..fa5c474 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,9 +10,15 @@
@@ -3057,7 +3126,15 @@ index 001f36b..525586d 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -3987,6 +4566,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3978,6 +4557,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   }
+ 
+   // Ensure vertex buffers are resident.
++  draw_shared_memory_reads_.clear();
+   const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
+   for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
+     uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
+@@ -3987,6 +4567,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        uint32_t vfetch_index = i * 32 + j;
        uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
        if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
@@ -3065,15 +3142,17 @@ index 001f36b..525586d 100644
 +        const VertexBufferState& state = vertex_buffer_states_[vfetch_index];
 +        shared_memory_->NoteRangeUsed(state.address << 2, state.size << 2,
 +                                      SharedMemory::RequestKind::kVertices);
++        draw_shared_memory_reads_.emplace_back(state.address << 2, state.size << 2);
          continue;
        }
        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
-@@ -4011,10 +4594,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4011,10 +4596,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
        VertexBufferState& state = vertex_buffer_states_[vfetch_index];
        if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
 +        shared_memory_->NoteRangeUsed(state.address << 2, state.size << 2,
 +                                      SharedMemory::RequestKind::kVertices);
++        draw_shared_memory_reads_.emplace_back(state.address << 2, state.size << 2);
          vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
          continue;
        }
@@ -3083,7 +3162,15 @@ index 001f36b..525586d 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4032,7 +4618,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4023,6 +4612,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+       }
+       state.address = vfetch_constant.address;
+       state.size = vfetch_constant.size;
++      draw_shared_memory_reads_.emplace_back(state.address << 2, state.size << 2);
+       vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
+     }
+   }
+@@ -4032,7 +4622,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -3093,7 +3180,7 @@ index 001f36b..525586d 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4631,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4635,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -3103,7 +3190,7 @@ index 001f36b..525586d 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4072,6 +4660,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4072,6 +4664,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
  
        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -3111,7 +3198,54 @@ index 001f36b..525586d 100644
        SubmitBarriers(true);
  
        VkBufferCopy guest_dma_index_copy_region = {};
-@@ -4111,14 +4700,56 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4094,31 +4687,97 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+   // TODO(Triang3l): Find some PM4 command that can be used for indication of
+   // when memexports should be awaited instead of inserting the barrier in Use
+   // every time if memory export was done in the previous draw?
++  // Indices read from the shared memory (bounded by the larger vertex count,
++  // 32-bit).
++  if ((primitive_processing_result.index_buffer_type ==
++           PrimitiveProcessor::ProcessedIndexBufferType::kGuestDMA &&
++       guest_dma_index_scratch_buffer.buffer() == VK_NULL_HANDLE) ||
++      primitive_processing_result.index_buffer_type ==
++          PrimitiveProcessor::ProcessedIndexBufferType::kHostBuiltinForDMA) {
++    draw_shared_memory_reads_.emplace_back(
++        primitive_processing_result.guest_index_base,
++        std::max(primitive_processing_result.guest_draw_vertex_count,
++                 primitive_processing_result.host_draw_vertex_count) *
++            uint32_t(sizeof(uint32_t)));
++  }
++  VulkanSharedMemory::DrawReads draw_reads;
++  draw_reads.ranges = draw_shared_memory_reads_.data();
++  draw_reads.count = draw_shared_memory_reads_.size();
++  // Pixel shader vertex fetches aren't tracked.
++  if (pixel_shader) {
++    const Shader::ConstantRegisterMap& constant_map_pixel = pixel_shader->constant_register_map();
++    for (uint32_t i = 0; i < rex::countof(constant_map_pixel.vertex_fetch_bitmap); ++i) {
++      if (constant_map_pixel.vertex_fetch_bitmap[i]) {
++        draw_reads.reads_known = false;
++      }
++    }
++  }
+   if (memexport_extent_start < memexport_extent_end) {
+-    shared_memory_->Use(
+-        VulkanSharedMemory::Usage::kGuestDrawReadWrite,
+-        std::make_pair(memexport_extent_start, memexport_extent_end - memexport_extent_start));
++    shared_memory_->UseForDraw(
++        std::make_pair(memexport_extent_start, memexport_extent_end - memexport_extent_start),
++        draw_reads);
+   } else if (memexport_writes_possible) {
+     // Stream constants can be invalid or dynamic, making the exact destination
+     // unknown. Keep synchronization conservative similarly to D3D12 UAV
+     // handling for memexport-capable draws.
+-    shared_memory_->Use(VulkanSharedMemory::Usage::kGuestDrawReadWrite,
+-                        std::make_pair(0u, SharedMemory::kBufferSize));
++    shared_memory_->UseForDraw(std::make_pair(0u, SharedMemory::kBufferSize), draw_reads);
+   } else {
+-    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
++    shared_memory_->UseForDraw({}, draw_reads);
+   }
+ 
    // After all commands that may dispatch, copy or insert barriers, submit
    // the barriers (may end the render pass), and (re)enter the render pass
    // before drawing.
@@ -3171,7 +3305,7 @@ index 001f36b..525586d 100644
      deferred_command_buffer_.CmdVkDraw(primitive_processing_result.host_draw_vertex_count, 1, 0, 0);
    } else {
      std::pair<VkBuffer, VkDeviceSize> index_buffer;
-@@ -4206,6 +4837,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
+@@ -4206,6 +4865,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -3179,7 +3313,7 @@ index 001f36b..525586d 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4331,6 +4963,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4331,6 +4991,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -3187,7 +3321,7 @@ index 001f36b..525586d 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4350,12 +4983,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +5011,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -3217,7 +3351,7 @@ index 001f36b..525586d 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,22 +5030,142 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +5058,142 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -3230,10 +3364,7 @@ index 001f36b..525586d 100644
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
 +  // vulkan_debug_dump_resolves: index of the resolve in the frame report.
 +  int64_t dump_resolve_index = -1;
-   if (readback_mode == ReadbackResolveMode::kDisabled) {
--    uint32_t written_address, written_length;
--    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
--                                         written_address, written_length);
++  if (readback_mode == ReadbackResolveMode::kDisabled) {
 +    const RegisterFile& regs = *register_file_;
 +    uint32_t resolve_in_frame = dump_frame_resolves++;
 +    if ((frame_report_active_ || dump_frame_active) &&
@@ -3296,7 +3427,10 @@ index 001f36b..525586d 100644
 +        break;
 +    }
 +  }
-+  if (readback_mode == ReadbackResolveMode::kDisabled) {
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+-    uint32_t written_address, written_length;
+-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                         written_address, written_length);
 +    uint32_t written_address = 0, written_length = 0;
 +    bool result = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
 +                                                written_address, written_length);
@@ -3304,18 +3438,20 @@ index 001f36b..525586d 100644
 +      QueueResolveDump(uint32_t(dump_resolve_index), written_address, written_length);
 +    }
 +    return result;
-+  }
-+
+   }
+ 
+-  return IssueCopy_ReadbackResolvePath();
 +  return IssueCopy_ReadbackResolvePath(readback_mode);
-+}
-+
+ }
+ 
+-bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
 +void VulkanCommandProcessor::QueueResolveDump(uint32_t resolve_index, uint32_t written_address,
 +                                              uint32_t written_length) {
 +  if (!written_length || texture_cache_->IsDrawResolutionScaled()) {
 +    REXGPU_WARN("[frame] resolve {} not dumped: {}", resolve_index,
 +                written_length ? "resolution scaling is not supported" : "nothing written");
 +    return;
-   }
++  }
 +  const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
 +  const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
 +  const VkDevice device = vulkan_device->device();
@@ -3343,8 +3479,7 @@ index 001f36b..525586d 100644
 +  dump.format = uint32_t(copy_dest_info.copy_dest_format);
 +  dump.endian = uint32_t(copy_dest_info.copy_dest_endian);
 +  dump.resolve_index = resolve_index;
- 
--  return IssueCopy_ReadbackResolvePath();
++
 +  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
 +  SetRenderPassEndReason(RenderPassEndReason::kReadback);
 +  SubmitBarriers(true);
@@ -3358,14 +3493,13 @@ index 001f36b..525586d 100644
 +                          VK_ACCESS_HOST_READ_BIT);
 +  dump.submission = GetCurrentSubmission();
 +  pending_resolve_dumps.push_back(dump);
- }
- 
--bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
++}
++
 +bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath(ReadbackResolveMode readback_mode) {
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +5184,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +5212,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -3373,7 +3507,7 @@ index 001f36b..525586d 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4579,6 +5343,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4579,6 +5371,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
  
      texture_cache_->UseScaledResolveBufferForRead();
@@ -3381,7 +3515,7 @@ index 001f36b..525586d 100644
      SubmitBarriers(true);
  
      VkBufferMemoryBarrier pre_barrier = {};
-@@ -4635,6 +5400,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4635,6 +5428,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                               readback.buffers[write_index], 1, &readback_region);
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -3389,7 +3523,7 @@ index 001f36b..525586d 100644
      SubmitBarriers(true);
  
      VkBufferCopy readback_region = {};
-@@ -4849,6 +5615,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4849,6 +5643,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -3397,7 +3531,7 @@ index 001f36b..525586d 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4874,6 +5641,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -4874,6 +5669,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
      return false;
    }
  
@@ -3405,7 +3539,7 @@ index 001f36b..525586d 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4944,6 +5712,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +5740,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -3415,7 +3549,7 @@ index 001f36b..525586d 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +5741,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +5769,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -3431,7 +3565,7 @@ index 001f36b..525586d 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5111,7 +5885,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +5913,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -3443,7 +3577,7 @@ index 001f36b..525586d 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5136,6 +5914,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +5942,15 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -3459,7 +3593,7 @@ index 001f36b..525586d 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5165,6 +5952,159 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +5980,176 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -3598,6 +3732,23 @@ index 001f36b..525586d 100644
 +                                  double(pushers[i].first) / fsi_stats_frames_);
 +            }
 +            REXGPU_INFO("Barrier render pass ends per frame by pushing code:{}", list);
++            static const char* const kUsageNames[] = {"read", "draw read/write", "compute write",
++                                                      "transfer destination"};
++            VulkanSharedMemory::UseBarrierCounts use_counts = shared_memory_->TakeUseBarrierCounts();
++            std::string uses;
++            for (size_t from = 0; from < 4; ++from) {
++              for (size_t to = 0; to < 4; ++to) {
++                for (size_t wrote = 0; wrote < 2; ++wrote) {
++                  if (use_counts[from][to][wrote]) {
++                    uses += fmt::format(" {}{} -> {}: {:.1f};", kUsageNames[from],
++                                        wrote ? " (wrote)" : "", kUsageNames[to],
++                                        double(use_counts[from][to][wrote]) / fsi_stats_frames_);
++                  }
++                }
++              }
++            }
++            REXGPU_INFO("Shared memory usage barriers per frame:{}; draw barriers skipped: {:.1f}",
++                        uses, double(shared_memory_->TakeDrawBarriersSkipped()) / fsi_stats_frames_);
 +            barrier_pusher_pass_ends_.clear();
 +          }
 +        }
@@ -3619,7 +3770,7 @@ index 001f36b..525586d 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +6170,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +6215,7 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -3627,7 +3778,7 @@ index 001f36b..525586d 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5308,9 +6249,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5308,9 +6294,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -3644,7 +3795,7 @@ index 001f36b..525586d 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5368,6 +6315,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5368,6 +6360,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        sparse_memory_binds_.clear();
      }
  
@@ -3653,7 +3804,7 @@ index 001f36b..525586d 100644
      SubmitBarriers(true);
  
      assert_false(command_buffers_writable_.empty());
-@@ -5385,6 +6334,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,6 +6379,25 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -3679,7 +3830,7 @@ index 001f36b..525586d 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5652,9 +6620,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5652,9 +6665,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
    swap_fxaa_source_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
  }
  
@@ -3797,7 +3948,7 @@ index 001f36b..525586d 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5718,6 +6793,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +6838,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
@@ -3809,7 +3960,7 @@ index 001f36b..525586d 100644
      // std::memcmp instead of != so in case of NaN, every draw won't be
      // invalidating it.
      dynamic_depth_bias_update_needed_ |=
-@@ -5990,6 +7070,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -5990,6 +7115,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (pa_cl_vte_cntl.vtx_w0_fmt) {
      flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
    }
@@ -3819,7 +3970,7 @@ index 001f36b..525586d 100644
    // Whether the primitive is polygonal, and gl_FrontFacing matters.
    if (primitive_polygonal) {
      flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
-@@ -6121,6 +7204,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6121,6 +7249,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    dirty |= system_constants_.tessellation_factor_range_max != tessellation_factor_max;
    system_constants_.tessellation_factor_range_min = tessellation_factor_min;
    system_constants_.tessellation_factor_range_max = tessellation_factor_max;
@@ -4267,7 +4418,7 @@ index 0298f06..de810c3 100644
          command_buffer.CmdVkDispatch(group_count_x, group_count_y, 1);
          MarkEdramBufferModified();
 diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
-index 6788214..13d86b0 100644
+index 6788214..de23c8b 100644
 --- a/src/graphics/vulkan/shared_memory.cpp
 +++ b/src/graphics/vulkan/shared_memory.cpp
 @@ -11,10 +11,19 @@
@@ -4290,7 +4441,7 @@ index 6788214..13d86b0 100644
  #include <rex/cvar.h>
  #include <rex/graphics/vulkan/command_processor.h>
  #include <rex/graphics/vulkan/deferred_command_buffer.h>
-@@ -26,6 +35,18 @@
+@@ -26,9 +35,42 @@
  REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
                      "Use sparse shared memory on Vulkan")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -4306,10 +4457,34 @@ index 6788214..13d86b0 100644
 +                    "every 5 seconds, the pages whose used bytes changed, with what they were "
 +                    "requested for")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(vulkan_skip_disjoint_draw_barriers, true, "GPU/Vulkan",
++                    "Insert no shared memory barrier between draws whose memory export and "
++                    "vertex fetch ranges don't overlap (a barrier between draws ends the render "
++                    "pass); false: a barrier after every memory export draw, as before");
  
  namespace rex::graphics::vulkan {
  
-@@ -43,10 +64,35 @@ VulkanSharedMemory::~VulkanSharedMemory() {
++namespace {
++// ranges: (start, end) pairs.
++bool RangesOverlap(const std::vector<std::pair<uint32_t, uint32_t>>& ranges, uint32_t start,
++                   uint32_t end) {
++  if (start >= end) {
++    return false;
++  }
++  for (const std::pair<uint32_t, uint32_t>& range : ranges) {
++    if (range.first < end && start < range.second) {
++      return true;
++    }
++  }
++  return false;
++}
++}  // namespace
++
+ VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
+                                        memory::Memory& memory,
+                                        VkPipelineStageFlags guest_shader_pipeline_stages)
+@@ -43,10 +85,35 @@ VulkanSharedMemory::~VulkanSharedMemory() {
  bool VulkanSharedMemory::Initialize() {
    InitializeCommon();
  
@@ -4345,7 +4520,7 @@ index 6788214..13d86b0 100644
    const VkBufferCreateFlags sparse_flags =
        VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
  
-@@ -169,6 +215,101 @@ bool VulkanSharedMemory::Initialize() {
+@@ -169,6 +236,101 @@ bool VulkanSharedMemory::Initialize() {
    return true;
  }
  
@@ -4447,7 +4622,7 @@ index 6788214..13d86b0 100644
  void VulkanSharedMemory::Shutdown(bool from_destructor) {
    upload_buffer_pool_.reset();
  
-@@ -181,6 +322,7 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
+@@ -181,6 +343,7 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
      dfn.vkFreeMemory(device, memory, nullptr);
    }
    buffer_memory_.clear();
@@ -4455,7 +4630,7 @@ index 6788214..13d86b0 100644
  
    // If calling from the destructor, the SharedMemory destructor will call
    // ShutdownCommon.
-@@ -191,16 +333,315 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
+@@ -191,23 +354,400 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
  
  void VulkanSharedMemory::CompletedSubmissionUpdated() {
    upload_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
@@ -4468,6 +4643,7 @@ index 6788214..13d86b0 100644
    upload_buffer_pool_->FlushWrites();
  }
  
+-void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_range) {
 +void VulkanSharedMemory::UpdatePagesUsedSubmission() {
 +  uint64_t submission = command_processor_.GetCurrentSubmission();
 +  if (pages_used_submission_ == submission) {
@@ -4761,17 +4937,119 @@ index 6788214..13d86b0 100644
 +  race_snapshots_dropped_ = 0;
 +}
 +
- void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_range) {
++void VulkanSharedMemory::UseImpl(Usage usage, std::pair<uint32_t, uint32_t> written_range,
++                                 const DrawReads* draw) {
    written_range.first = std::min(written_range.first, kBufferSize);
    written_range.second = std::min(written_range.second, kBufferSize - written_range.first);
    assert_true(usage != Usage::kRead || !written_range.second);
+-  if (last_usage_ != usage || last_written_range_.second) {
 +  // GPU writes (resolves, memexport, in-stream uploads) recorded so far in
 +  // this submission.
 +  MarkBytesUsedInSubmission(written_range.first, written_range.second);
-   if (last_usage_ != usage || last_written_range_.second) {
++  if (draw && !REXCVAR_GET(vulkan_skip_disjoint_draw_barriers)) {
++    draw = nullptr;
++  }
++  uint32_t written_end = written_range.first + written_range.second;
++  if (draw) {
++    // Between draws (kRead and kGuestDrawReadWrite, no other write pending),
++    // only a conflict with the accesses since the last barrier needs one.
++    bool conflict = (last_usage_ != Usage::kRead && last_usage_ != Usage::kGuestDrawReadWrite) ||
++                    last_written_range_.second != 0;
++    if (!conflict && !draw_pending_writes_.empty()) {
++      conflict = !draw->reads_known ||
++                 RangesOverlap(draw_pending_writes_, written_range.first, written_end);
++      for (size_t i = 0; !conflict && i < draw->count; ++i) {
++        conflict = RangesOverlap(draw_pending_writes_, draw->ranges[i].first,
++                                 draw->ranges[i].first + draw->ranges[i].second);
++      }
++    }
++    if (!conflict && written_range.second) {
++      conflict = untracked_reads_ ||
++                 RangesOverlap(draw_pending_reads_, written_range.first, written_end);
++    }
++    if (conflict) {
++      ++use_barrier_counts_[size_t(last_usage_)][size_t(usage)]
++                           [(last_written_range_.second || !draw_pending_writes_.empty()) ? 1 : 0];
++      VkPipelineStageFlags src_stage_mask, dst_stage_mask;
++      VkAccessFlags src_access_mask, dst_access_mask;
++      GetUsageMasks(last_usage_, src_stage_mask, src_access_mask);
++      if (last_usage_ == Usage::kRead || last_usage_ == Usage::kGuestDrawReadWrite) {
++        // Draws of both kinds may have happened since the last barrier.
++        VkPipelineStageFlags other_stage_mask;
++        VkAccessFlags other_access_mask;
++        GetUsageMasks(last_usage_ == Usage::kRead ? Usage::kGuestDrawReadWrite : Usage::kRead,
++                      other_stage_mask, other_access_mask);
++        src_stage_mask |= other_stage_mask;
++        src_access_mask |= other_access_mask;
++      }
++      GetUsageMasks(usage, dst_stage_mask, dst_access_mask);
++      command_processor_.PushBufferMemoryBarrier(
++          buffer_, 0, VK_WHOLE_SIZE, src_stage_mask, dst_stage_mask, src_access_mask,
++          dst_access_mask, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++      last_usage_ = usage;
++      last_written_range_ = std::make_pair<uint32_t, uint32_t>(0, 0);
++      draw_pending_writes_.clear();
++      draw_pending_reads_.clear();
++      untracked_reads_ = false;
++    } else {
++      ++draw_barriers_skipped_;
++      if (written_range.second) {
++        last_usage_ = Usage::kGuestDrawReadWrite;
++      }
++    }
++    if (written_range.second) {
++      draw_pending_writes_.emplace_back(written_range.first, written_end);
++    }
++    if (!draw->reads_known) {
++      untracked_reads_ = true;
++    }
++    for (size_t i = 0; i < draw->count; ++i) {
++      if (draw->ranges[i].second) {
++        draw_pending_reads_.emplace_back(draw->ranges[i].first,
++                                         draw->ranges[i].first + draw->ranges[i].second);
++      }
++    }
++    return;
++  }
++  bool draws_wrote = !draw_pending_writes_.empty();
++  if (last_usage_ != usage || last_written_range_.second || draws_wrote) {
++    ++use_barrier_counts_[size_t(last_usage_)][size_t(usage)]
++                         [(last_written_range_.second || draws_wrote) ? 1 : 0];
      VkPipelineStageFlags src_stage_mask, dst_stage_mask;
      VkAccessFlags src_access_mask, dst_access_mask;
-@@ -273,15 +714,49 @@ bool VulkanSharedMemory::UploadRanges(
+     GetUsageMasks(last_usage_, src_stage_mask, src_access_mask);
++    if (!draw_pending_reads_.empty() || draws_wrote) {
++      // Draws since the last barrier (vulkan_skip_disjoint_draw_barriers) may
++      // have been of both kinds.
++      VkPipelineStageFlags draw_stage_mask;
++      VkAccessFlags draw_access_mask;
++      GetUsageMasks(Usage::kGuestDrawReadWrite, draw_stage_mask, draw_access_mask);
++      src_stage_mask |= draw_stage_mask;
++      src_access_mask |= draw_access_mask;
++    }
+     GetUsageMasks(usage, dst_stage_mask, dst_access_mask);
+     VkDeviceSize offset, size;
+-    if (last_usage_ == usage) {
++    if (last_usage_ == usage && !draws_wrote) {
+       // Committing the previous write, while not changing the access mask
+       // (passing false as whether to skip the barrier if no masks are changed
+       // for this reason).
+@@ -223,8 +763,14 @@ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_
+     command_processor_.PushBufferMemoryBarrier(
+         buffer_, offset, size, src_stage_mask, dst_stage_mask, src_access_mask, dst_access_mask,
+         VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
++    draw_pending_writes_.clear();
++    draw_pending_reads_.clear();
++    untracked_reads_ = false;
+   }
+   last_written_range_ = written_range;
++  // Reads whose ranges aren't known (any non-tracked use) may conflict with
++  // later draw writes.
++  untracked_reads_ = true;
+ }
+ 
+ bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
+@@ -273,15 +819,49 @@ bool VulkanSharedMemory::UploadRanges(
    if (upload_page_ranges.empty()) {
      return true;
    }

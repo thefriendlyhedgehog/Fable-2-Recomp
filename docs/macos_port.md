@@ -544,6 +544,22 @@ without it differ by 1.6%, like two shots with the same setting (snow);
 at the trail 19.4 fps vs. 16.8 (`fable_2_108`, `fable_2_109`). Every ground
 pass now builds the same grid.
 
+### Shared memory barriers between draws
+
+`VulkanSharedMemory::Use` inserted a buffer barrier after every draw with
+memory export (and on every switch between reading and exporting draws).
+A pipeline barrier between draws ends the render pass on MoltenVK. Fable
+II has ~26 export draws per frame, mostly back to back, each writing its
+own range. `vulkan_skip_disjoint_draw_barriers` (default on, live):
+`UseForDraw` takes the draw's read ranges (vertex fetch constants, guest
+DMA indices, bounded by the larger vertex count at 32 bits) and its export
+extent, keeps the reads and writes of draws since the last barrier, and
+inserts a barrier (whole buffer, source stages of both draw usages) only
+on an overlap: read or write after a draw's write, write after a draw's
+read. Unknown reads (compute, transfer, the guest DMA index copy, pixel
+shader vertex fetch) and non-draw writes keep the old behavior. 28 fewer
+render pass ends per frame, 19.8 fps vs. 19.4 at the trail, same picture.
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:
