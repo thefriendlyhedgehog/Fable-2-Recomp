@@ -529,6 +529,21 @@ grid. Related: where the adaptive depth pass uses a lower factor than the
 lighting passes, their surfaces differ in the same way, which may be what
 the original flickering dark squares on the ground were (not verified).
 
+**Adaptive patches too** (`vulkan_adaptive_quad_patches_in_vs`, live, on
+with `vulkan_quad_patches_in_vs`): the 44 adaptive draws per frame (depth
+prepass and base color; 4 edge factors per patch in the index buffer, 2-25
+patches per draw) are drawn the same way at the maximum factor. That is
+what the host tessellation path already did: its adaptive vertex shader
+(`GetTessellationAdaptiveVertexShaderGlsl`) converts the factor with
+`float(value)`, the integer value of the float's bits, where Xenia's
+`asfloat` reinterprets them, so every non-zero factor clamps to the maximum
+(16). The patch index is the patch number in the draw plus the base index,
+masked and clamped, as in the adaptive control shader, so these draws are
+handled as auto-indexed (the factors are not read). Screenshots with and
+without it differ by 1.6%, like two shots with the same setting (snow);
+at the trail 19.4 fps vs. 16.8 (`fable_2_108`, `fable_2_109`). Every ground
+pass now builds the same grid.
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:

@@ -290,9 +290,12 @@ the same way as Xenia's ROV path.
      use MoltenVK tessellation: skipping them (`vulkan_debug_skip_adaptive_patches`,
      alternated 4x) gives 20.4 fps, so they cost **~10 ms per frame
      (17%)**, most of it the tessellation compute passes and the render
-     pass splits around them. Drawing them with the vertex shader grid at
-     factor 16, like the continuous lighting draws, would also make all
-     ground passes build the same geometry.
+     pass splits around them. **Done:** drawn with the vertex shader grid
+     at the maximum factor (`vulkan_adaptive_quad_patches_in_vs`, on with
+     the quad patch path): **19.4 fps vs. 16.8** (`fable_2_109.log`), same
+     picture (the host path already used the maximum factor for them: its
+     adaptive vertex shader reads the float factors as integers;
+     `docs/macos_port.md`).
   2. **Barrier ends by source** (`Barrier render pass ends per frame by
      pushing code`, symbolize with `xcrun atos -o
      out/build/mac-arm64-release/librexgpu-xenos.dylib -arch arm64 -l 0x0
@@ -452,6 +455,9 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- Adaptive quad patches drawn as triangle lists like the continuous ones
+  (`vulkan_adaptive_quad_patches_in_vs`): no MoltenVK tessellation left at
+  the trail, +16% fps.
 - Upload hoisting flicker: vertex buffers that skip their request now mark
   their pages used in the submission, so no hoisted upload overtakes their
   reads; hoisting is clean in two flicker tests and +38% fps, and on by
