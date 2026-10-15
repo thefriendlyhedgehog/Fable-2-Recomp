@@ -560,6 +560,21 @@ read. Unknown reads (compute, transfer, the guest DMA index copy, pixel
 shader vertex fetch) and non-draw writes keep the old behavior. 28 fewer
 render pass ends per frame, 19.8 fps vs. 19.4 at the trail, same picture.
 
+### Floating-point contraction
+
+The translator decorates nearly every float operation NoContraction so that
+passes computing the same values in different shaders get bit-identical
+results (with the Invariant outputs). SPIRV-Cross has no MSL equivalent and
+wraps each such operation in a helper function marked
+`[[clang::optnone]]` (`spvFMul`, `spvFAdd`, ...), which Metal's compiler
+can neither optimize nor inline: hundreds to thousands of calls per shader
+(511 in the snow's vertex shader, 495 in the main geometry pixel shader).
+`spirv_moltenvk_allow_contraction` (default on, restart; from xenia-edge
+3ec3e8a05) omits the decoration on MoltenVK. Invariance between passes
+comes from the Invariant position output instead: MoltenVK compiles such
+shaders with `preserveInvariance`. At the trail 28.4 fps vs. 21.0, no
+z-fighting.
+
 ### Hoisted texture loads
 
 A texture load (compute from the shared memory into a scratch buffer, then

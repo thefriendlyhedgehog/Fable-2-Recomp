@@ -390,6 +390,18 @@ the same way as Xenia's ROV path.
      lever: xenia-edge 3ec3e8a05 `spirv_moltenvk_allow_contraction`**
      (drop NoContraction on MoltenVK), checking the depth prepass still
      matches the later passes (z-fighting) first.
+  7. **Done (2026-10-15): `spirv_moltenvk_allow_contraction`** (default
+     on, restart; ported from xenia-edge 3ec3e8a05: `SpirvBuilder` skips
+     the decoration in its two NoContraction helpers when the translator's
+     `Features::allow_float_contraction` is set, i.e. the switch is on and
+     the driver is MoltenVK). In the dumps (`--dump_shaders`) the snow
+     vertex shader goes from 511 helper calls to 0, the main geometry
+     pixel shader from 495 to 13 (`spvFindUMSB`, not optnone); positions
+     stay `[[position, invariant]]`, compiled with `preserveInvariance`.
+     **28.43 fps vs. 20.97** at the trail (runs alternated off/on/off/on,
+     40 s each, uncapped: `fable_2_124`-`127`; frame 47.7 -> 35.2 ms).
+     Six shots each way within 1.7-1.9% (snow), no z-fighting stripes on
+     walls, ground or roofs (`out/contract_off`, `out/contract_on`).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
