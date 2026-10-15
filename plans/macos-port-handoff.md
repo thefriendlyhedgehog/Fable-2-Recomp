@@ -180,6 +180,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 | - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
+| - | `vulkan_debug_end_render_pass_every` | end the render pass before every Nth draw, to measure what restarts cost (~0.12 ms each) |
 | - | `vulkan_fsi_specialize` | FSI pixel shaders built for the draw's render target formats, 1x MSAA and no blending (restart; no fps change at the trail) |
 | - | `vulkan_gpu_progress_wait` | submit and wait for the host GPU before every guest-visible GPU progress write (fixes zero-copy corruption, costs ~35% fps) |
 | - | `vulkan_zero_copy_race_log` | every 5 s, `[race]` lines: guest pages the CPU rewrote while a pending submission read them, with what for and how many used bytes changed (restart; works with or without zero-copy) |
@@ -244,6 +245,26 @@ the same way as Xenia's ROV path.
   runs:** RuneLite 24% of all GPU time in the trace, the Claude app 5%;
   close them for fps comparisons (today's copy mode measured 12.8 fps vs.
   13.4 before).
+- **What a render pass restart costs (2026-10-14,
+  `vulkan_debug_end_render_pass_every`, live; `fable_2_101.log`, one
+  uncapped run alternating off / every 12th draw / off / every 23rd / off):**
+  ~0.12-0.13 ms of GPU time each (off 9.4-9.7 fps, ~104 ms per frame;
+  +~190 forced restarts per frame 7.8 fps, +24 ms; +~100 per frame 8.6 fps,
+  +12 ms). The baseline was low because another process held ~32% of the
+  GPU (GamePolicyAgent, with RuneLite running), but the two settings agree,
+  and the figure predicts the zero-copy gain (190 fewer restarts, ~24 ms:
+  12.8 -> ~18.5 fps; measured 17.4). So the ~267 restarts per frame cost
+  ~33 ms, and the ~200 caused by uploads are the biggest single lever. In
+  that run the forced ends were counted after the statistics; they now
+  show in the restart count.
+  **Lead for upload hoisting's flicker:** a hoisted upload may move to the
+  start of the submission only if nothing earlier in it used the page
+  (`ArePagesUsedInSubmission`), but vertex buffers that skip RequestRange
+  (same address and size as before, the upstream shortcut that lasts
+  across frames) never mark their pages used (`NoteRangeUsed` only feeds
+  the race log). An upload of such a page can then overtake an earlier
+  draw that read the old data. Marking those pages too, then rerunning the
+  flicker test with `vulkan_hoist_shared_memory_uploads`, is the next step.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
