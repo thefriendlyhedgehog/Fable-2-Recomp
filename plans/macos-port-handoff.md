@@ -195,6 +195,9 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
+| - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
+| - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
+| - | `vulkan_debug_skip_resolve_dumps`, `vulkan_debug_skip_resolve_copies` | skip the fbo dumps / the resolve copies, to measure what they cost (wrong picture) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
 | - | `vulkan_defer_gpu_progress`, `vulkan_defer_gpu_progress_submit` | make GPU progress visible to the guest only once the host GPU ran the commands before it, without waiting (correct with zero-copy, ~12 fps); the `[gpu-progress]` lines show delays and what the idle command processor waited behind |
 | - | `vulkan_debug_skip_adaptive_patches` | skip adaptively tessellated patch draws (the ground goes missing), to measure what they cost |
@@ -708,6 +711,26 @@ the same way as Xenia's ROV path.
      it crashed, but none of them ran under that load either. If it
      happens again, rerun with the switch off to tell. The four timing
      runs (two with it on) were fine.
+  21. **Done (2026-10-16): resolves straight from the host render target**
+     (`direct_host_resolve`, default on, hot reload; option (b) of item
+     19, as far as the resolve; `docs/macos_port.md`, "Resolves straight
+     from the host render target"). The fast 32bpp resolve of a 1x color
+     render target (8_8_8_8, 2_10_10_10, 32_FLOAT) owning the whole region
+     reads the render target with a new GLSL shader instead of dumping it
+     into the EDRAM buffer first: 16 of the ~25 fast copies per frame at
+     the heavy view (`vulkan_resolve_log` tags them `direct`). Sweep
+     alternating it: same picture. Uncapped, both orders
+     (`tools/mac_ab_paths.sh direct=--direct_host_resolve=true
+     dump=--direct_host_resolve=false`; `fable_2_216`-`219`): **heavy view
+     18.9 / 18.9 vs. 19.4 / 19.3 ms per frame, trail unchanged (16.6)**.
+     Since the fbo switch: heavy view 26.7 -> ~18.9 ms, trail 20.0 -> ~16.6
+     ms. What is left of the resolves at the heavy view: the depth copies
+     (1024x1024 shadow maps, 1120x720 and 560x360 depth), the 4x MSAA ones,
+     and the full copies (shaders 4-7: the 1120x720 `k_8`, the 1_5_5_5 mip
+     chain, 2_10_10_10_FLOAT at 280x184 and 1120x720), ~9 dumps per frame.
+     The next step along this line would be the depth and 4x MSAA variants
+     of the same shader, or sampling resolved render targets without the
+     shared memory round trip at all.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

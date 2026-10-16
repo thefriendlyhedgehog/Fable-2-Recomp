@@ -712,6 +712,41 @@ ms. Sweep alternating the switch 12 times: shots within 1.6-2.0% (snow).
 Uncapped on `fbo`, both orders (`fable_2_205`-`208`, GPU otherwise 9-16%
 busy): **heavy view 20.0 / 19.5 vs. 20.9 / 20.7 ms per frame** (34.5
 direct loads per frame), trail 16.6 / 16.7 vs. 16.7 / 16.9 ms.
+
+### Resolves straight from the host render target
+
+On the `fbo` path every resolve first dumps the render targets owning the
+resolved EDRAM range into the EDRAM buffer (one compute dispatch each), and
+the resolve copy then reads that buffer. `direct_host_resolve` (default on,
+hot reload; the upstream switch was a stub that dumped anyway) now skips the
+dump for the common case: the fast 32bpp copy (`resolve_fast_32bpp_1x2xmsaa`)
+of a 1x color render target in `k_8_8_8_8`, `k_2_10_10_10`,
+`k_2_10_10_10_AS_10_10_10_10` or `k_32_FLOAT` that owns the whole region (one
+dump rectangle covering all rows, `GetDirectResolveSource`). The copy then
+runs `resolve_direct_fast_32bpp.cs.glsl` (SDK tree, headers
+`vulkan_spirv/resolve_direct_fast_32bpp_{float,uint}_cs.h` built by
+`tools/build_texture_load_image_shaders.sh`): the decompiled fast resolve
+with the EDRAM buffer read replaced by a `texelFetch` of the render target's
+transfer view at the pixel the dump would have stored there, packed the way
+the dump shaders pack it (`uint(c * 255 + 0.5)` per 8-bit channel, `* 1023`
+and `* 3` for 2_10_10_10, raw bits through the `R32_UINT` view for 32-bit
+float), then the same red/blue swap, endian swap and tiled destination
+address. Anything else (depth, MSAA, 64bpp, the full copies, regions over
+several render targets) dumps as before.
+
+`vulkan_resolve_log` lists the resolves every 5 s by copy shader, size,
+destination format and the render targets they read, tagged `direct` when
+they take this path. At the heavy view 16 of the ~25 fast copies per frame do
+(256x256, 280x184 and 640x360 `8_8_8_8`; 280x184 and 560x360 `2_10_10_10`;
+280x184 `32_FLOAT`); the rest are depth, 4x MSAA, or other shaders.
+`vulkan_debug_skip_resolve_dumps` and `vulkan_debug_skip_resolve_copies`
+(wrong picture) measured what the two halves cost there before: dumps
+~1.9 ms, copies ~3.7 ms per frame.
+
+Sweep alternating the switch 6 times (`out/direct_resolve_check`): shots
+within 1.6-1.8% of the first (snow). Uncapped on `fbo`, both orders
+(`fable_2_216`-`219`, GPU otherwise 10-20% busy): **heavy view 18.9 / 18.9
+vs. 19.4 / 19.3 ms per frame**, trail 16.6 / 16.6 vs. 16.6 / 16.5 ms.
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
