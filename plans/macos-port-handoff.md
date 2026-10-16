@@ -560,6 +560,36 @@ the same way as Xenia's ROV path.
      `fable_2_157` `fsi`): both 30.0 fps; macOS "Device Utilization"
      71-80% on `fbo` vs. 93-96% on `fsi` (`ioreg -r -d 1 -c
      IOAccelerator`, sampled every 2 s).
+  14. **Trace and costs on `fbo` (2026-10-15/16, heavy view, uncapped
+     with `--video_mode_refresh_rate=120`).** Trace
+     `out/profile/fbo_heavy_1015.trace` (`fable_2_158`): GPU busy 70%,
+     30.4 ms per frame; `tools/gputrace_kinds.py` (wall time by encoder
+     kind per command buffer, two per frame): render 9.9 ms (74 encoders),
+     dispatches 0.8 ms (92), copies 0.7 ms, **idle between encoders 3.4
+     ms** (FSI: render 16.3 ms in 41 encoders, idle 1.1 ms). The SDK counts
+     72 render pass (re)starts per frame; barrier ends come from
+     `VulkanRenderTargetCache::DumpRenderTargets` (80 per frame: fbo copies
+     the host render target into the EDRAM buffer before each of the ~40
+     resolves) and `PerformTransfersAndResolveClears` (52, ownership
+     transfers). Saved per frame by skipping (`fable_2_159`, base 26.7 ms):
+     depth prepass 4.3 ms, snow 2.0, main geometry `8D900846800943C8` 1.4,
+     other base-pass shaders 0.8, `401A01FD4E5F8757` 0.7, the 72 dummy
+     points ~0. Adaptive quad patches alone (`vulkan_debug_skip_adaptive_patches`,
+     `fable_2_161`): 1.6 ms at the heavy view, 0.7 ms at the trail.
+     **Vertex work is the lever now:** quad patches (prim 18) are drawn as
+     a non-indexed triangle list at the maximum factor (16: 17x17 cells x 6
+     vertices = 1734 vertex shader runs per patch for 324 distinct grid
+     points); at the heavy view ~340 single-patch continuous draws plus 106
+     adaptive draws with ~1980 patches (factors 2-16), about 4 M vertex
+     shader runs per frame. And point sprites (snow: 23 draws x 4096
+     points, 581-instruction procedural vertex shader) are expanded in the
+     vertex shader to 4-vertex strips (`expand_point_sprites_in_vs_`, no
+     geometry shaders on Metal), so that shader runs 4x per point.
+     **Next:** an indexed grid for quad patches (one vertex shader run per
+     grid point if Apple's post-transform reuse applies; up to ~5x fewer),
+     or the patch's own factor for adaptive patches; host point primitives
+     with `PointSize` for point sprites (needs `largePoints`, square
+     points only, point coordinates in the pixel shader).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

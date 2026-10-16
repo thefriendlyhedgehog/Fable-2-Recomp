@@ -85,3 +85,4 @@ TODO.md
 !tools/gputrace_frame.py
 !tools/phase_fps.py
 !tools/mac_ab_paths.sh
+!tools/gputrace_kinds.py
