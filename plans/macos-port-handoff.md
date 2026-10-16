@@ -112,8 +112,8 @@ Repo: `/Volumes/MacMiniExternal/Games/fable2/Fable-2-Recomp`. Game content
   docstring for the `xctrace record` line); busy/idle time, gaps and GPU
   time by encoder kind for the game alone: `tools/gputrace_timeline.py`.
 
-The user's settings (`render_target_path_vulkan = "fsi"` is already the
-app's default on macOS): `fable2_config.toml` has `[patches] game_msaa = 0` (forces the
+The user's settings (`render_target_path_vulkan = "fbo"`, the app's
+default on macOS since 2026-10-15; it was `fsi`): `fable2_config.toml` has `[patches] game_msaa = 0` (forces the
 game's main scene to 1x MSAA; the game's own mode is 4x) and
 `merge_controllers` is passed on the command line (a Steam Controller shows up
 twice through SDL; without it the stick does not reach player 1).
@@ -548,10 +548,18 @@ the same way as Xenia's ROV path.
      between the paths, most of it snow and the moving orbs). That is
      where problem 1's flickering dark area with roof-shaped edges was, so
      `fbo` may draw the building's shadow consistently where `fsi` did
-     only sometimes; needs a console reference. **Next:** decide the
-     macOS default (`Fable2App::OnPostInitLogging` sets
-     `REX_RENDER_TARGET_PATH_VULKAN=fsi`); check other scenes on `fbo`
-     (hero close-up and the dog's texture morph, menus, interiors).
+     only sometimes; needs a console reference.
+     **Scene check, then the default switched to `fbo` (2026-10-15):** the
+     pause menu, walking into the town (crates, barrels, chickens, the
+     hero) and the heavy view match `fsi` (`fable_2_154` / `155`, screen
+     captures every 2.5 s). Not reachable from the trail save: interiors,
+     the dog. `Fable2App::OnPostInitLogging` now defaults
+     `render_target_path_vulkan` to `fbo`, and the user's `fable_2.toml`
+     (which pinned `fsi`) was switched too.
+     At the 30 fps cap at the trail (`fable_2_156` default `fbo`,
+     `fable_2_157` `fsi`): both 30.0 fps; macOS "Device Utilization"
+     71-80% on `fbo` vs. 93-96% on `fsi` (`ioreg -r -d 1 -c
+     IOAccelerator`, sampled every 2 s).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

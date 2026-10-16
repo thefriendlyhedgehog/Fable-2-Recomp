@@ -168,13 +168,14 @@ source):
 
 ### Results on an M4 Mac mini
 
-- Default render target path (`fbo`): audio plays, the screen only flashes
-  white.
+- Default render target path (`fbo`): at first audio played and the screen
+  only flashed white; with the SDK patch it renders correctly.
 - `render_target_path_vulkan=fsi`: everything renders once the sample-count
-  fix is in. The app defaults to this on macOS
-  (`REX_RENDER_TARGET_PATH_VULKAN=fsi`, set in
-  `Fable2App::OnPostInitLogging` unless already set); pass
-  `--render_target_path_vulkan=fbo` to compare.
+  fix is in. It was the macOS default until 2026-10-15; the app now
+  defaults to `fbo` (`REX_RENDER_TARGET_PATH_VULKAN=fbo`, set in
+  `Fable2App::OnPostInitLogging` unless already set), which needs about a
+  third less GPU time per frame (trail 20.0 vs. 29.8 ms, uncapped). Pass
+  `--render_target_path_vulkan=fsi` to compare.
 - MoltenVK's own primitive-restart warning goes to stderr on every strip draw,
   so the app also defaults `MVK_CONFIG_LOG_LEVEL=1` (errors only) on macOS,
   and seeds `vulkan_log_debug_messages=false` (pass

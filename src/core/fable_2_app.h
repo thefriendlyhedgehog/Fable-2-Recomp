@@ -355,11 +355,11 @@ class Fable2App : public rex::ReXApp {
     // override fable_2.toml. Only export one when fable_2.toml does not set
     // that cvar; setenv(..., 0) keeps anything the user exported, and the
     // command line still wins over both.
-    // - render_target_path_vulkan = fsi: the default host-RT path stores the
-    //   game's D24S8 depth as D32_SFLOAT_S8 (Apple GPUs have no D24S8), which
-    //   rendered as a white/flashing screen. FSI emulates EDRAM exactly in the
-    //   pixel shader; MoltenVK exposes fragment shader interlock on Apple
-    //   Silicon.
+    // - render_target_path_vulkan = fbo: host render targets. They once
+    //   rendered as a white/flashing screen (fixed by the SDK patch's MoltenVK
+    //   changes); now they need about a third less GPU time per frame
+    //   than FSI (pixel shader EDRAM emulation with fragment shader interlock):
+    //   20 vs. 30 ms at the trail. `fsi` stays available for comparison.
     // - vulkan_dynamic_rendering = false: the FSI path draws into
     //   attachment-less render passes at the guest MSAA sample count. Metal
     //   needs that count set explicitly, and MoltenVK only learns it from
@@ -376,7 +376,7 @@ class Fable2App : public rex::ReXApp {
       }
       ::setenv(env, value, 0);
     };
-    default_env("REX_RENDER_TARGET_PATH_VULKAN", "render_target_path_vulkan", "fsi");
+    default_env("REX_RENDER_TARGET_PATH_VULKAN", "render_target_path_vulkan", "fbo");
     default_env("REX_VULKAN_DYNAMIC_RENDERING", "vulkan_dynamic_rendering", "false");
     // MoltenVK's own setting (not a cvar): log level 1 (errors). It otherwise
     // warns "Metal does not support disabling primitive restart" on every strip

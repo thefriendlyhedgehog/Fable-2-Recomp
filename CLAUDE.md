@@ -24,6 +24,9 @@ ReXGlue (Xenia-derived) static recompilation of Fable II. The app is in
   (upload and texture load hoisting are on by default on macOS;
   `--vulkan_hoist_shared_memory_uploads=false`, `--vulkan_hoist_texture_loads=false` to compare)
   (summary in `out/capture/summary.txt`; analyzer `tools/analyze_mac_capture.py`).
+- Render target path: `fbo` by default on macOS since 2026-10-15 (a third
+  less GPU time than `fsi`); `--render_target_path_vulkan=fsi` to compare,
+  `tools/mac_ab_paths.sh` for an fps comparison.
 - SDK changes go into `thirdparty/sdk_mac_vulkan_fixes.patch`: edit
   `thirdparty/rexglue-sdk-src/{src,include}`, then `tools/sdk_patch_refresh.sh`,
   then rebuild. Never edit the patch file by hand.
