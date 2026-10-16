@@ -214,7 +214,7 @@ index dbd6b01..00fee73 100644
  
  }  // namespace rex::graphics
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..08a5bae 100644
+index dce3dbf..9680427 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -33,7 +33,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -290,7 +290,7 @@ index dce3dbf..08a5bae 100644
    };
  
    enum ConstantBuffer : uint32_t {
-@@ -399,6 +428,17 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -399,6 +428,23 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
      bool demote_to_helper_invocation;
      bool sample_rate_shading;
@@ -305,10 +305,16 @@ index dce3dbf..08a5bae 100644
 +    // indexed grid (vulkan_quad_patches_indexed): the vertex index is the grid
 +    // point, the instance index the patch.
 +    bool quad_patch_indexed_grid;
++
++    // Point lists drawn as host points (vulkan_native_point_sprites): the
++    // vertex shader writes gl_PointSize (up to max_point_size), the pixel
++    // shader reads gl_PointCoord.
++    bool native_point_sprites;
++    float max_point_size;
    };
  
    SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
-@@ -415,6 +455,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -415,6 +461,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
        uint32_t dynamic_addressable_register_count,
        Shader::HostVertexShaderType host_vertex_shader_type =
            Shader::HostVertexShaderType::kVertex) const override;
@@ -323,7 +329,7 @@ index dce3dbf..08a5bae 100644
    uint64_t GetDefaultPixelShaderModification(
        uint32_t dynamic_addressable_register_count) const override;
  
-@@ -756,6 +804,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -756,6 +810,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
    // flow of the main function, and that there are no returns before either
    // (there's a single return from the shader).
    bool edram_fragment_shader_interlock_;
@@ -331,7 +337,7 @@ index dce3dbf..08a5bae 100644
    uint32_t draw_resolution_scale_x_;
    uint32_t draw_resolution_scale_y_;
  
-@@ -879,6 +928,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -879,6 +934,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSystemConstantEdramRTKeepMask,
      kSystemConstantEdramRTClamp,
      kSystemConstantEdramBlendConstant,
@@ -340,7 +346,7 @@ index dce3dbf..08a5bae 100644
    };
    spv::Id uniform_system_constants_;
    spv::Id uniform_float_constants_;
-@@ -897,6 +948,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -897,6 +954,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
    // VS as VS only - int, or VS as compute (kMemExportCompute) only - uint3.
    spv::Id input_vertex_index_;
@@ -350,6 +356,15 @@ index dce3dbf..08a5bae 100644
    // VS as TES only - int.
    spv::Id input_primitive_id_;
    // VS as TES only - float3.
+@@ -940,6 +1000,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+   uint32_t output_per_vertex_member_count_;
+   uint32_t output_per_vertex_member_clip_distance_;
+   uint32_t output_per_vertex_member_cull_distance_;
++  // gl_PointSize with native_point_sprites, UINT32_MAX otherwise.
++  uint32_t output_per_vertex_member_point_size_;
+   spv::Id type_output_per_vertex_;
+   spv::Id output_per_vertex_;
+ 
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
 index d26cd4f..1b6bdc9 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
@@ -721,7 +736,7 @@ index 696ff48..d501010 100644
  
  }  // namespace rex::graphics::vulkan
 diff --git a/include/rex/graphics/vulkan/pipeline_cache.h b/include/rex/graphics/vulkan/pipeline_cache.h
-index 7b938b9..4bf9b18 100644
+index 7b938b9..39111c9 100644
 --- a/include/rex/graphics/vulkan/pipeline_cache.h
 +++ b/include/rex/graphics/vulkan/pipeline_cache.h
 @@ -96,7 +96,15 @@ class VulkanPipelineCache {
@@ -804,6 +819,16 @@ index 7b938b9..4bf9b18 100644
        return *this;
      }
    };
+@@ -468,6 +511,9 @@ class VulkanPipelineCache {
+   bool creation_completion_set_event_ = false;
+   size_t creation_threads_shutdown_from_ = SIZE_MAX;
+   std::vector<std::unique_ptr<rex::thread::Thread>> creation_threads_;
++  // Point lists as host points (SpirvShaderTranslator::Features::
++  // native_point_sprites).
++  bool native_point_sprites_ = false;
+ };
+ 
+ }  // namespace rex::graphics::vulkan
 diff --git a/include/rex/graphics/vulkan/render_target_cache.h b/include/rex/graphics/vulkan/render_target_cache.h
 index 34f7033..57a6ffa 100644
 --- a/include/rex/graphics/vulkan/render_target_cache.h
@@ -1087,10 +1112,10 @@ index 1cb3faa..be34c10 100644
  
  /// Create a default InputSystem with SDL + NOP drivers.
 diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
-index 947817f..01ef3b1 100644
+index 947817f..a91e46c 100644
 --- a/include/rex/ui/vulkan/device.h
 +++ b/include/rex/ui/vulkan/device.h
-@@ -168,6 +168,15 @@ class VulkanDevice {
+@@ -168,6 +168,19 @@ class VulkanDevice {
      // VK_EXT_robustness2
  
      bool nullDescriptor = false;
@@ -1103,10 +1128,14 @@ index 947817f..01ef3b1 100644
 +    // VK_EXT_external_memory_host: alignment of host pointers and sizes that
 +    // can be imported (0 if the extension is not enabled).
 +    VkDeviceSize minImportedHostPointerAlignment = 0;
++
++    // Points larger than 1 pixel (host point sprites, vulkan_native_point_sprites).
++    bool largePoints = false;
++    float pointSizeRangeMax = 1.0f;
    };
  
    // Properties of the core API and enabled extensions, and enabled features.
-@@ -199,6 +208,9 @@ class VulkanDevice {
+@@ -199,6 +212,9 @@ class VulkanDevice {
      bool ext_1_3_KHR_maintenance4 = false;  // #414
      // Has optional features not implied by this being true.
      bool ext_1_3_KHR_dynamic_rendering = false;  // #55
@@ -1903,10 +1932,10 @@ index fe0aa4e..4a0798e 100644
  }
  
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..83f36b7 100644
+index 1774f97..aee6bbe 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
-@@ -21,11 +21,60 @@
+@@ -21,11 +21,70 @@
  #include <fmt/format.h>
  
  #include <rex/assert.h>
@@ -1964,10 +1993,20 @@ index 1774f97..83f36b7 100644
 +                    "invocations per grid cell.")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +
++REXCVAR_DECLARE(bool, vulkan_force_expand_point_sprites_in_vs);
++
++REXCVAR_DEFINE_BOOL(vulkan_native_point_sprites, true, "GPU/Vulkan",
++                    "Without geometry shaders (MoltenVK), draw point sprites as host points of "
++                    "gl_PointSize pixels with gl_PointCoord, instead of expanding each point to "
++                    "a 4-vertex strip in the vertex shader (which runs the guest vertex shader 4 "
++                    "times per point). Host points are square: guest points with a different "
++                    "width and height use the width.")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
  namespace rex::graphics {
  
  SpirvShaderTranslator::Features::Features(bool all)
-@@ -42,7 +91,10 @@ SpirvShaderTranslator::Features::Features(bool all)
+@@ -42,7 +101,12 @@ SpirvShaderTranslator::Features::Features(bool all)
        rounding_mode_rte_float32(all),
        fragment_shader_sample_interlock(all),
        demote_to_helper_invocation(all),
@@ -1975,11 +2014,13 @@ index 1774f97..83f36b7 100644
 +      sample_rate_shading(all),
 +      subgroup_quad_fragment(all),
 +      allow_float_contraction(false),
-+      quad_patch_indexed_grid(false) {}
++      quad_patch_indexed_grid(false),
++      native_point_sprites(false),
++      max_point_size(1.0f) {}
  
  SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const vulkan_device)
      : max_storage_buffer_range(vulkan_device->properties().maxStorageBufferRange),
-@@ -59,7 +111,11 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+@@ -59,7 +123,16 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
        rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32),
        fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
        demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation),
@@ -1988,11 +2029,16 @@ index 1774f97..83f36b7 100644
 +      subgroup_quad_fragment(vulkan_device->properties().subgroupQuadOperationsInFragment),
 +      allow_float_contraction(REXCVAR_GET(spirv_moltenvk_allow_contraction) &&
 +                              vulkan_device->properties().driverID == VK_DRIVER_ID_MOLTENVK),
-+      quad_patch_indexed_grid(REXCVAR_GET(vulkan_quad_patches_indexed)) {
++      quad_patch_indexed_grid(REXCVAR_GET(vulkan_quad_patches_indexed)),
++      native_point_sprites(REXCVAR_GET(vulkan_native_point_sprites) &&
++                           !REXCVAR_GET(vulkan_force_expand_point_sprites_in_vs) &&
++                           !vulkan_device->properties().geometryShader &&
++                           vulkan_device->properties().largePoints),
++      max_point_size(vulkan_device->properties().pointSizeRangeMax) {
    const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
    if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
      spirv_version = spv::Spv_1_5;
-@@ -70,6 +126,9 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+@@ -70,6 +143,9 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
    } else {
      spirv_version = spv::Spv_1_0;
    }
@@ -2002,7 +2048,7 @@ index 1774f97..83f36b7 100644
  }
  
  uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
-@@ -113,6 +172,7 @@ void SpirvShaderTranslator::Reset() {
+@@ -113,6 +189,7 @@ void SpirvShaderTranslator::Reset() {
    uniform_float_constants_ = spv::NoResult;
  
    input_vertex_index_ = spv::NoResult;
@@ -2010,7 +2056,7 @@ index 1774f97..83f36b7 100644
    input_primitive_id_ = spv::NoResult;
    input_tess_coord_ = spv::NoResult;
    input_patch_control_point_indices_ = spv::NoResult;
-@@ -175,6 +235,7 @@ void SpirvShaderTranslator::StartTranslation() {
+@@ -175,6 +252,7 @@ void SpirvShaderTranslator::StartTranslation() {
    // TODO(Triang3l): Logger.
    builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
                                              nullptr);
@@ -2018,7 +2064,7 @@ index 1774f97..83f36b7 100644
  
    builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
                                                    : spv::CapabilityShader);
-@@ -309,6 +370,9 @@ void SpirvShaderTranslator::StartTranslation() {
+@@ -309,6 +387,9 @@ void SpirvShaderTranslator::StartTranslation() {
        {"edram_rt_keep_mask", offsetof(SystemConstants, edram_rt_keep_mask), type_uint4_array_2},
        {"edram_rt_clamp", offsetof(SystemConstants, edram_rt_clamp), type_float4_array_4},
        {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant), type_float4_},
@@ -2028,7 +2074,7 @@ index 1774f97..83f36b7 100644
    };
    id_vector_temp_.clear();
    id_vector_temp_.reserve(rex::countof(system_constants));
-@@ -1157,7 +1221,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
+@@ -1157,7 +1238,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
      builder_->addExecutionMode(function_main_, spv::ExecutionModeOriginUpperLeft);
      if (output_fragment_depth_ != spv::NoResult) {
        builder_->addExecutionMode(function_main_, spv::ExecutionModeDepthReplacing);
@@ -2037,7 +2083,7 @@ index 1774f97..83f36b7 100644
            GetSpirvShaderModification().pixel.depth_stencil_mode ==
                Modification::DepthStencilMode::kFloat24Truncating) {
          builder_->addExecutionMode(function_main_, spv::ExecutionModeDepthLess);
-@@ -1668,6 +1732,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1668,6 +1749,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
                                                     type_int_, "gl_VertexIndex");
      builder_->addDecoration(input_vertex_index_, spv::DecorationBuiltIn, spv::BuiltInVertexIndex);
      main_interface_.push_back(input_vertex_index_);
@@ -2053,7 +2099,36 @@ index 1774f97..83f36b7 100644
    }
  
    uint32_t output_location = 0;
-@@ -1750,6 +1823,16 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1702,6 +1792,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+       builder_->addDecoration(output_point_coordinates_, spv::DecorationInvariant);
+       main_interface_.push_back(output_point_coordinates_);
+       ++output_location;
++    } else if (features_.native_point_sprites) {
++      // Host points: gl_PointSize in gl_PerVertex, created below.
+     } else {
+       // Create the point size output. Not using gl_PointSize from gl_PerVertex
+       // not to rely on the shaderTessellationAndGeometryPointSize feature, and
+@@ -1725,6 +1817,7 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+   output_per_vertex_member_count_ = uint32_t(struct_per_vertex_members.size());
+   output_per_vertex_member_clip_distance_ = UINT32_MAX;
+   output_per_vertex_member_cull_distance_ = UINT32_MAX;
++  output_per_vertex_member_point_size_ = UINT32_MAX;
+   if (clip_distance_count) {
+     assert_true(features_.clip_distance);
+     builder_->addCapability(spv::CapabilityClipDistance);
+@@ -1745,11 +1838,28 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+     struct_per_vertex_members.push_back(type_cull_distance);
+     output_per_vertex_member_count_ = uint32_t(struct_per_vertex_members.size());
+   }
++  if (features_.native_point_sprites && shader_modification.vertex.output_point_parameters &&
++      shader_modification.vertex.host_vertex_shader_type ==
++          Shader::HostVertexShaderType::kVertex) {
++    output_per_vertex_member_point_size_ = uint32_t(struct_per_vertex_members.size());
++    struct_per_vertex_members.push_back(type_float_);
++    output_per_vertex_member_count_ = uint32_t(struct_per_vertex_members.size());
++  }
+   spv::Id type_struct_per_vertex =
+       builder_->makeStructType(struct_per_vertex_members, "gl_PerVertex");
    builder_->addMemberName(type_struct_per_vertex, kOutputPerVertexMemberPosition, "gl_Position");
    builder_->addMemberDecoration(type_struct_per_vertex, kOutputPerVertexMemberPosition,
                                  spv::DecorationBuiltIn, spv::BuiltInPosition);
@@ -2070,7 +2145,20 @@ index 1774f97..83f36b7 100644
    if (output_per_vertex_member_clip_distance_ != UINT32_MAX) {
      builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_clip_distance_,
                              "gl_ClipDistance");
-@@ -1925,6 +2008,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+@@ -1762,6 +1872,12 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+     builder_->addMemberDecoration(type_struct_per_vertex, output_per_vertex_member_cull_distance_,
+                                   spv::DecorationBuiltIn, spv::BuiltInCullDistance);
+   }
++  if (output_per_vertex_member_point_size_ != UINT32_MAX) {
++    builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_point_size_,
++                            "gl_PointSize");
++    builder_->addMemberDecoration(type_struct_per_vertex, output_per_vertex_member_point_size_,
++                                  spv::DecorationBuiltIn, spv::BuiltInPointSize);
++  }
+   builder_->addDecoration(type_struct_per_vertex, spv::DecorationBlock);
+   type_output_per_vertex_ = type_struct_per_vertex;
+   output_per_vertex_ = builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
+@@ -1925,6 +2041,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
      }
      if (IsSpirvVertexShader() || IsSpirvComputeShader()) {
        spv::Id vertex_index;
@@ -2079,7 +2167,7 @@ index 1774f97..83f36b7 100644
        spv::Id compute_vertex_processing_index = spv::NoResult;
        spv::Id compute_load_vertex_index = spv::NoResult;
        spv::Id compute_vertex_index_is_32bit = spv::NoResult;
-@@ -1984,37 +2069,156 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+@@ -1984,37 +2102,156 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
        }
        if (IsSpirvVertexShader() &&
            (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
@@ -2264,7 +2352,7 @@ index 1774f97..83f36b7 100644
          }
          // Check if the index needs to be loaded from the index buffer.
          spv::Id load_vertex_index = builder_->createBinOp(
-@@ -2431,6 +2635,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+@@ -2431,6 +2668,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
          if_cp_indexed.makeEndIf();
        } else {
          store_register_component(0, 0, vertex_index_float);
@@ -2280,7 +2368,90 @@ index 1774f97..83f36b7 100644
        }
      }
    }
-@@ -3052,34 +3265,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+@@ -2633,6 +2879,46 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+     builder_->createStore(point_size, output_point_size_);
+   }
+ 
++  // Write gl_PointSize for host point sprites: the diameter in guest pixels
++  // (from the vertex shader if it wrote a non-negative one, otherwise the
++  // constant width), in host pixels, clamped to the host range.
++  if (output_per_vertex_member_point_size_ != UINT32_MAX) {
++    id_vector_temp_.clear();
++    id_vector_temp_.push_back(builder_->makeIntConstant(kSystemConstantPointConstantDiameter));
++    spv::Id point_diameter = builder_->createCompositeExtract(
++        builder_->createLoad(builder_->createAccessChain(spv::StorageClassUniform,
++                                                         uniform_system_constants_,
++                                                         id_vector_temp_),
++                             spv::NoPrecision),
++        type_float_, 0);
++    if (current_shader().writes_point_size_edge_flag_kill_vertex() & 0b001) {
++      assert_true(var_main_point_size_edge_flag_kill_vertex_ != spv::NoResult);
++      id_vector_temp_.clear();
++      id_vector_temp_.push_back(const_int_0_);
++      spv::Id point_vertex_diameter = builder_->createLoad(
++          builder_->createAccessChain(spv::StorageClassFunction,
++                                      var_main_point_size_edge_flag_kill_vertex_, id_vector_temp_),
++          spv::NoPrecision);
++      point_diameter = builder_->createTriOp(
++          spv::OpSelect, type_float_,
++          builder_->createBinOp(spv::OpFOrdGreaterThanEqual, type_bool_, point_vertex_diameter,
++                                const_float_0_),
++          point_vertex_diameter, point_diameter);
++    }
++    point_diameter = builder_->createBinOp(spv::OpFMul, type_float_, point_diameter,
++                                           builder_->makeFloatConstant(
++                                               float(draw_resolution_scale_x_)));
++    point_diameter = builder_->createTriBuiltinCall(
++        type_float_, ext_inst_glsl_std_450_, GLSLstd450NClamp, point_diameter,
++        builder_->makeFloatConstant(1.0f),
++        builder_->makeFloatConstant(std::max(features_.max_point_size, 1.0f)));
++    id_vector_temp_.clear();
++    id_vector_temp_.push_back(builder_->makeIntConstant(int(output_per_vertex_member_point_size_)));
++    builder_->createStore(point_diameter,
++                          builder_->createAccessChain(spv::StorageClassOutput, output_per_vertex_,
++                                                      id_vector_temp_));
++  }
++
+   // Expand the point sprite.
+   if (shader_modification.vertex.host_vertex_shader_type ==
+       Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
+@@ -2874,16 +3160,27 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
+       }
+     }
+ 
+-    // Point coordinate input.
++    // Point coordinate input: gl_PointCoord for host point sprites
++    // (native_point_sprites), otherwise from the vertex shader's expansion.
+     if (shader_modification.pixel.param_gen_point) {
+-      if (param_gen_needed) {
+-        input_point_coordinates_ = builder_->createVariable(
+-            spv::NoPrecision, spv::StorageClassInput, type_float2_, "xe_in_point_coordinates");
+-        builder_->addDecoration(input_point_coordinates_, spv::DecorationLocation,
+-                                int(input_location));
+-        main_interface_.push_back(input_point_coordinates_);
++      if (features_.native_point_sprites) {
++        if (param_gen_needed) {
++          input_point_coordinates_ = builder_->createVariable(
++              spv::NoPrecision, spv::StorageClassInput, type_float2_, "gl_PointCoord");
++          builder_->addDecoration(input_point_coordinates_, spv::DecorationBuiltIn,
++                                  spv::BuiltInPointCoord);
++          main_interface_.push_back(input_point_coordinates_);
++        }
++      } else {
++        if (param_gen_needed) {
++          input_point_coordinates_ = builder_->createVariable(
++              spv::NoPrecision, spv::StorageClassInput, type_float2_, "xe_in_point_coordinates");
++          builder_->addDecoration(input_point_coordinates_, spv::DecorationLocation,
++                                  int(input_location));
++          main_interface_.push_back(input_point_coordinates_);
++        }
++        ++input_location;
+       }
+-      ++input_location;
+     }
+   }
+ 
+@@ -3052,34 +3349,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
        // failed the depth / stencil test, and there are no depth and stencil
        // values to conditionally write after running the shader to check if
        // samples don't additionally need to be discarded.
@@ -4629,7 +4800,7 @@ index 001f36b..27849d8 100644
      dirty |= system_constants_.point_vertex_diameter_max != point_vertex_diameter_max;
      dirty |= system_constants_.point_constant_diameter[0] != point_constant_diameter_x;
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..817a0d6 100644
+index 91ac08f..d2d6f52 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -12,12 +12,14 @@
@@ -4679,7 +4850,16 @@ index 91ac08f..817a0d6 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -297,6 +315,8 @@ bool VulkanPipelineCache::Initialize() {
+@@ -291,12 +309,16 @@ bool VulkanPipelineCache::Initialize() {
+   bool edram_fragment_shader_interlock =
+       render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
+ 
++  SpirvShaderTranslator::Features shader_translator_features(vulkan_device);
++  native_point_sprites_ = shader_translator_features.native_point_sprites;
+   shader_translator_ = std::make_unique<SpirvShaderTranslator>(
+-      SpirvShaderTranslator::Features(vulkan_device),
++      shader_translator_features,
+       render_target_cache_.msaa_2x_attachments_supported(),
        render_target_cache_.msaa_2x_no_attachments_supported(), edram_fragment_shader_interlock,
        render_target_cache_.draw_resolution_scale_x(),
        render_target_cache_.draw_resolution_scale_y());
@@ -4688,7 +4868,7 @@ index 91ac08f..817a0d6 100644
  
    if (edram_fragment_shader_interlock) {
      std::vector<uint8_t> depth_only_fragment_shader_code =
-@@ -420,6 +440,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -420,6 +442,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
        shader_storage_shareable_root /
        fmt::format("{:08X}.{}.vk.xpso", title_id, edram_fragment_shader_interlock ? "fsi" : "fbo");
    pipeline_storage_file_ = rex::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
@@ -4702,7 +4882,7 @@ index 91ac08f..817a0d6 100644
    if (!pipeline_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the Vulkan pipeline description storage file for "
-@@ -503,6 +530,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -503,6 +532,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
    auto shader_storage_file_path =
        shader_storage_shareable_root / fmt::format("{:08X}.xsh", title_id);
    shader_storage_file_ = rex::filesystem::OpenFile(shader_storage_file_path, "a+b");
@@ -4713,7 +4893,20 @@ index 91ac08f..817a0d6 100644
    if (!shader_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the guest shader storage file for writing, persistent "
-@@ -987,6 +1018,33 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
+@@ -947,8 +980,11 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
+   if (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
+     modification.vertex.output_point_parameters = uint32_t(ps_param_gen_used);
+   } else {
++    // Host points need gl_PointSize from every vertex shader, a geometry
++    // shader only the vertex shader's own size.
+     modification.vertex.output_point_parameters =
+-        uint32_t((shader.writes_point_size_edge_flag_kill_vertex() & 0b001) &&
++        uint32_t((native_point_sprites_ ||
++                  (shader.writes_point_size_edge_flag_kill_vertex() & 0b001)) &&
+                  regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kPointList);
+   }
+   modification.vertex.vertex_kill_and = uint32_t(
+@@ -987,6 +1023,33 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
      modification.pixel.param_gen_point = 0;
    }
  
@@ -4747,7 +4940,7 @@ index 91ac08f..817a0d6 100644
    if (render_target_cache_.GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
      using DepthStencilMode = SpirvShaderTranslator::Modification::DepthStencilMode;
      if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
-@@ -1111,8 +1169,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
+@@ -1111,8 +1174,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
      }
    }
  
@@ -4763,7 +4956,7 @@ index 91ac08f..817a0d6 100644
    uint8_t async_priority = pipeline_util::kPriorityLowest;
    if (use_async) {
      uint32_t bound_rts =
-@@ -1215,13 +1278,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -1215,13 +1283,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
  
  void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
      void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
@@ -4781,7 +4974,7 @@ index 91ac08f..817a0d6 100644
      return;
    }
    const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
-@@ -1230,6 +1296,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -1230,6 +1301,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
    if (is_placeholder_out) {
      *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
    }
@@ -4791,7 +4984,7 @@ index 91ac08f..817a0d6 100644
  }
  
  bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
-@@ -1246,6 +1315,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
+@@ -1246,6 +1320,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
      return false;
    }
  
@@ -4807,7 +5000,19 @@ index 91ac08f..817a0d6 100644
    // TODO(Triang3l): Log that the shader has been successfully translated in
    // common code.
  
-@@ -2964,11 +3042,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -1423,7 +1506,10 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
+     } else {
+       switch (primitive_processing_result.host_primitive_type) {
+         case xenos::PrimitiveType::kPointList:
+-          geometry_shader = PipelineGeometryShader::kPointList;
++          // Host points (native_point_sprites) need no geometry shader.
++          if (!native_point_sprites_) {
++            geometry_shader = PipelineGeometryShader::kPointList;
++          }
+           primitive_topology = PipelinePrimitiveTopology::kPointList;
+           break;
+         case xenos::PrimitiveType::kLineList:
+@@ -2964,11 +3050,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    bool use_dynamic_rendering =
        REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
@@ -4831,7 +5036,7 @@ index 91ac08f..817a0d6 100644
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3240,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3248,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -4844,7 +5049,7 @@ index 91ac08f..817a0d6 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
-@@ -3268,9 +3363,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3268,9 +3371,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    VkSampleMask sample_mask = UINT32_MAX;
    VkPipelineMultisampleStateCreateInfo multisample_state = {};
    multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -4859,7 +5064,7 @@ index 91ac08f..817a0d6 100644
      multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
    } else if (!edram_fragment_shader_interlock && !subpass_has_attachments) {
      // Keep parity with D3D12 host-render-target path, where draws without
-@@ -3588,6 +3686,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3588,6 +3694,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
    }
  }
  
@@ -4919,10 +5124,18 @@ index 91ac08f..817a0d6 100644
    std::vector<VkPipeline> pipelines_to_destroy;
    uint64_t completed_submission = command_processor_.GetCompletedSubmission();
 diff --git a/src/graphics/vulkan/primitive_processor.cpp b/src/graphics/vulkan/primitive_processor.cpp
-index cdbedae..6c2570f 100644
+index cdbedae..c611bd4 100644
 --- a/src/graphics/vulkan/primitive_processor.cpp
 +++ b/src/graphics/vulkan/primitive_processor.cpp
-@@ -30,6 +30,29 @@ REXCVAR_DEFINE_BOOL(
+@@ -21,6 +21,7 @@
+ #include <rex/logging.h>
+ #include <rex/ui/vulkan/util.h>
+ 
++REXCVAR_DECLARE(bool, vulkan_native_point_sprites);
+ REXCVAR_DEFINE_BOOL(vulkan_force_expand_point_sprites_in_vs, false, "GPU/Vulkan",
+                     "Force Vulkan point sprite expansion in the vertex shader, even when geometry "
+                     "shaders are available")
+@@ -30,6 +31,29 @@ REXCVAR_DEFINE_BOOL(
      "Force Vulkan rectangle list expansion in the vertex shader, even when geometry "
      "shaders are available")
      .lifecycle(rex::cvar::Lifecycle::kInitOnly);
@@ -4952,7 +5165,22 @@ index cdbedae..6c2570f 100644
  REXCVAR_DEFINE_BOOL(vulkan_force_convert_quad_lists_to_triangle_lists, false, "GPU/Vulkan",
                      "Force Vulkan quad list conversion to triangle lists in primitive processing, "
                      "even when geometry shaders are available")
-@@ -69,6 +92,8 @@ bool VulkanPrimitiveProcessor::Initialize() {
+@@ -55,8 +79,13 @@ bool VulkanPrimitiveProcessor::Initialize() {
+   bool quad_lists_supported_without_conversion =
+       geometry_shader_primitive_emulation_allowed &&
+       !REXCVAR_GET(vulkan_force_convert_quad_lists_to_triangle_lists);
++  // Without geometry shaders, host points of gl_PointSize pixels
++  // (vulkan_native_point_sprites, see SpirvShaderTranslator::Features).
++  bool native_point_sprites = REXCVAR_GET(vulkan_native_point_sprites) &&
++                              !device_properties.geometryShader &&
++                              device_properties.largePoints;
+   bool point_sprites_supported_without_vs_expansion =
+-      geometry_shader_primitive_emulation_allowed &&
++      (geometry_shader_primitive_emulation_allowed || native_point_sprites) &&
+       !REXCVAR_GET(vulkan_force_expand_point_sprites_in_vs);
+   bool rectangle_lists_supported_without_vs_expansion =
+       geometry_shader_primitive_emulation_allowed &&
+@@ -69,6 +98,8 @@ bool VulkanPrimitiveProcessor::Initialize() {
      Shutdown();
      return false;
    }
@@ -6244,7 +6472,7 @@ index 813bb1c..4b46c83 100644
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index 8197bb4..42c142b 100644
+index 8197bb4..aab56ab 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
 @@ -236,6 +236,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
@@ -6289,7 +6517,22 @@ index 8197bb4..42c142b 100644
      ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
      ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
    }
-@@ -731,6 +752,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -625,12 +646,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+   XE_UI_VULKAN_LIMIT(optimalBufferCopyOffsetAlignment)
+   XE_UI_VULKAN_LIMIT(optimalBufferCopyRowPitchAlignment)
+   XE_UI_VULKAN_LIMIT(nonCoherentAtomSize)
++  device->properties_.pointSizeRangeMax = properties.limits.pointSizeRange[1];
+ 
+   if (with_gpu_emulation) {
+     XE_UI_VULKAN_FEATURE(robustBufferAccess)
+     XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
+     XE_UI_VULKAN_FEATURE(independentBlend)
+     XE_UI_VULKAN_FEATURE(geometryShader)
++    XE_UI_VULKAN_FEATURE(largePoints)
+     XE_UI_VULKAN_FEATURE(tessellationShader)
+     XE_UI_VULKAN_FEATURE(sampleRateShading)
+     XE_UI_VULKAN_FEATURE(depthClamp)
+@@ -731,6 +754,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  

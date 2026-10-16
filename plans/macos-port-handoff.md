@@ -600,6 +600,18 @@ the same way as Xenia's ROV path.
      **trail 18.9 vs. 20.0 ms per frame, heavy view 24.9 vs. 26.5 ms**;
      terrain unchanged in the captures. Left of the terrain cost: adaptive
      patches still use the maximum factor (their own factors are 2-16).
+  16. **Done (2026-10-16): native point sprites**
+     (`vulkan_native_point_sprites`, default on, restart; `docs/macos_port.md`,
+     "Point sprites as host points"): point lists are host points with
+     `gl_PointSize` / `gl_PointCoord` instead of 4-vertex strips. Uncapped
+     on `fbo` (`tools/mac_ab_paths.sh "points=--vulkan_native_point_sprites=true"
+     "quads=--vulkan_native_point_sprites=false"`; `fable_2_164` / `165`):
+     **trail 17.2 vs. 19.5 ms per frame, heavy view 23.6 vs. 24.6 ms**.
+     Snow and the trail orbs look the same; flicker test clean (16 shots
+     1.7-2.0%; a first run showed the game's exposure still settling after
+     the load in the first shots, a repeat did not). Since the fbo switch
+     the trail went 20.0 -> 17.2 ms and the heavy view 26.7 -> 23.6 ms of
+     GPU per frame.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

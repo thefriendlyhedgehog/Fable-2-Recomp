@@ -558,6 +558,28 @@ points. Same positions as before (the domain coordinates are computed with
 the same operations). On `fbo`, uncapped: trail 18.9 ms per frame vs. 20.0,
 heavy view 24.9 vs. 26.5 (`fable_2_163`, `fable_2_162`).
 
+### Point sprites as host points
+
+Without geometry shaders the SDK expands every point of a point list into a
+4-vertex strip in the vertex shader (`kPointListAsTriangleStrip`), so the
+guest vertex shader runs 4 times per point. Fable II's snow (23 draws of
+4096 points per frame, a 581-instruction procedural vertex shader) then
+costs ~2 ms per frame on `fbo`. With `vulkan_native_point_sprites` (default
+on, restart; only without geometry shaders and with `largePoints`; Apple:
+1-511 pixels) point lists stay host point lists: the vertex shader writes
+`gl_PointSize` (the guest diameter from the vertex shader if it wrote one,
+otherwise `PA_SU_POINT_SIZE`'s width, times the resolution scale, clamped
+to the host range), the pipeline has point topology and no geometry
+shader, and pixel shaders with point sprite coordinates (PsParamGen) read
+`gl_PointCoord`. Differences from the expansion: host points are square
+(guest points with a different width and height use the width), and the
+host may drop a point whose center leaves the clip volume; user clip
+planes are not re-evaluated per corner. `--vulkan_native_point_sprites=false`
+(or `vulkan_force_expand_point_sprites_in_vs`) restores the expansion.
+Uncapped on `fbo`: trail 17.2 ms per frame vs. 19.5, heavy view 23.6 vs.
+24.6 (`fable_2_164`, `fable_2_165`); flicker test clean, 2.0% of pixels
+differ from the expansion (snow), like two runs of either.
+
 ### Shared memory barriers between draws
 
 `VulkanSharedMemory::Use` inserted a buffer barrier after every draw with
