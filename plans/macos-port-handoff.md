@@ -694,16 +694,20 @@ the same way as Xenia's ROV path.
      ~28 loads per frame at the heavy view skip the scratch buffer and the
      copy. Trace, per command buffer: copy encoders 1.6 vs. 14.5, idle
      gaps 2.17 vs. 3.26 ms. Sweep alternating it: same picture.
-     **Not measured yet:** frame time on an idle machine (`tools/mac_ab_paths.sh
+     Uncapped, both orders (`tools/mac_ab_paths.sh
      direct=--vulkan_texture_load_to_image=true
-     copy=--vulkan_texture_load_to_image=false`); the evening runs shared
-     the GPU with two other games. **Open:** one run of five with it on
+     copy=--vulkan_texture_load_to_image=false`; `fable_2_205`-`208`, GPU
+     otherwise 9-16% busy): **heavy view 20.0 / 19.5 vs. 20.9 / 20.7 ms
+     per frame, trail 16.6 / 16.7 vs. 16.7 / 16.9 ms**. Since the fbo
+     switch: heavy view 26.7 -> ~19.8 ms, trail 20.0 -> ~16.6 ms.
+     **Open:** one run of five with it on
      (`fable_2_197`, while those games ran) never reached gameplay: tens of
      thousands of `Unhandled guest access violation` reads of guest
      0x00000000 / 0x00000020 during the load (the log rotated past its
      start); the other four, and two repeats, were fine. No run without
      it crashed, but none of them ran under that load either. If it
-     happens again, rerun with the switch off to tell.
+     happens again, rerun with the switch off to tell. The four timing
+     runs (two with it on) were fine.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

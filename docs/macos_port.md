@@ -709,9 +709,9 @@ At the heavy view about 28 loads per frame take this path. Trace
 copy-to-image encoders 1.6 vs. 14.5, idle gaps between encoders 2.17 vs.
 3.26 ms (dispatch-to-copy gaps 0.04 vs. 1.03 ms), copy time 0.19 vs. 0.44
 ms. Sweep alternating the switch 12 times: shots within 1.6-2.0% (snow).
-Frame times are still to be measured on an idle machine: the runs of
-2026-10-16 evening shared the GPU with two other games (72% busy without
-Fable II).
+Uncapped on `fbo`, both orders (`fable_2_205`-`208`, GPU otherwise 9-16%
+busy): **heavy view 20.0 / 19.5 vs. 20.9 / 20.7 ms per frame** (34.5
+direct loads per frame), trail 16.6 / 16.7 vs. 16.7 / 16.9 ms.
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
