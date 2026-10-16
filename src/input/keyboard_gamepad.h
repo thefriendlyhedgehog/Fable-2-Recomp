@@ -537,6 +537,8 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // Commands from debug_command_file (a script driving a capture), also
     // without focus.
     PollCommandFile(&buttons);
+    lx += command_press_sticks_[0] * input_detail::kStickMax;
+    ly += command_press_sticks_[1] * input_detail::kStickMax;
 
     // Debug-console toggle key (default F4); see the Windows path above.
     uint16_t unlock_vk = static_cast<uint16_t>(
@@ -594,6 +596,8 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       rx = input_detail::ClampStick(dx * scale);
       ry = input_detail::ClampStick(-dy * scale);
     }
+    rx = input_detail::ClampStick(rx + command_press_sticks_[2] * input_detail::kStickMax);
+    ry = input_detail::ClampStick(ry + command_press_sticks_[3] * input_detail::kStickMax);
 #endif
 
     out_state->packet_number.set(packet_number_++);
@@ -658,14 +662,18 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   [[maybe_unused]] bool debug_toggle_down_prev_[4] = {};  // F6-F8, F10 state (non-Windows)
 #ifndef _WIN32
   // debug_command_file state (guest input poll thread only). A press with
-  // mask 0 is a wait.
+  // no buttons and no stick deflection is a wait. sticks: left X, left Y,
+  // right X, right Y, each -1, 0 or +1 (full deflection; left Y +1 is
+  // forward for Fable 2, right Y +1 looks up).
   struct CommandPress {
     uint16_t mask;
     int32_t ms;
+    std::array<int8_t, 4> sticks{};
   };
   std::deque<CommandPress> command_presses_;
   bool command_press_active_ = false;
   uint16_t command_press_mask_ = 0;
+  std::array<int8_t, 4> command_press_sticks_{};
   std::chrono::steady_clock::time_point command_press_end_{};
   std::chrono::steady_clock::time_point next_command_poll_{};
 
@@ -693,12 +701,15 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       if (command_press_mask_) {
         command_presses_.push_front({0, 100});
       }
+      command_press_mask_ = 0;
+      command_press_sticks_ = {};
     }
     if (!command_press_active_ && !command_presses_.empty()) {
       CommandPress press = command_presses_.front();
       command_presses_.pop_front();
       command_press_active_ = true;
       command_press_mask_ = press.mask;
+      command_press_sticks_ = press.sticks;
       command_press_end_ = now + std::chrono::milliseconds(press.ms);
     }
     if (command_press_active_) *buttons |= command_press_mask_;
@@ -729,13 +740,34 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       std::string name;
       int32_t ms = 150;
       words >> name >> ms;
-      input_detail::Mapping m;
-      input_detail::FillGuestTarget(m, name);
-      if (!m.button) {
-        REXSYS_WARN("[input] command file: unknown button '{}'", name);
-        return;
+      // Buttons and stick directions, combined with '+' (e.g. "LU+RL"):
+      // LU/LD/LL/LR the left stick, RU/RD/RL/RR the right stick (camera).
+      CommandPress press{0, std::max(ms, 16)};
+      std::istringstream parts(name);
+      std::string part;
+      while (std::getline(parts, part, '+')) {
+        std::string u;
+        for (char c : part) u.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+        if (u == "RU" || u == "RD") {
+          press.sticks[3] = u == "RU" ? 1 : -1;
+          continue;
+        }
+        if (u == "RL" || u == "RR") {
+          press.sticks[2] = u == "RR" ? 1 : -1;
+          continue;
+        }
+        input_detail::Mapping m;
+        input_detail::FillGuestTarget(m, part);
+        if (m.button) {
+          press.mask |= m.button;
+        } else if (m.axis == 1 || m.axis == 2) {
+          press.sticks[m.axis - 1] = m.axis_sign;
+        } else {
+          REXSYS_WARN("[input] command file: unknown button '{}'", part);
+          return;
+        }
       }
-      command_presses_.push_back({m.button, std::max(ms, 16)});
+      command_presses_.push_back(press);
     } else if (command == "set") {
       std::string name, value;
       words >> name >> value;

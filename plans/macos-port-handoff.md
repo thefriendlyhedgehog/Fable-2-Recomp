@@ -154,7 +154,9 @@ number keys.
 `tools/mac_capture.sh` passes `--debug_command_file=out/capture/command`.
 The input poll reads and deletes that file every 250 ms (no window focus
 needed), one command per line: `report` (= 9), `sweep` (= 0), `quit`,
-`press <button> [ms]`, `wait <ms>`, `dump <frames>`, `set <cvar> <value>`.
+`press <button>[+<button>...] [ms]` (buttons, or stick directions LU/LD/LL/LR
+and RU/RD/RL/RR for the left stick and the camera), `wait <ms>`,
+`dump <frames>`, `set <cvar> <value>`.
 Write it atomically, e.g.
 `printf 'sweep\n' > out/capture/command.tmp && mv out/capture/command.tmp out/capture/command`.
 (The keys 9 / 0 only work while the game window has focus.)
@@ -490,6 +492,42 @@ the same way as Xenia's ROV path.
      **Next:** the trail is at the console's 30 fps; the remaining levers
      matter for heavier scenes (GPU ~29-31 ms per frame here), or an
      unlocked frame rate if the guest pacing is ever patched.
+  12. **Heavy-scene pass (2026-10-15).** `press` in the command file now
+     takes stick directions, so a test can turn the camera: at the trail,
+     `press RL 500;wait 300` four times looks back at the wooden building
+     behind the hero (`fable_2_142`-`148`). That view draws ~4280 per frame
+     (1289 depth prepass, 1194 main geometry, 369 shadow map) and runs
+     **26-27 fps**: the only spot in reach below 30 (walking down the trail
+     stays at 30). Trace (`out/profile/heavy_1015.trace`): GPU busy 93%,
+     two command buffers of 25.6 + 12.3 ms, main color pass 10.6 ms,
+     fragment 59% of channel time. **Uncapped measurements:**
+     `--video_mode_refresh_rate=120` moves the game's vblank cap to 60 fps
+     (the heavy view then runs 36.9 ms per frame), so skips are not
+     clipped at 33.3 ms. Saved per frame by skipping
+     (`vulkan_debug_skip_ps` groups; an entry `hash/N` now matches only
+     primitive type N; `vulkan_debug_skip_depth_only_draws`): depth
+     prepass 4.2 ms, main geometry `8D900846800943C8` 3.2 ms, snow 1.5 ms,
+     other base-pass shaders 1.2 ms, `401A01FD4E5F8757` 0.5 ms;
+     `A4A965C189287B99` 7.1 ms in total, but split: its 72 one-point draws
+     (vs `B6C9863F710683EC`: one point at the center, color masked, no
+     depth: dummy kick draws) 0.8 ms, and its ~17 rectangle-list clears
+     3.8 ms, which is mostly later draws failing against the uncleared
+     depth/stencil (the clears are of small targets, the hero/dog texture
+     morph levels), not the clears' own cost. So no single draw group
+     dominates: it is spread over thousands of draws at ~3 us each.
+     Other findings: the 200-290 ms hitches every 20 s in capture runs are
+     `tools/mac_capture.sh`'s automatic frame report
+     (`--vulkan_frame_report_interval=20`), not the game; **the `fbo` path
+     no longer reaches the title screen** (stays on the logos at 25 draws
+     per frame, `swap_texture_view=NULL`), so it can't be compared now.
+     Host occlusion queries (`occlusion_query_enable`) wait for the GPU at
+     every query end (`AwaitAllQueueOperationsCompletion`), but Fable II
+     issues none here (2 submissions per frame).
+     **Next levers:** per-draw cost (CPU encoding is off the critical path
+     now; GPU-side per-draw overhead of FSI: pipeline/descriptor rebinds,
+     raster order group waits), the depth prepass under FSI (depth-only
+     draws still run an interlocked fragment shader), or fixing `fbo` to
+     compare hardware depth/blending.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

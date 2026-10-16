@@ -7,7 +7,9 @@
 # Usage: tools/mac_autotest.sh "<commands>" [extra game flags...]
 #   <commands>: debug_command_file lines separated by ";", run once gameplay
 #   renders, e.g. "wait 5000;report;sweep" (report, sweep, dump N, set <cvar>
-#   <value>, press <button> [ms], wait <ms>). "sleep <seconds>" pauses the
+#   <value>, press <button> [ms], wait <ms>; press also takes stick
+#   directions LU/LD/LL/LR (left stick, LU = forward) and RU/RD/RL/RR (right
+#   stick, camera), combined with '+', e.g. "press LU+RL 2000"). "sleep <seconds>" pauses the
 #   script itself between batches (press and wait are timed in the game, the
 #   other commands run as soon as they are read). The script then waits for
 #   the sweep (if any) and for a frame report to complete, and sends "quit".
