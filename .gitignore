@@ -61,6 +61,7 @@ __pycache__/
 !tools/setup_sdk.sh
 !tools/stage_content.sh
 !tools/build_sdk_mac.sh
+!tools/build_texture_load_image_shaders.sh
 !tools/summarize_sample.py
 !tools/summarize_gputrace.py
 !tools/analyze_mac_capture.py

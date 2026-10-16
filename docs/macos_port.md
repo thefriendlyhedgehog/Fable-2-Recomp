@@ -678,6 +678,40 @@ same, but GPU and CPU time per frame don't change measurably (heavy view
 skipped loads are small, and they were already batched at the start of
 the submission.
 
+
+### Texture loads straight into the image
+
+`vulkan_texture_load_to_image` (default on, hot reload) loads textures that
+are render targets resolved to memory without the scratch buffer and the
+copy: a texture created while its first page holds GPU-written data
+(`SharedMemory::IsRangeGpuWritten`) gets `VK_IMAGE_USAGE_STORAGE_BIT`
+(with `MUTABLE_FORMAT` and `EXTENDED_USAGE`, plus the storage format in the
+format list), and its loads in the command stream run a shader that writes
+the texels into the image through an unsigned integer view of the same
+size (`r8ui`, `r16ui`, `r32ui`, `rg32ui`), so the image gets the same bits
+as from the copy. The shaders are
+`src/graphics/shaders/texture_load_to_image.cs.glsl` in the SDK tree,
+compiled into `vulkan_spirv/texture_load_*_image_cs.h` by
+`tools/build_texture_load_image_shaders.sh` (glslangValidator): the same
+untiling, endian swaps and conversions as the 8, 16, 32 and 64 bpb copies,
+24-bit float depth and `1_5_5_5` (the formats the resolved textures use),
+written from the decompiled SPIR-V of the existing load shaders. Only 2D,
+one layer, not resolution-scaled, no packed mip tail, no float fallback;
+anything else, and hoisted loads, keep the copy. Each texture keeps a
+storage view and descriptor per mip level (a pool owned by the texture
+cache; destroyed textures hand theirs back for reuse, since the SDK's
+function table has no `vkFreeDescriptorSets`). The image stays in
+`GENERAL` (`Usage::kComputeWrite`) until binding it for sampling
+transitions it. Needs `shaderStorageImageExtendedFormats`, now enabled.
+
+At the heavy view about 28 loads per frame take this path. Trace
+(`out/profile/ld_dir.trace` vs. `ld_cpy.trace`, per command buffer):
+copy-to-image encoders 1.6 vs. 14.5, idle gaps between encoders 2.17 vs.
+3.26 ms (dispatch-to-copy gaps 0.04 vs. 1.03 ms), copy time 0.19 vs. 0.44
+ms. Sweep alternating the switch 12 times: shots within 1.6-2.0% (snow).
+Frame times are still to be measured on an idle machine: the runs of
+2026-10-16 evening shared the GPU with two other games (72% busy without
+Fable II).
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
