@@ -457,6 +457,39 @@ the same way as Xenia's ROV path.
      processes the ring) about a quarter of its time: what it waits for
      is next. Tracing still works (`FABLE2_FUNC_TRACE=1` writes the
      summary).
+  11. **Frame pacing: two fixes (2026-10-15).** The [wait_reg_mem] log now
+     says when a wait ended relative to the last guest vblank
+     (`fable_2_135`): the 0x1FC83004 waits end 0.13-1.13 ms after a vblank
+     (p50 0.55, the 1 ms poll sleep), so the guest's vblank handler
+     releases the frame, every 2 vblanks (a 30 fps cap; the render thread's
+     `FrameLimiterWait_82242628` / `GpuProgressCheck_82B9BF90` spin on the
+     frame-end fence that follows).
+     (a) **Guest clock ran 3% slow.** Releases came every 34.38 ms, not
+     33.33: the vblank timer (guest ticks) ran at 58.2 Hz. `UpdateGuestClock`
+     (src/core/clock.cpp) converted each call's host tick delta with integer
+     division and dropped the remainder (24 MHz host, 50 MHz guest: up to
+     11/12 of a guest tick per call), and threads polling the time make
+     that add up. It now carries the remainder. Result (`fable_2_136`):
+     30.0 fps in hitch-free windows (was 29.0-29.1), releases every 33.3 ms;
+     game time runs at the right speed too.
+     (b) **Paint held the queue while waiting for the display.** The
+     submission log now prints each frame's areas (`vulkan_submission_log`
+     turns on the frame timing). Frames over 40 ms had ~6 ms in the swap
+     and the CP's "submit" was ~10-12 ms per frame. A `sample` showed why:
+     the paint thread's vkQueueSubmit holds the shared queue mutex while
+     MoltenVK fetches the swapchain's CAMetalDrawable lazily
+     (`-[CAMetalLayer nextDrawable]` blocks until the display frees one),
+     and the CP's submissions wait for that mutex. Fix:
+     `vulkan_fetch_drawable_before_submit` (default on, live) enables
+     VK_EXT_metal_objects and exports the acquired image's MTLTexture right
+     after vkAcquireNextImageKHR, outside the lock. A/B in one run
+     (`fable_2_140`, 4 phases): frames over 40 ms 10.3% -> 0.5%, CP submit
+     11.5 -> 1.7 ms per frame, swap stall gone; the mean stays at the
+     30 fps cap. The CP now has ~10 ms of slack per frame at the trail.
+     Picture checked on screen.
+     **Next:** the trail is at the console's 30 fps; the remaining levers
+     matter for heavier scenes (GPU ~29-31 ms per frame here), or an
+     unlocked frame rate if the guest pacing is ever patched.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

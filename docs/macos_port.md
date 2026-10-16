@@ -594,6 +594,31 @@ the sampled layout themselves, so the draws need no barrier. At the trail
 21 of ~61 loads per frame qualify: the others reload textures sampled
 earlier in the submission or read data resolved in it. 20.8 fps vs. 20.1.
 
+### Frame pacing: guest clock and the drawable wait
+
+Fable II paces itself on the guest vblank: the command processor waits
+(WAIT_REG_MEM on 0x1FC83004) until the guest's vblank handler releases the
+next frame, every second vblank. Two host problems disturbed that:
+
+- **Guest clock drift.** `UpdateGuestClock` (`src/core/clock.cpp`) turns
+  each host tick delta into guest ticks with an integer division. With
+  Apple Silicon's 24 MHz host clock and the 50 MHz guest clock (ratio
+  25/12), every call dropped up to 11/12 of a guest tick, and with threads
+  polling the time all the time the guest clock (and the vblank timer that
+  runs on it) ran about 3% slow: 58.2 Hz vblanks, 29.1 fps. The remainder
+  is now carried to the next update (reset when the ratio changes).
+- **The paint thread waits for a drawable while holding the queue.**
+  MoltenVK gets the swapchain image's CAMetalDrawable lazily, while
+  encoding the paint's command buffer inside vkQueueSubmit, and
+  `nextDrawable` blocks until the display gives one back. The presenter
+  holds the queue mutex around vkQueueSubmit, so the command processor's
+  submissions waited too (6 ms in the swap of 1 frame in 10, ~10 ms of
+  "submit" per frame). With `vulkan_fetch_drawable_before_submit` (on by
+  default) the device enables VK_EXT_metal_objects and the presenter
+  exports the acquired image's MTLTexture right after
+  vkAcquireNextImageKHR, which makes MoltenVK fetch the drawable there,
+  outside the lock.
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:
