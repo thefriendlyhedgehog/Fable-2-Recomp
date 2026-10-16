@@ -24,11 +24,12 @@ build 64bpb 3 0
 build depth_float 2 1
 build r5g5b5a1_b5g5r5a1 1 2
 resolve() {
-  local name=$1 source_uint=$2
-  glslangValidator -V --target-env vulkan1.0 -S comp -DSOURCE_UINT="$source_uint" \
+  local name=$1 source_uint=$2 depth=$3
+  glslangValidator -V --target-env vulkan1.0 -S comp -DSOURCE_UINT="$source_uint" -DDEPTH="$depth" \
     --vn "resolve_direct_fast_32bpp_${name}_cs" \
     -o "$OUT/resolve_direct_fast_32bpp_${name}_cs.h" "$SDK/resolve_direct_fast_32bpp.cs.glsl" > /dev/null
   echo "$OUT/resolve_direct_fast_32bpp_${name}_cs.h"
 }
-resolve float 0
-resolve uint 1
+resolve float 0 0
+resolve uint 1 0
+resolve depth 0 1

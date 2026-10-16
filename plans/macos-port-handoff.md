@@ -196,6 +196,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
+| - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
 | - | `vulkan_debug_skip_resolve_dumps`, `vulkan_debug_skip_resolve_copies` | skip the fbo dumps / the resolve copies, to measure what they cost (wrong picture) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
@@ -731,6 +732,19 @@ the same way as Xenia's ROV path.
      The next step along this line would be the depth and 4x MSAA variants
      of the same shader, or sampling resolved render targets without the
      shared memory round trip at all.
+  22. **Done (2026-10-16): direct resolves of depth**
+     (`vulkan_direct_resolve_depth`, default on, hot reload;
+     `docs/macos_port.md`, same section). The 1x depth render targets (the
+     two 1024x1024 shadow maps and the 1120x720 depth per frame at the heavy
+     view) resolve straight from the depth and stencil views, packed like
+     the depth dump (D24S8 and 20e4). Same picture (sweep, shadows
+     unchanged). Frame time within the noise (`fable_2_221`-`228`); trace
+     per command buffer: compute 1.50 vs. 1.63 ms, so ~0.3 ms of GPU time
+     per frame. Still dumped at the heavy view: the 4x MSAA depth (560x360,
+     640x360, 1280x720) and color (280x184, 256x256), and the full copies
+     (shaders 4-7). A 4x MSAA variant would read `texelFetch(..., sample)`
+     from multisampled views (the dump's sample mapping: bit 0 horizontal,
+     bit 1 vertical), but those copies are small.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

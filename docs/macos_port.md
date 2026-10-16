@@ -747,6 +747,24 @@ Sweep alternating the switch 6 times (`out/direct_resolve_check`): shots
 within 1.6-1.8% of the first (snow). Uncapped on `fbo`, both orders
 (`fable_2_216`-`219`, GPU otherwise 10-20% busy): **heavy view 18.9 / 18.9
 vs. 19.4 / 19.3 ms per frame**, trail 16.6 / 16.6 vs. 16.6 / 16.5 ms.
+
+**Depth** (`vulkan_direct_resolve_depth`, default on, hot reload): the same
+for 1x depth render targets, built with `DEPTH 1` (the depth and the stencil
+view of the render target, `direct_resolve_pipeline_layout_depth_`). Packed
+as the depth dump packs it: `roundEven(depth * 0xFFFFFF)` for `kD24S8`,
+`SpirvShaderTranslator::PreClampedDepthTo20e4` (remapped from [0, 0.5],
+rounding per `depth_float24_round`) for `kD24FS8`, depth in bits 8:31 and
+stencil in 0:7. The dump stores depth with the 40-sample halves of each tile
+swapped and the fast resolve swaps them back when reading, so the render
+target is read at the unswapped position. At the heavy view this covers the
+two 1024x1024 shadow maps and the 1120x720 depth per frame; the 4x MSAA
+depth (560x360, 640x360, 1280x720) still dumps. Sweep alternating it
+(`out/direct_resolve_depth_check`): shots within 1.3-2.0%, shadows the same.
+The frame time A/B stays within the run-to-run noise (`fable_2_221`-`228`,
+heavy view 18.9-19.7 ms either way); the traces (`out/profile/rd_dep.trace`
+vs. `rd_nod.trace`, heavy view, per command buffer, about 2.2 per frame)
+show compute 1.50 vs. 1.63 ms and 42.5 vs. 43.9 dispatches, so about 0.3 ms
+of GPU time per frame.
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
