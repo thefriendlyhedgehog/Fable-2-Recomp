@@ -639,6 +639,26 @@ the same way as Xenia's ROV path.
      (`DIDIDI...`): each hoisted texture load records dispatch, barrier,
      copy to image, barrier (`texture_cache.cpp`), so batching them (all
      dispatches, one barrier, all copies) would remove ~100 encoders.
+  18. **Done (2026-10-16): batched texture load copies**
+     (`vulkan_batch_texture_load_copies`, default on, takes effect at the
+     next submission; `docs/macos_port.md`, "Hoisted texture loads"): the
+     ~64 hoisted loads per frame run as all dispatches, one barrier, all
+     copies, with their image barriers merged into one before and one
+     after the copies. A first version that only moved the copies after
+     the dispatches gave nothing: the per-texture barriers between the
+     copies still split the blit encoder at each one. Uncapped on `fbo`,
+     two runs in both orders (`tools/mac_ab_paths.sh
+     batch=--vulkan_batch_texture_load_copies=true
+     perload=--vulkan_batch_texture_load_copies=false`; `fable_2_180`-`183`):
+     **heavy view 20.6 / 20.1 vs. 22.7 / 22.8 ms per frame, trail 16.6 /
+     16.6 vs. 16.9 / 17.2 ms**. Trace (`out/profile/pre_batch2.trace`):
+     1658 copy-to-image encoders per second vs. 3360. Sweep alternating the
+     switch 16 times (`out/sweep_batch`): shots within 1.7-2.0% of the
+     first (snow), the last one off only because the camera turned. Left
+     in the stream: ~36 loads per frame (textures sampled earlier in the
+     submission, or data the GPU resolved in it), which still alternate
+     dispatch / copy (`DIDIDI` runs later in the frame); ~100 texture loads
+     per frame in total is itself worth a look (what changes every frame).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

@@ -630,6 +630,21 @@ the sampled layout themselves, so the draws need no barrier. At the trail
 21 of ~61 loads per frame qualify: the others reload textures sampled
 earlier in the submission or read data resolved in it. 20.8 fps vs. 20.1.
 
+`vulkan_batch_texture_load_copies` (default on, any time) then orders the
+hoisted loads as all the compute dispatches, one barrier, all the copies.
+MoltenVK needs a new Metal encoder at every switch between compute and
+blit work and after a barrier between two copies, so a load recorded as
+dispatch, barrier, copy, barrier cost two encoders per texture (about 64
+hoisted loads per frame at the heavy view). The loads now record the
+copies into a second list (`texture_load_copy_command_buffer_`) and hand
+their image barriers to the command processor, which submits all of the
+before-copy transitions with the dispatch-to-copy barrier and all of the
+after-copy ones in one barrier after the copies. An image is loaded at
+most once per submission this way (a second load in the same submission
+stays in the stream), so no image is in one barrier twice. The trace's
+start of a frame went from `BDIIIIIIII...` to `BDI`; copy-to-image
+encoders per second halved.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
