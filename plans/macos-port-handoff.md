@@ -528,6 +528,30 @@ the same way as Xenia's ROV path.
      raster order group waits), the depth prepass under FSI (depth-only
      draws still run an interlocked fragment shader), or fixing `fbo` to
      compare hardware depth/blending.
+  13. **The `fbo` path works, and costs far less GPU (2026-10-15).** It
+     was never stuck: the statistics line counted only FSI draws, so it
+     said 0 draws per frame on `fbo` and `tools/mac_autotest.sh` (which
+     detects the title screen and gameplay from that count) gave up; the
+     window showed the logos and the title screen normally. The
+     statistics now count draws on both paths. `tools/mac_ab_paths.sh`
+     runs each path once, uncapped (guest refresh 120 Hz), at the trail
+     and at the heavy view, with screen captures (`out/ab_paths/`):
+     **trail 20.0 ms per frame (50 fps) on `fbo` vs. 29.8 ms (33.5 fps) on
+     `fsi`; heavy view 27.2 ms (36.7 fps) vs. 37.8 ms (26.5 fps)**
+     (`fable_2_150`, `fable_2_151`). So at the 30 fps cap `fbo` keeps
+     the GPU about a third less busy and the heavy view gets back under
+     33.3 ms. Picture: same scene, lighting, fog, orbs, hero; flicker test
+     clean on both (16 shots 250 ms apart: `fbo` 1.6-2.0%, `fsi`
+     1.9-2.1%, `out/ab_paths/flicker_*`). One difference: the ground right
+     of the trail next to the building is a dark brown patch on `fbo` in
+     every shot, lighter and snowier on `fsi` (4.6% of pixels differ
+     between the paths, most of it snow and the moving orbs). That is
+     where problem 1's flickering dark area with roof-shaped edges was, so
+     `fbo` may draw the building's shadow consistently where `fsi` did
+     only sometimes; needs a console reference. **Next:** decide the
+     macOS default (`Fable2App::OnPostInitLogging` sets
+     `REX_RENDER_TARGET_PATH_VULKAN=fsi`); check other scenes on `fbo`
+     (hero close-up and the dog's texture morph, menus, interiors).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
