@@ -190,6 +190,7 @@ Keys work only while the game window is focused; every press is logged as
 | 0 / fn+F10 | (app) | debug sweep: `debug_sweep_steps`, `debug_sweep_dir`, `debug_sweep_settle_ms` |
 | - | `vulkan_fsi_quad_skip_quad_ops` | quad-uniform early quad skip with subgroup quad ops (on; needs a restart; off = the old derivative check) |
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
+| - | `vulkan_debug_depth_only_tiny_scissor`, `vulkan_debug_depth_only_first_triangle` | draw the same prepass draws with a 1x1 scissor (vertex work and draw overhead stay), and with the second also only their first triangle (only the per-draw and render pass costs stay); the picture is white as with the skip |
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
@@ -612,6 +613,32 @@ the same way as Xenia's ROV path.
      the load in the first shots, a repeat did not). Since the fbo switch
      the trail went 20.0 -> 17.2 ms and the heavy view 26.7 -> 23.6 ms of
      GPU per frame.
+  17. **Depth prepass: not the lever (2026-10-16, heavy view, uncapped,
+     `fbo`).** The 4.3 ms item 14 saved by skipping it was mostly the
+     base pass: the prepass also writes the stencil the base pass tests,
+     so without it the picture is white and the base pass shades nothing.
+     Two new switches keep the downstream the same (white) and change only
+     the prepass (`tools/mac_ab_paths.sh`; `fable_2_170`-`173`, median of
+     the last 120 frames over 4000 draws): normal 23.1 ms, 1x1 scissor
+     23.0, 1x1 scissor and one triangle per draw 21.9, skipped 18.7. So
+     the prepass's vertex work (1275 strip draws, ~950 K indices, mostly
+     `F160B4DA459A6D40`, a 4-`dp4` position transform) is **~1.1 ms**;
+     its pixels can't be separated from the base pass. The other 3.2 ms
+     (one-triangle vs. skipped) is the ~1340 draws' fixed cost plus the
+     render passes that hold only them (shadow maps at `z@0` pitch 1040
+     and 320, a 1280-pitch pass, a 4x pass): Metal System Trace
+     (`out/profile/pre_base.trace`, `pre_skip.trace`) has 10 fewer render
+     encoders per frame with the skip, and GPU busy 17.0 vs. 14.1 ms per
+     frame (74% / 70% of the wall clock). The per-term zero guard in
+     `dp4` (`ZeroIfAnyOperandIsZero`) is a few ALU ops per term on a
+     shader that is mostly fetch, so ~0.2 ms at most; not worth the
+     semantics change. **Encoder count is the bigger lever:** the base
+     trace has ~340 Metal encoders per frame (137 render, 141 compute,
+     58 copy to image) and 1.8 ms of idle gaps between encoders per
+     command buffer; the short runs alternate dispatch / copy to image
+     (`DIDIDI...`): each hoisted texture load records dispatch, barrier,
+     copy to image, barrier (`texture_cache.cpp`), so batching them (all
+     dispatches, one barrier, all copies) would remove ~100 encoders.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
