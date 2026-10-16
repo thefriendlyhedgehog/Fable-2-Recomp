@@ -545,6 +545,19 @@ without it differ by 1.6%, like two shots with the same setting (snow);
 at the trail 19.4 fps vs. 16.8 (`fable_2_108`, `fable_2_109`). Every ground
 pass now builds the same grid.
 
+**Indexed grid (`vulkan_quad_patches_indexed`, default on, restart).** The
+triangle list above runs the vertex shader 6 times per grid cell: at factor
+16, 1734 invocations per patch for 324 distinct grid points. Instead each
+patch is now one instance of an indexed draw: a 16-bit index buffer per
+grid size and diagonal mode (`vulkan_quad_patch_diagonals`, cached in
+`GetQuadPatchIndexBuffer`) holds the cells' triangles over the grid points
+`y * (N + 1) + x`, the vertex shader takes the grid point from
+`gl_VertexIndex` and the patch from `gl_InstanceIndex`
+(`Features::quad_patch_indexed_grid`), and the GPU can reuse shaded grid
+points. Same positions as before (the domain coordinates are computed with
+the same operations). On `fbo`, uncapped: trail 18.9 ms per frame vs. 20.0,
+heavy view 24.9 vs. 26.5 (`fable_2_163`, `fable_2_162`).
+
 ### Shared memory barriers between draws
 
 `VulkanSharedMemory::Use` inserted a buffer barrier after every draw with

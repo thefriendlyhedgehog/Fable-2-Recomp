@@ -590,6 +590,16 @@ the same way as Xenia's ROV path.
      or the patch's own factor for adaptive patches; host point primitives
      with `PointSize` for point sprites (needs `largePoints`, square
      points only, point coordinates in the pixel shader).
+  15. **Done (2026-10-16): indexed quad patch grid**
+     (`vulkan_quad_patches_indexed`, default on, restart; `docs/macos_port.md`,
+     "Quad patches without host tessellation"): one instance per patch over
+     a cached grid index buffer instead of 6 vertex shader runs per cell.
+     Uncapped on `fbo` (`tools/mac_ab_paths.sh
+     "indexed=--vulkan_quad_patches_indexed=true"
+     "cells=--vulkan_quad_patches_indexed=false"`; `fable_2_163` / `162`):
+     **trail 18.9 vs. 20.0 ms per frame, heavy view 24.9 vs. 26.5 ms**;
+     terrain unchanged in the captures. Left of the terrain cost: adaptive
+     patches still use the maximum factor (their own factors are 2-16).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
