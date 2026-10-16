@@ -645,6 +645,39 @@ stays in the stream), so no image is in one barrier twice. The trace's
 start of a frame went from `BDIIIIIIII...` to `BDI`; copy-to-image
 encoders per second halved.
 
+### Why textures reload every frame
+
+`texture_load_log` (hot reload) logs, every 300 frames, why textures were
+loaded (first load, after a CPU write, after a GPU write such as a
+resolve) and the 30 loaded most often, with how many reloads found the
+same guest data as the texture's previous load (a hash of its base and mip
+ranges). At the heavy view about 100 loads per frame (fable_2_188):
+
+- **~40 after a GPU write**: render-to-texture targets read back after
+  every resolve: the three 256x256 `1_5_5_5` targets (4 per frame each),
+  the 280x180 and 560x360 post-processing chain, the 1120x720 depth (2.5
+  per frame) and the two 1024x1024 shadow maps (2 each). These are
+  needed: the resolve writes the shared memory, and the texture is loaded
+  from it.
+- **~60 after a CPU write, all with unchanged data**: small `DXT1`
+  textures, 16x16 linear ones at 0x1A55C000-0x1A567000 (next to the
+  per-frame vertex buffers at 0x1A568000) and a 16x16 cube. Write watches
+  are per host page, 16 KB on Apple Silicon (4 guest pages), so a CPU
+  write anywhere in it outdates every texture there.
+
+`texture_skip_unchanged_reloads` (off by default, hot reload) skips such
+a reload when the texture's guest data hashes the same as at its last
+load, and only re-arms the watch. It only applies when no page of the
+texture holds GPU-written data (`SharedMemory::IsRangeGpuWritten`), now
+and at the load the hash came from, so the shared memory equals the guest
+memory both times. A CPU write after the upload makes the range invalid,
+and `MakeUpToDateAndWatch` keeps the texture outdated as before. It skips
+59 of the ~100 loads per frame at the heavy view, the picture stays the
+same, but GPU and CPU time per frame don't change measurably (heavy view
+19.8 / 20.5 vs. 20.3 / 20.1 ms, CPU texture time 0.8 ms either way): the
+skipped loads are small, and they were already batched at the start of
+the submission.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

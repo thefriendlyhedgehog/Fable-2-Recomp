@@ -659,6 +659,33 @@ the same way as Xenia's ROV path.
      submission, or data the GPU resolved in it), which still alternate
      dispatch / copy (`DIDIDI` runs later in the frame); ~100 texture loads
      per frame in total is itself worth a look (what changes every frame).
+  19. **Texture reloads (2026-10-16; `docs/macos_port.md`, "Why textures
+     reload every frame").** `texture_load_log` at the heavy view: ~100
+     loads per frame, ~40 of them render targets reloaded after their
+     resolves (needed), ~60 small textures outdated by CPU writes elsewhere
+     in the same 16 KB host page, with the same guest data every time.
+     `texture_skip_unchanged_reloads` (off by default) skips those by hash:
+     59 loads per frame fewer and the same picture (sweep alternating it,
+     `out/sweep_skip`, all within 1.3-2.1%), but no measurable change in
+     frame time (`fable_2_190`-`193`) or CPU time, so it stays opt-in.
+     **What the resolve-to-texture path costs instead** (trace
+     `out/profile/pre_batch2.trace`, heavy view, per command buffer, about
+     two per frame): compute work 1.24 ms (52 encoders: the fbo dumps of
+     render targets into the EDRAM buffer, the resolves, the loads), copy
+     to image 0.41 ms (16 encoders), and **idle gaps** between dependent
+     encoders: 0.82 ms dispatch to dispatch (28.5 x 29 us), 0.60 ms
+     dispatch to copy (14.3 x 42 us), 0.21 ms copy to render pass. So each
+     resolve-then-sample step costs about 4 encoders and ~100 us of idle
+     GPU. **Levers:** (a) load resolved textures straight into the image
+     (storage image writes) instead of a scratch buffer and a copy, which
+     drops the copy encoder and the dispatch-to-copy gap (~1 ms of the ~3.3 above
+     per command buffer); the load shaders exist here only as prebuilt
+     SPIR-V (`src/graphics/shaders/vulkan_spirv/texture_load_*_cs.h`), so
+     it needs Xenia's `texture_load_*.xesl` sources or new GLSL ones
+     (`glslangValidator` is installed); (b) on fbo, resolve from the host
+     render target straight into the texture when the resolve covers the
+     whole texture with the same format, skipping the EDRAM dump, the
+     shared memory and the load (bigger win, harder to keep exact).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

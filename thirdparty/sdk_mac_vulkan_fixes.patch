@@ -366,7 +366,7 @@ index dce3dbf..9680427 100644
    spv::Id output_per_vertex_;
  
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
-index d26cd4f..1b6bdc9 100644
+index d26cd4f..7c4fd16 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
 +++ b/include/rex/graphics/pipeline/texture/cache.h
 @@ -226,7 +226,9 @@ class TextureCache {
@@ -380,6 +380,66 @@ index d26cd4f..1b6bdc9 100644
  
      void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip);
  
+@@ -238,6 +240,19 @@ class TextureCache {
+ 
+     void LogAction(const char* action) const;
+ 
++    // texture_skip_unchanged_reloads: the hash of the guest data the texture
++    // was last loaded from, kept only when no page of it held GPU-written data
++    // then (so the data equaled the guest memory).
++    bool GetGuestDataHash(uint64_t& hash_out) const {
++      hash_out = guest_data_hash_;
++      return guest_data_hash_valid_;
++    }
++    void SetGuestDataHash(bool valid, uint64_t hash = 0) {
++      guest_data_hash_valid_ = valid;
++      guest_data_hash_ = hash;
++    }
++    uint64_t HashGuestData() const;
++
+    protected:
+     // If track_usage is false, the texture won't be added to the LRU list.
+     explicit Texture(TextureCache& texture_cache, const TextureKey& key, bool track_usage = true);
+@@ -273,6 +288,8 @@ class TextureCache {
+     // Watch handles for the memory ranges.
+     SharedMemory::WatchHandle base_watch_handle_ = nullptr;
+     SharedMemory::WatchHandle mips_watch_handle_ = nullptr;
++    bool guest_data_hash_valid_ = false;
++    uint64_t guest_data_hash_ = 0;
+   };
+ 
+   // Rules of data access in load shaders:
+@@ -619,6 +636,30 @@ class TextureCache {
+   // Bit vector with bits reset on fetch constant writes to avoid parsing fetch
+   // constants again and again.
+   uint32_t texture_bindings_in_sync_ = 0;
++
++  // texture_load_log: why textures are loaded, summarized every 300 frames.
++  enum LoadLogReason : uint8_t {
++    kLoadLogNew,
++    kLoadLogCpuWrite,
++    kLoadLogGpuWrite,
++    kLoadLogOther,
++    kLoadLogReasonCount,
++  };
++  void NoteTextureLoadForLog(const Texture& texture);
++  // The watch callbacks come from other threads.
++  std::mutex load_log_mutex_;
++  std::unordered_map<const Texture*, uint8_t> load_log_invalidation_;
++  std::unordered_map<const Texture*, uint32_t> load_log_loaded_;
++  std::unordered_map<TextureKey, std::array<uint32_t, kLoadLogReasonCount>, TextureKey::Hasher>
++      load_log_by_key_;
++  std::array<uint32_t, kLoadLogReasonCount> load_log_totals_ = {};
++  // Reloads whose guest data hashes the same as at the texture's last load.
++  std::unordered_map<const Texture*, uint64_t> load_log_hash_;
++  std::unordered_map<TextureKey, uint32_t, TextureKey::Hasher> load_log_same_by_key_;
++  uint32_t load_log_same_total_ = 0;
++  // texture_skip_unchanged_reloads.
++  uint32_t unchanged_reloads_skipped_ = 0;
++  uint32_t load_log_frames_ = 0;
+ };
+ 
+ }  // namespace rex::graphics
 diff --git a/include/rex/graphics/primitive_processor.h b/include/rex/graphics/primitive_processor.h
 index 2945731..5c1618f 100644
 --- a/include/rex/graphics/primitive_processor.h
@@ -410,10 +470,19 @@ index 2945731..5c1618f 100644
    // Byte offsets used, for simplicity, directly as handles.
    size_t builtin_ib_offset_two_triangle_strips_ = SIZE_MAX;
 diff --git a/include/rex/graphics/shared_memory.h b/include/rex/graphics/shared_memory.h
-index 4d85a2b..c42a29d 100644
+index 4d85a2b..1f6b5a7 100644
 --- a/include/rex/graphics/shared_memory.h
 +++ b/include/rex/graphics/shared_memory.h
-@@ -78,6 +78,10 @@ class SharedMemory {
+@@ -29,6 +29,8 @@ class SharedMemory {
+   static constexpr uint32_t kBufferSize = 1 << kBufferSizeLog2;
+ 
+   virtual ~SharedMemory();
++  // The guest memory (for debug tools reading what the GPU sees).
++  memory::Memory& guest_memory() const { return memory_; }
+   // Call in the implementation-specific ClearCache.
+   virtual void ClearCache();
+   void SetSystemPageBlocksValidWithGpuDataWritten();
+@@ -78,6 +80,13 @@ class SharedMemory {
    // the range has been fully updated and is usable.
    bool RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, size_t count);
    bool RequestRange(uint32_t start, uint32_t length);
@@ -421,10 +490,13 @@ index 4d85a2b..c42a29d 100644
 +  // Hold the global critical region when relying on it for state transitions
 +  // such as installing a watch.
 +  bool IsRangeValid(uint32_t start, uint32_t length) const;
++  // Whether any page of the range holds data written by the GPU (resolves,
++  // memory export) that the CPU has not overwritten since.
++  bool IsRangeGpuWritten(uint32_t start, uint32_t length) const;
  
    // Marks the range and, if not exact_range, potentially its surroundings
    // (to up to the first GPU-written page, as an access violation exception
-@@ -95,6 +99,18 @@ class SharedMemory {
+@@ -95,6 +104,18 @@ class SharedMemory {
    // regions in those pages.
    void RangeWrittenByGpu(uint32_t start, uint32_t length);
  
@@ -443,7 +515,7 @@ index 4d85a2b..c42a29d 100644
   protected:
    SharedMemory(memory::Memory& memory);
    // Call in implementation-specific initialization.
-@@ -140,6 +156,17 @@ class SharedMemory {
+@@ -140,6 +161,17 @@ class SharedMemory {
    virtual bool UploadRanges(
        const std::vector<std::pair<uint32_t, uint32_t>>& upload_page_ranges) = 0;
  
@@ -461,7 +533,7 @@ index 4d85a2b..c42a29d 100644
   private:
    memory::Memory& memory_;
  
-@@ -149,6 +176,8 @@ class SharedMemory {
+@@ -149,6 +181,8 @@ class SharedMemory {
    uint32_t page_size_log2_;
  
    bool EnsureHostGpuMemoryAllocated(uint32_t start, uint32_t length);
@@ -2695,21 +2767,183 @@ index 765c141..146b763 100644
                                 builder_->makeUintConstant(kSysFlag_MsaaSamples_Shift),
                                 builder_->makeUintConstant(2));
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..d0adcd6 100644
+index 76f5600..b5aaaf5 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
-@@ -444,7 +444,9 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+@@ -23,9 +23,21 @@
+ #include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/xenos.h>
++#include <rex/hash.h>
+ #include <rex/logging.h>
++#include <rex/system/xmemory.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DEFINE_BOOL(texture_load_log, false, "GPU",
++                    "Log why textures are loaded (first load, CPU write, GPU write such as a "
++                    "resolve, other) and the textures loaded most often, every 300 frames.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(texture_skip_unchanged_reloads, false, "GPU",
++                    "When a texture is outdated by a CPU write, hash its guest data and skip "
++                    "the reload if it is the same as at the last load (the write was to other "
++                    "data in the same protected host page: 16 KB on Apple Silicon). Only for "
++                    "textures whose pages hold no GPU-written data.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
+ REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
+                      "Texture cache memory limit for render-to-texture (MB)")
+     .range(1, 256)
+@@ -316,6 +328,93 @@ void TextureCache::BeginFrame() {
+   // sure bindings are reset so a new attempt will surely be made if the texture
+   // is requested again.
+   ResetTextureBindings();
++
++  std::lock_guard<std::mutex> load_log_lock(load_log_mutex_);
++  if (!REXCVAR_GET(texture_load_log)) {
++    if (load_log_frames_) {
++      load_log_frames_ = 0;
++      load_log_totals_ = {};
++      load_log_by_key_.clear();
++      load_log_invalidation_.clear();
++      load_log_loaded_.clear();
++      load_log_hash_.clear();
++      load_log_same_by_key_.clear();
++      load_log_same_total_ = 0;
++    }
++    return;
++  }
++  if (++load_log_frames_ < 300) {
++    return;
++  }
++  double frames = double(load_log_frames_);
++  uint32_t total = 0;
++  for (uint32_t count : load_log_totals_) {
++    total += count;
++  }
++  REXGPU_INFO(
++      "[texture loads] {:.1f} per frame over {} frames: {:.1f} first loads, {:.1f} after a CPU "
++      "write, {:.1f} after a GPU write (resolve), {:.1f} other; {} distinct textures; {:.1f} "
++      "reloads per frame with the same guest data as the last load; {:.1f} reloads per frame "
++      "skipped (texture_skip_unchanged_reloads)",
++      total / frames, load_log_frames_, load_log_totals_[kLoadLogNew] / frames,
++      load_log_totals_[kLoadLogCpuWrite] / frames, load_log_totals_[kLoadLogGpuWrite] / frames,
++      load_log_totals_[kLoadLogOther] / frames, load_log_by_key_.size(),
++      load_log_same_total_ / frames, unchanged_reloads_skipped_ / frames);
++  unchanged_reloads_skipped_ = 0;
++  std::vector<std::pair<uint32_t, TextureKey>> by_count;
++  by_count.reserve(load_log_by_key_.size());
++  for (const auto& [key, counts] : load_log_by_key_) {
++    by_count.emplace_back(counts[0] + counts[1] + counts[2] + counts[3], key);
++  }
++  std::sort(by_count.begin(), by_count.end(),
++            [](const auto& a, const auto& b) { return a.first > b.first; });
++  for (size_t i = 0; i < std::min(by_count.size(), size_t(30)); ++i) {
++    const TextureKey& key = by_count[i].second;
++    const auto& counts = load_log_by_key_[key];
++    REXGPU_INFO(
++        "[texture loads]   {:.2f}/frame (new {} cpu {} gpu {} other {}, same data {}): base "
++        "0x{:08X} mips 0x{:08X} {}x{}x{} {} {} {} levels{}{}",
++        by_count[i].first / frames, counts[0], counts[1], counts[2], counts[3],
++        load_log_same_by_key_[key],
++        key.base_page << 12, key.mip_page << 12, key.GetWidth(), key.GetHeight(),
++        key.GetDepthOrArraySize(), key.GetLogDimensionName(), FormatInfo::Get(key.format)->name,
++        key.mip_max_level + 1, key.tiled ? " tiled" : " linear",
++        key.scaled_resolve ? " scaled" : "");
++  }
++  load_log_frames_ = 0;
++  load_log_totals_ = {};
++  load_log_by_key_.clear();
++  load_log_same_by_key_.clear();
++  load_log_same_total_ = 0;
++}
++
++void TextureCache::NoteTextureLoadForLog(const Texture& texture) {
++  std::lock_guard<std::mutex> lock(load_log_mutex_);
++  uint8_t reason = kLoadLogNew;
++  auto loaded_it = load_log_loaded_.find(&texture);
++  if (loaded_it != load_log_loaded_.end()) {
++    auto invalidation_it = load_log_invalidation_.find(&texture);
++    if (invalidation_it != load_log_invalidation_.end()) {
++      reason = invalidation_it->second;
++      load_log_invalidation_.erase(invalidation_it);
++    } else {
++      reason = kLoadLogOther;
++    }
++  } else {
++    load_log_loaded_.emplace(&texture, 1);
++    load_log_invalidation_.erase(&texture);
++  }
++  ++load_log_totals_[reason];
++  ++load_log_by_key_[texture.key()][reason];
++  uint64_t hash = texture.HashGuestData();
++  auto [hash_it, hash_new] = load_log_hash_.try_emplace(&texture, hash);
++  if (!hash_new) {
++    if (hash_it->second == hash) {
++      ++load_log_same_total_;
++      ++load_log_same_by_key_[texture.key()];
++    }
++    hash_it->second = hash;
++  }
+ }
+ 
+ void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
+@@ -435,8 +534,39 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+     }
+   }
+ 
++  // texture_skip_unchanged_reloads: with no GPU-written data in the ranges, the
++  // shared memory just uploaded holds the guest memory, so if that hashes the
++  // same as for the last load (also from such pages), the texture already
++  // has this data. A CPU write after the upload makes the range invalid, and
++  // MakeUpToDateAndWatch then keeps the texture outdated.
++  bool hash_guest_data = false;
++  uint64_t guest_data_hash = 0;
++  if (REXCVAR_GET(texture_skip_unchanged_reloads) && !texture_key.scaled_resolve) {
++    {
++      auto global_lock = global_critical_region_.Acquire();
++      hash_guest_data =
++          !shared_memory().IsRangeGpuWritten(texture_key.base_page << 12,
++                                             texture.GetGuestBaseSize()) &&
++          !shared_memory().IsRangeGpuWritten(texture_key.mip_page << 12,
++                                             texture.GetGuestMipsSize());
++    }
++    if (hash_guest_data) {
++      guest_data_hash = texture.HashGuestData();
++      uint64_t last_hash;
++      if (texture.GetGuestDataHash(last_hash) && last_hash == guest_data_hash) {
++        if (!texture.MakeUpToDateAndWatch(global_critical_region_.Acquire())) {
++          return false;
++        }
++        ++unchanged_reloads_skipped_;
++        texture.LogAction("Unchanged, not reloaded");
++        return true;
++      }
++    }
++  }
++
+   if (!LoadTextureDataFromResidentMemoryImpl(texture, pending_load.load_base,
+                                              pending_load.load_mips)) {
++    texture.SetGuestDataHash(false);
+     return false;
+   }
+ 
+@@ -444,8 +574,15 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
    // resolves as well to detect when the CPU wants to reuse the memory for a
    // regular texture or a vertex buffer, and thus the scaled resolve version is
    // not up to date anymore.
 -  texture.MakeUpToDateAndWatch(global_critical_region_.Acquire());
 +  if (!texture.MakeUpToDateAndWatch(global_critical_region_.Acquire())) {
++    texture.SetGuestDataHash(false);
 +    return false;
 +  }
++  texture.SetGuestDataHash(hash_guest_data, guest_data_hash);
    texture.LogAction("Loaded");
++  if (REXCVAR_GET(texture_load_log)) {
++    NoteTextureLoadForLog(texture);
++  }
  
    return true;
-@@ -573,6 +575,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+ }
+@@ -573,6 +710,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
      for (const PendingSharedMemoryRange& pending_range : pending_shared_memory_ranges) {
        pending_shared_memory_range_pairs.emplace_back(pending_range.start, pending_range.length);
      }
@@ -2717,7 +2951,40 @@ index 76f5600..d0adcd6 100644
      batched_shared_memory_request_succeeded = shared_memory().RequestRanges(
          pending_shared_memory_range_pairs.data(), pending_shared_memory_range_pairs.size());
    }
-@@ -686,9 +689,22 @@ TextureCache::Texture::~Texture() {
+@@ -636,6 +774,19 @@ void TextureCache::Texture::LogAction(const char* action) const {
+ // not be destroyed immediately after creation if dropping of old textures is
+ // performed somehow. The list is maintained by the Texture, not the
+ // TextureCache itself (unlike the `textures_` container).
++uint64_t TextureCache::Texture::HashGuestData() const {
++  const memory::Memory& memory = texture_cache_.shared_memory().guest_memory();
++  uint64_t hash = 0;
++  if (GetGuestBaseSize()) {
++    hash = XXH3_64bits(memory.TranslatePhysical(key_.base_page << 12), GetGuestBaseSize());
++  }
++  if (GetGuestMipsSize()) {
++    hash ^= XXH3_64bits(memory.TranslatePhysical(key_.mip_page << 12), GetGuestMipsSize()) *
++            UINT64_C(0x9E3779B97F4A7C15);
++  }
++  return hash;
++}
++
+ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& key, bool track_usage)
+     : texture_cache_(texture_cache),
+       key_(key),
+@@ -663,6 +814,12 @@ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& ke
+ }
+ 
+ TextureCache::Texture::~Texture() {
++  {
++    std::lock_guard<std::mutex> lock(texture_cache().load_log_mutex_);
++    texture_cache().load_log_invalidation_.erase(this);
++    texture_cache().load_log_loaded_.erase(this);
++    texture_cache().load_log_hash_.erase(this);
++  }
+   if (mips_watch_handle_) {
+     texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
+   }
+@@ -686,9 +843,22 @@ TextureCache::Texture::~Texture() {
    texture_cache_.UpdateTexturesTotalHostMemoryUsage(0, host_memory_usage_);
  }
  
@@ -2741,7 +3008,7 @@ index 76f5600..d0adcd6 100644
    if (base_outdated_) {
      assert_not_zero(GetGuestBaseSize());
      base_outdated_ = false;
-@@ -703,6 +719,7 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
+@@ -703,6 +873,7 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
          key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
      outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
    }
@@ -2749,7 +3016,19 @@ index 76f5600..d0adcd6 100644
  }
  
  void TextureCache::Texture::MarkAsUsed() {
-@@ -892,6 +909,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
+@@ -753,6 +924,11 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
+   Texture& texture = *static_cast<Texture*>(context);
+   texture.WatchCallback(global_lock, argument != 0);
+   texture.texture_cache().texture_became_outdated_.store(true, std::memory_order_release);
++  if (REXCVAR_GET(texture_load_log)) {
++    std::lock_guard<std::mutex> lock(texture.texture_cache().load_log_mutex_);
++    texture.texture_cache().load_log_invalidation_[&texture] =
++        invalidated_by_gpu ? kLoadLogGpuWrite : kLoadLogCpuWrite;
++  }
+ }
+ 
+ void TextureCache::DestroyAllTextures(bool from_destructor) {
+@@ -892,6 +1068,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
    for (size_t i = 0; i < pending_range_count; ++i) {
      pending_range_pairs[i] = std::make_pair(pending_ranges[i].start, pending_ranges[i].length);
    }
@@ -2865,10 +3144,10 @@ index d49e9c3..ce6747d 100644
                any_invalidated = true;
                // Remove the entry from the cache map.
 diff --git a/src/graphics/shared_memory.cpp b/src/graphics/shared_memory.cpp
-index ec0df7c..d5555c2 100644
+index ec0df7c..5dd4d9b 100644
 --- a/src/graphics/shared_memory.cpp
 +++ b/src/graphics/shared_memory.cpp
-@@ -461,11 +461,36 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
+@@ -461,11 +461,62 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
    COUNT_profile_set("gpu/shared_memory/request_ranges_upload_count",
                      uint32_t(upload_ranges_.size()));
  
@@ -2879,12 +3158,37 @@ index ec0df7c..d5555c2 100644
 +  return result;
 +}
 +
-+bool SharedMemory::IsRangeValid(uint32_t start, uint32_t length) const {
++bool SharedMemory::IsRangeGpuWritten(uint32_t start, uint32_t length) const {
 +  if (!length) {
++    return false;
++  }
++  if (start > kBufferSize || (kBufferSize - start) < length) {
      return true;
    }
--
++  uint32_t page_first = start >> page_size_log2_;
++  uint32_t page_last = (start + length - 1) >> page_size_log2_;
++  uint32_t block_first = page_first >> 6;
++  uint32_t block_last = page_last >> 6;
++  for (uint32_t i = block_first; i <= block_last; ++i) {
++    uint64_t mask = UINT64_MAX;
++    if (i == block_first) {
++      mask &= ~((uint64_t(1) << (page_first & 63)) - 1);
++    }
++    if (i == block_last && (page_last & 63) != 63) {
++      mask &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
++    }
++    if (system_page_flags_valid_and_gpu_written_[i] & mask) {
++      return true;
++    }
++  }
++  return false;
++}
+ 
 -  return UploadRanges(upload_ranges_);
++bool SharedMemory::IsRangeValid(uint32_t start, uint32_t length) const {
++  if (!length) {
++    return true;
++  }
 +  if (start > kBufferSize || (kBufferSize - start) < length) {
 +    return false;
 +  }
@@ -2908,7 +3212,7 @@ index ec0df7c..d5555c2 100644
  }
  
  bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
-@@ -492,6 +517,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
+@@ -492,6 +543,8 @@ std::pair<uint32_t, uint32_t> SharedMemory::MemoryInvalidationCallback(
    uint32_t block_first = page_first >> 6;
    uint32_t block_last = page_last >> 6;
  
