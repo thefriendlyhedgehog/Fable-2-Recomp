@@ -2,7 +2,8 @@
 # Compiles the GLSL compute shaders added for the macOS port in the SDK source
 # tree into the SPIR-V headers the Vulkan backend includes, one per variant:
 # texture_load_to_image.cs.glsl (vulkan_texture_load_to_image) and
-# resolve_direct_fast_32bpp.cs.glsl (direct_host_resolve). Needs
+# resolve_direct_fast_32bpp.cs.glsl (direct_host_resolve, and with TEXTURE 1
+# vulkan_resolve_into_texture). Needs
 # glslangValidator (Vulkan SDK). Run after editing a shader, then
 # tools/sdk_patch_refresh.sh.
 set -euo pipefail
@@ -24,12 +25,15 @@ build 64bpb 3 0
 build depth_float 2 1
 build r5g5b5a1_b5g5r5a1 1 2
 resolve() {
-  local name=$1 source_uint=$2 depth=$3
+  local name=$1 source_uint=$2 depth=$3 texture=${4:-0}
   glslangValidator -V --target-env vulkan1.0 -S comp -DSOURCE_UINT="$source_uint" -DDEPTH="$depth" \
-    --vn "resolve_direct_fast_32bpp_${name}_cs" \
+    -DTEXTURE="$texture" --vn "resolve_direct_fast_32bpp_${name}_cs" \
     -o "$OUT/resolve_direct_fast_32bpp_${name}_cs.h" "$SDK/resolve_direct_fast_32bpp.cs.glsl" > /dev/null
   echo "$OUT/resolve_direct_fast_32bpp_${name}_cs.h"
 }
 resolve float 0 0
 resolve uint 1 0
 resolve depth 0 1
+resolve float_texture 0 0 1
+resolve uint_texture 1 0 1
+resolve depth_texture 0 1 1

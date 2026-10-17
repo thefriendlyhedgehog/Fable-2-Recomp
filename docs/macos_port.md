@@ -1146,6 +1146,95 @@ differ from the first by 2.3-3.0% with it and 2.5-3.0% without it
 (`fable_2_373`, `fable_2_374`), rising steadily with the animation, no
 outliers.
 
+### Resolves: written straight into the texture
+
+What one resolve costs on the GPU, from the command letters `vulkan_pass_log`
+now prints per logged submission (`[pass commands]`: P pass, B barrier,
+D dispatch, C buffer copy, I buffer-to-image copy, X image clear): a typical
+resolve is `P B D B D B P`. The draws' pass ends, the resolve dispatch writes
+the shared memory, and the first draw sampling the result reloads the texture
+from that memory with a second dispatch, barriers in between. On MoltenVK
+1.4.1 with Metal argument buffers (the default here), every pipeline barrier
+outside a render pass ends the current Metal encoder (`MVKCmdPipelineBarrier`
+calls `endCurrentMetalEncoding`), so each of those dispatches gets a compute
+encoder of its own.
+
+- Turning argument buffers off (`MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0`)
+  was ~0.5 ms less GPU time per frame (8.6 -> 8.1 ms, `fable_2_378`-`381`,
+  two runs each). GPU power was the same (~2.75 W), and the command
+  processor took ~0.2 ms more CPU. Not adopted.
+- The reloads of resolved textures cost 1.3-1.5 ms of GPU time and ~0.6 W
+  (`debug_skip_resolved_texture_loads`; wrong picture). By format
+  (`debug_skip_resolved_texture_loads_format`, the xenos::TextureFormat
+  number):
+  - k_24_8_FLOAT (23; the two shadow maps and the scene depth): 1.1 ms;
+  - k_16_16_16_16_FLOAT (32): 0.6 ms;
+  - k_1_5_5_5 (3): 0.4 ms. This one is a 256x256 texture with 4 mips,
+    reloaded after each of its 4 per-mip resolves.
+  - k_8 (2): 0.15 ms.
+
+`vulkan_resolve_into_texture` (on by default on macOS, hot reload) lets a
+direct resolve (`direct_host_resolve`) also write the texture at its
+destination, with the texels reloading the memory would give. The resolve
+shader for 32 bits per pixel then stores each texel twice: in the shared
+memory as before, and in the texture's storage image. That image is the
+r32ui view `vulkan_texture_load_to_image` gives textures on GPU-written
+memory, and the texture's endian swap and 24-bit float conversion are done
+on the way, as the load shader does them. The texture is then marked up to
+date, so it is not reloaded. The texture cache keeps the storage-capable
+textures by base page. A resolve picks the most recently used one at its
+destination that:
+
+- is 2D, tiled, one mip level and not scaled;
+- loads with the 32bpb or depth float shader;
+- has the resolve's row pitch;
+- is either fully covered by the resolve or already up to date. The resolve
+  only writes part of it, so the rest must already be right.
+
+`vulkan_resolve_log` shows, per destination, whether the resolve wrote into
+the texture or why not. The texture stats line counts the loads it saved.
+
+At first this saved nothing: the textures the resolves wrote were still
+reloaded once per frame. Watches on the shared memory fire per host page,
+which is 16 KB on Apple Silicon. A resolve into the second shadow map
+(0x12FE1000, 4 MB) therefore also invalidated two textures it does not
+touch: the first shadow map, whose last 4 KB share a page with it, and the
+640x360 texture starting at 0x133E1000. The mask resolve at 0x12B17000 did
+the same to the first shadow map. With 4 KB pages these bases are
+page-aligned, so this is a macOS problem.
+
+`shared_memory_exact_gpu_write_watches` (on by default on macOS, hot reload)
+fixes it for GPU writes, where the exact range is known: a resolve fires only
+the watched ranges (textures) it overlaps byte by byte. CPU writes stay per
+page, since memory protection only knows the page.
+
+At the trail, standing still, three alternating triples (`fable_2_395`):
+
+| | GPU time | CP CPU | GPU power |
+|---|---|---|---|
+| both off | 8.46 ms | 6.43 ms | 2.33 W |
+| exact watches only | 8.12 ms | 6.30 ms | 2.30 W |
+| both on | 7.40 ms | 6.21 ms | 2.13 W |
+
+That is 17 texture loads per frame written by resolves instead; 14 reloads
+per frame after a GPU write are left. The picture is the same: sweep shots
+on vs. off differ like off vs. off (~2%, the snow). In the flicker test
+(16 shots 250 ms apart, each setting), consecutive shots differ by
+1.4-1.7% on and 1.0-1.9% off, brightness flat (`out/ab_paths/flicker_rit/`).
+
+Still reloaded:
+
+- the k_1_5_5_5 256x256 texture with 4 mips at 0x12704000 (4 per frame:
+  16 bpp, and resolved per mip);
+- the 64-bit float textures (0x199E0000, 0x12D33000, 0x12DD5000);
+- the k_8 mask at 0x12B17000;
+- 0x135D1000 (2 per frame);
+- 0x12CFD000, which the game resolves in two formats (k_8_8_8_8 and
+  k_2_10_10_10), so each resolve rightly outdates the other texture;
+- textures with no storage image at the destination (0x12CC7000, the
+  format 36 ones);
+- the 1280x720 copy at 0x1ECFF000.
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5

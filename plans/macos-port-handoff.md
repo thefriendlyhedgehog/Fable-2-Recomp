@@ -197,7 +197,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
 | - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
-| - | `vulkan_pass_log` | every 5 s, `[passes]` (one frame's render passes per submission) and `[pass areas]` lines, and Metal render encoders labeled `<submission>.<pass>` for `tools/mac_pass_costs.py` |
+| - | `vulkan_pass_log` | every 5 s, `[passes]` (one frame's render passes per submission), `[pass areas]` and `[pass commands]` (P pass, B barrier, D dispatch, C/I copies, X clear, in order) lines, and Metal render encoders labeled `<submission>.<pass>` for `tools/mac_pass_costs.py` |
 | - | `draw_extent_log` | every 5 s, `[extent]` lines: draws whose estimated bottom is 1024 or more, by vertex shader, scissor and what limited the estimate (viewport, vertices, or why the CPU estimate gave up) |
 | - | `vulkan_tfetch_implicit_lod` | pixel shader fetches with a computed LOD sample with an implicit LOD and a bias instead of explicit gradients (on on macOS; restart) |
 | - | `vulkan_tfetch_specialize_signs` | host render targets: pixel shaders built for the signedness of their first 7 textures when it is all unsigned, all signed or gamma RGB + unsigned alpha, so fetches sample one view with constant signs (on on macOS) |
@@ -208,7 +208,9 @@ Keys work only while the game window is focused; every press is logged as
 | - | `clear_quad_in_place` | with the cutout: a clear quad with one value whose tiles a same-format render target of another MSAA mode owns clears that target instead, and the draw is skipped (on on macOS); `vulkan_transfer_log` shows `in-place clear` lines |
 | - | `vulkan_transfers_in_draw_pass` | host render targets: a draw's ownership transfers run in the draw's own render pass, which the draw continues, instead of a pass per destination (on on macOS); `vulkan_transfer_log` shows `not in the draw's render pass` lines with the reason |
 | - | `vulkan_skip_draw_barriers_after_writes` | with `vulkan_skip_disjoint_draw_barriers`: after resolves and in-stream uploads, a shared memory barrier only before a draw whose known vertex and index ranges overlap what they wrote (on on macOS) |
-| - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture) |
+| - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture); `debug_skip_resolved_texture_loads_format=<n>` limits the latter to one guest format |
+| - | `vulkan_resolve_into_texture` | a direct 32 bpp resolve also writes the texture at its destination, which then isn't reloaded (on on macOS; `vulkan_resolve_log` says why not, per destination) |
+| - | `shared_memory_exact_gpu_write_watches` | a GPU write (resolve) invalidates only the textures it overlaps byte by byte, not all in the same 16 KB host pages (on on macOS) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -970,6 +972,27 @@ the same way as Xenia's ROV path.
      `fable_2_374`), animation only. Next on the GPU: the per-resolve fixed
      cost (~35 resolves per frame, 70-150 us each), the reloads of resolved
      textures (~1 ms).
+  38. **Done (2026-10-17): resolves write the texture too, and GPU writes
+     invalidate only textures they touch** (`vulkan_resolve_into_texture`
+     and `shared_memory_exact_gpu_write_watches`, both on by default on
+     macOS, hot reload; `docs/macos_port.md`, "Resolves: written straight
+     into the texture").
+     - A direct 32 bpp resolve also writes the texture at its destination
+       (its storage image from `vulkan_texture_load_to_image`). That texture
+       is then up to date and not reloaded: 17 loads per frame.
+     - The fusion only paid once watches stopped firing per 16 KB host page
+       for GPU writes. Before, the second shadow map's resolve invalidated
+       the first shadow map and 0x133E1000, and those were reloaded anyway.
+     - At the trail (`fable_2_395`, three alternating triples): GPU time
+       8.46 -> 7.40 ms per frame, GPU power 2.33 -> 2.13 W, CP CPU -0.2 ms.
+       The exact watches alone account for 0.3 ms of it.
+     - Same picture; flicker test clean.
+     - Also measured: MoltenVK ends the Metal encoder at every barrier
+       outside a pass, so each resolve takes ~3 compute encoders.
+       Argument buffers off saved 0.5 ms GPU but no power, and cost CPU.
+     - **Next:** the reloads left, about 14 per frame. The k_1_5_5_5 mip
+       chain at 0x12704000 is 0.4 ms, the 64-bit float textures 0.6 ms
+       (a 64 bpp fused shader), the k_8 mask 0.15 ms.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
