@@ -110,6 +110,13 @@ struct Values {
   // original (yield every call), 0 = never yield. Larger = fewer context
   // switches, less frequent CPU rotation to other guest threads.
   int32_t hotfunc_yield_every = 1;
+  // frame_wait_sleep_us: how long the frame limiter wait
+  // (src/core/hotfunc/vblank/FrameLimiterWait_82242628.cpp) sleeps between
+  // checks of the GPU progress counter, in microseconds. The guest spins
+  // there until the counter (advanced by the emulated vblank) reaches its
+  // deadline, which at the 30 fps cap is most of every frame. 0 = spin as
+  // the guest does.
+  int32_t frame_wait_sleep_us = 250;
 };
 
 // Load the config from `path`.

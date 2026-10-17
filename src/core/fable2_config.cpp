@@ -187,6 +187,13 @@ game_msaa = -1
 # every call); 0 = never yield; larger = fewer context switches.
 # Default: 1
 hotfunc_yield_every = 1
+
+# How long the game's frame limiter sleeps between checks of the GPU
+# progress counter, in microseconds. The game waits there for the next frame
+# (at the 30 fps cap, most of every frame); spinning keeps a CPU core fully
+# busy for nothing. 0 = spin like the game does on the Xbox 360.
+# Default: 250
+frame_wait_sleep_us = 250
 )TOML_EOF";
 
 std::string_view TypeName(toml::node_type t) {
@@ -330,6 +337,8 @@ bool Load(const std::filesystem::path& path) {
     values.hotfunc_yield_every = static_cast<int32_t>(Read<int64_t>(
         perf_table, "perf", "hotfunc_yield_every", "integer",
         values.hotfunc_yield_every));
+    values.frame_wait_sleep_us = static_cast<int32_t>(Read<int64_t>(
+        perf_table, "perf", "frame_wait_sleep_us", "integer", values.frame_wait_sleep_us));
   }
 
   g_values = values;

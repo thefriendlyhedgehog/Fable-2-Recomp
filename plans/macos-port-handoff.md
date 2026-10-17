@@ -827,6 +827,16 @@ the same way as Xenia's ROV path.
      466-draw pass `8D900846800943C8` 1.8 ms); 11 color transfers into a
      320x8192 target alone 0.57 ms. The title screen: 25 transfers, 1.15
      ms. Next: fewer or cheaper transfers.
+  28. **Done (2026-10-17): the frame limiter sleeps instead of spinning**
+     (`[perf] frame_wait_sleep_us`, default 250, 0 = spin;
+     `src/core/hotfunc/vblank/FrameLimiterWait_82242628.cpp`). The game
+     paces its frames by spinning on `GpuProgressCheck_82B9BF90` until the
+     GPU progress counter (advanced by the emulated vblank) reaches the
+     deadline; at the 30 fps cap that kept the "3D Engine" thread 92% busy
+     (`sample`: the check and the limiter were its top functions). Sleeping
+     250 us between checks: the thread 50% busy, still 30 fps. The rest of
+     the CPU (~2.3 cores at the trail): "GPU Commands" (the command
+     processor) ~90%, "GameThread" ~70%.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

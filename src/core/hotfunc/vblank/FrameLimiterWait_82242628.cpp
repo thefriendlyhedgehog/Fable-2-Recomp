@@ -41,6 +41,11 @@
 //   0x8224270C  call sub_82B9BEC8(r1+80), then the epilogue at 0x82242714.
 #include "fable_2_pch.h"
 
+#include <chrono>
+#include <thread>
+
+#include "fable2_config.h"
+
 extern "C" void FastHelper_821E8D20(PPCContext& ctx, uint8_t* base);
 extern "C" void GpuProgressCheck_82B9BF90(PPCContext& ctx, uint8_t* base);
 extern "C" void __restgprlr_29(PPCContext& ctx, uint8_t* base);
@@ -188,6 +193,7 @@ extern "C" void FrameLimiterWait_82242628(PPCContext& __restrict ctx, uint8_t* b
   // sub_82B9BEC8. The loop leaves on GpuProgressCheck == 0 (beq 0x8224270C)
   // or once the counter reaches the deadline (blt cr6,0x822426E0 not taken).
   BuildArgBlock(ctx, base);
+  const int32_t sleep_us = fable2::config::Get().frame_wait_sleep_us;
   while (ctx.cr6.lt != 0) {
     ctx.r3.s64 = ctx.r1.s64 + kArgBlock;
     ctx.lr = kRetProgressCheck;
@@ -197,6 +203,11 @@ extern "C" void FrameLimiterWait_82242628(PPCContext& __restrict ctx, uint8_t* b
       break;
     }
     ReadinessR9R11(ctx, base);
+    // Not the guest's: sleep between the checks instead of spinning a host
+    // core for the rest of the frame ([perf] frame_wait_sleep_us).
+    if (ctx.cr6.lt != 0 && sleep_us > 0) {
+      std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+    }
   }
 
   ctx.r3.s64 = ctx.r1.s64 + kArgBlock;
