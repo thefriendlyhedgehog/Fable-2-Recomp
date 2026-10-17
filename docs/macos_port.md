@@ -938,6 +938,41 @@ largest transfers are 11 color transfers per frame into a 320x8192 target
 (0.57 ms) and 5 depth transfers into it (0.29 ms). The title screen: 25
 transfers 1.15 ms of 2.48 ms in passes.
 
+### Transfers: clear quads cut out what they overwrite
+
+When a draw uses EDRAM tiles that another render target owned (another
+format, MSAA mode or pitch), the render target cache copies those tiles into
+the new render target first (an ownership transfer). Resolve clears already
+cut their rectangle out of the transfers. Fable II clears with draws
+instead: a rectangle list quad (vs `1E6883FCCDE1F688`, 3 vertices, the
+positions often in screen space with `vtx_xy_fmt`/`vtx_z_fmt`), often the
+same EDRAM at 1x and then at 4x MSAA, so each clear first copied the old
+contents it was about to overwrite.
+
+`clear_quad_transfer_cutout` (on on macOS, hot reload) treats such a draw
+like a resolve clear for the render targets it overwrites outright: no
+culling, solid fill, the full sample mask, no alpha test, alpha to coverage
+or kill; depth with test ALWAYS and write, and stencil (if enabled, both
+faces) passing always with REPLACE and write mask 0xFF; color with the
+pixel shader writing the target, mask F and blend ONE/ZERO. The rectangle
+comes from running the vertex shader on the CPU
+(`EstimateRectangleCoverage` in `draw_extent_estimator.cpp`): the three
+vertices must form an axis-aligned rectangle; it is converted to pixels
+with the viewport transform and the half-pixel offset, rounded by the
+pixel-center rule at 1x (whole pixels at MSAA, conservatively), and clipped
+to the scissor. The cache drops transfers that lie inside the rectangle
+and cuts it out of the others' rectangles.
+
+At the trail at 30 fps about 37 clear quads per frame qualify: transfers
+93 -> 83 per frame, transfer passes 63 -> 57, and their time in
+`vulkan_pass_gpu_time` frames 3.7 -> 2.9 ms. The frame GPU time stays at
+11.5-12.0 ms with or without it (two runs each, and alternating within one
+run): in timed frames each pass waits for the one before, so small passes
+look costlier there than they are. The picture is the same (a sweep
+switching it: on/off pairs as far apart as on/on, 1.3-2.0% of pixels, the
+snow). `vulkan_transfer_log` (off, hot reload) logs one frame's transfers
+every 5 s with the draw that caused each.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

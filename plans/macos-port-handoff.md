@@ -203,6 +203,8 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_tfetch_specialize_signs` | host render targets: pixel shaders built for the signedness of their first 7 textures when it is all unsigned, all signed or gamma RGB + unsigned alpha, so fetches sample one view with constant signs (on on macOS) |
 | - | `vulkan_gpu_time` | timestamps around each submission; logs "GPU time: N ms/frame, M% of the time" after every frame statistics line (on; restart) |
 | - | `vulkan_pass_gpu_time` | with `vulkan_gpu_time`: times the render passes of one frame in ten and logs "GPU passes" lines (by kind, the 12 costliest by target and pixel shader); off |
+| - | `vulkan_transfer_log` | every 5 s, one frame's `[transfers]` lines: each render target ownership transfer (destination, source, EDRAM tiles, and the draw that caused it: shaders, primitive, depth/stencil and color state), plus resolves and the frame's draw count |
+| - | `clear_quad_transfer_cutout` | a draw that overwrites a rectangle of its render target outright (clear quad: rectangle list, depth ALWAYS with write and stencil REPLACE, or color mask F without blending) cuts that rectangle out of the transfers it causes (on on macOS) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -837,6 +839,23 @@ the same way as Xenia's ROV path.
      250 us between checks: the thread 50% busy, still 30 fps. The rest of
      the CPU (~2.3 cores at the trail): "GPU Commands" (the command
      processor) ~90%, "GameThread" ~70%.
+  29. **Done (2026-10-17): clear quads cut their rectangle out of the
+     transfers** (`clear_quad_transfer_cutout`, on by default on macOS, hot
+     reload; `docs/macos_port.md`, "Transfers: clear quads cut out what
+     they overwrite"; log with `vulkan_transfer_log`). The game clears
+     the EDRAM with rectangle-list quads (vs `1E6883FCCDE1F688`), often the
+     same area at 1x and then at 4x MSAA, so each clear first copied the
+     old contents into the new render target. A draw that overwrites its
+     whole rectangle now cuts that rectangle (from running its vertex
+     shader on the CPU) out of the transfers, as resolve clears already
+     did. At the trail: ~37 clear quads per frame qualify, transfers 93 ->
+     83 per frame, transfer passes 63 -> 57, their time in timed frames
+     3.7 -> 2.9 ms (`fable_2_300`). Same picture (sweep, `out/cutout_check`,
+     on/off pairs 1.3-2.0% apart like on/on). **But the frame GPU time
+     doesn't move**: 11.5-12.0 ms either way, between runs
+     (`fable_2_302`-`305`) and alternating within one run (`fable_2_306`).
+     The pass timer overstates small passes (in timed frames each one
+     waits for the one before). Left on: less work, same picture.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
