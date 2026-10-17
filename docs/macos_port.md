@@ -918,6 +918,26 @@ title screen (~290 draws) 4.7 ms, 14%; gameplay at the trail (~2300 draws)
 10.6 ms, 32%. That agrees with the uncapped frame rate at the same view
 (~83 fps, 12 ms per frame).
 
+`vulkan_pass_gpu_time` (off, hot reload) also times the render passes, in
+one frame out of ten: the deferred command buffer writes a timestamp before
+each render pass begins and after it ends (into a 2048-query pool: with
+8192 MoltenVK gave every query of the pool the same time, apparently
+falling back to a CPU time for a pool larger than a Metal counter sample
+buffer can be), and the passes are described by their target (as in
+`vulkan_pass_log`) and their most used pixel shader. MoltenVK resolves each
+timestamp written outside an encoder in a blit pass of its own that waits
+for the encoders before it, so in a timed frame the passes run one after
+another with those blit passes in between: a timed frame took 15.7 instead
+of 10.6 ms at the trail, the average over all frames 10.95 ms. The pass
+times are what each pass costs on its own; the time outside passes
+(compute, copies, barriers) includes the timestamps' blit passes. At the
+trail at 30 fps (`fable_2_291`, per timed frame): 63 transfers 3.23 ms, 35
+passes with 0-2 draws 1.86 ms, 16 with 3-99 draws 0.94 ms, 3.5 with 100+
+draws 2.39 ms (the 466-draw pass with `8D900846800943C8` 1.83 ms); the
+largest transfers are 11 color transfers per frame into a 320x8192 target
+(0.57 ms) and 5 depth transfers into it (0.29 ms). The title screen: 25
+transfers 1.15 ms of 2.48 ms in passes.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
