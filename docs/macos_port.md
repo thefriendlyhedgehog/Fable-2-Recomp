@@ -1222,18 +1222,60 @@ on vs. off differ like off vs. off (~2%, the snow). In the flicker test
 (16 shots 250 ms apart, each setting), consecutive shots differ by
 1.4-1.7% on and 1.0-1.9% off, brightness flat (`out/ab_paths/flicker_rit/`).
 
-Still reloaded:
+What these direct resolves left were the resolves from the EDRAM buffer
+with format conversion (`resolve_full_8/16/32/64bpp`):
 
-- the k_1_5_5_5 256x256 texture with 4 mips at 0x12704000 (4 per frame:
-  16 bpp, and resolved per mip);
+- the k_1_5_5_5 256x256 texture with 4 mips at 0x12704000, resolved level
+  by level and reloaded after each (4 per frame);
 - the 64-bit float textures (0x199E0000, 0x12D33000, 0x12DD5000);
 - the k_8 mask at 0x12B17000;
-- 0x135D1000 (2 per frame);
+- 0x135D1000, resolved from a 4x MSAA render target.
+
+`vulkan_resolve_into_texture_full` (on by default, hot reload; it only
+matters with `vulkan_resolve_into_texture`) gives those resolves a variant
+that also writes the texture. Their source isn't in the SDK, only the SPIR-V.
+`shaders/resolve_full_*_texture.cs.glsl` is therefore that SPIR-V decompiled
+with spirv-cross, unchanged, plus the texture stores at the end, built by
+`tools/build_texture_load_image_shaders.sh`. The stores give the texels
+what the load into the image would give for the destination's texel size:
+
+- 8 bpp: unchanged;
+- 16 bpp: the 8-in-16 swap, and the R5G5B5A1 to B5G5R5A1 swizzle for
+  k_1_5_5_5;
+- 32 bpp: the swaps, and 24-bit float depth to 32-bit float;
+- 64 bpp: the swaps, per 32-bit word.
+
+A resolve can now also write a mip level. The texture cache keeps each
+storage texture under the page of each level before the packed mip tail. A
+resolve into level N writes that level's storage view, if the mips are
+otherwise up to date, and then only the mips are marked up to date
+(`MakePartUpToDateAndWatch`).
+
+At the trail: GPU-write reloads 13.9 -> 3.0 per frame, written by resolves
+17 -> 28 per frame. The reloads left:
+
 - 0x12CFD000, which the game resolves in two formats (k_8_8_8_8 and
   k_2_10_10_10), so each resolve rightly outdates the other texture;
-- textures with no storage image at the destination (0x12CC7000, the
-  format 36 ones);
-- the 1280x720 copy at 0x1ECFF000.
+- the 1280x720 copy at 0x1ECFF000: the resolve log says there is no
+  storage texture at that address (why is not checked yet).
+
+The gain is small: GPU time 7.87 -> 7.76 ms per frame, lower in all four
+alternating pairs, and GPU power 1.865 -> 1.849 W (`fable_2_402`). These
+reloads cost less than the debug skip suggested, and the shader's own
+texture writes take back part of what they saved. With both
+`vulkan_resolve_into_texture` switches against off: 8.32 -> 7.42 ms and
+1.93 -> 1.73 W (`fable_2_401`, three pairs).
+
+Same picture:
+
+- Sweep shots differ on vs off as off vs off (~2% of pixels). Per 40x40
+  block, the mean absolute difference on vs off (6.90 per pixel) is no
+  larger than off vs off (6.99), and the channel means agree within
+  0.1/255, so no colour channel is swapped.
+- Flicker test, 16 shots 250 ms apart: 1.4-1.7% between consecutive shots,
+  brightness flat (`out/ab_paths/flicker_rit_full/`).
+- One earlier attempt moved the hero: with `--merge_controllers`, input from
+  a controller used for another app reaches the game. Rerun such a test.
 
 ### CPU: busy waits
 

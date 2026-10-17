@@ -3,7 +3,8 @@
 # tree into the SPIR-V headers the Vulkan backend includes, one per variant:
 # texture_load_to_image.cs.glsl (vulkan_texture_load_to_image) and
 # resolve_direct_fast_32bpp.cs.glsl (direct_host_resolve, and with TEXTURE 1
-# vulkan_resolve_into_texture). Needs
+# vulkan_resolve_into_texture), resolve_full_*_texture.cs.glsl
+# (vulkan_resolve_into_texture for the resolves from the EDRAM buffer). Needs
 # glslangValidator (Vulkan SDK). Run after editing a shader, then
 # tools/sdk_patch_refresh.sh.
 set -euo pipefail
@@ -37,3 +38,8 @@ resolve depth 0 1
 resolve float_texture 0 0 1
 resolve uint_texture 1 0 1
 resolve depth_texture 0 1 1
+for bpp in 8bpp 16bpp 32bpp 64bpp; do
+  glslangValidator -V --target-env vulkan1.0 -S comp --vn "resolve_full_${bpp}_texture_cs" \
+    -o "$OUT/resolve_full_${bpp}_texture_cs.h" "$SDK/resolve_full_${bpp}_texture.cs.glsl" > /dev/null
+  echo "$OUT/resolve_full_${bpp}_texture_cs.h"
+done

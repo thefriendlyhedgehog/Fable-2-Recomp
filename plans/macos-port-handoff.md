@@ -209,7 +209,8 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_transfers_in_draw_pass` | host render targets: a draw's ownership transfers run in the draw's own render pass, which the draw continues, instead of a pass per destination (on on macOS); `vulkan_transfer_log` shows `not in the draw's render pass` lines with the reason |
 | - | `vulkan_skip_draw_barriers_after_writes` | with `vulkan_skip_disjoint_draw_barriers`: after resolves and in-stream uploads, a shared memory barrier only before a draw whose known vertex and index ranges overlap what they wrote (on on macOS) |
 | - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture); `debug_skip_resolved_texture_loads_format=<n>` limits the latter to one guest format |
-| - | `vulkan_resolve_into_texture` | a direct 32 bpp resolve also writes the texture at its destination, which then isn't reloaded (on on macOS; `vulkan_resolve_log` says why not, per destination) |
+| - | `vulkan_resolve_into_texture` | a resolve also writes the texture at its destination, which then isn't reloaded (on on macOS; `vulkan_resolve_log` says why not, per destination) |
+| - | `vulkan_resolve_into_texture_full` | with the above: also the resolves from the EDRAM buffer with format conversion (8/16/32/64 bpp, mip levels), not only the direct 32 bpp ones (on) |
 | - | `shared_memory_exact_gpu_write_watches` | a GPU write (resolve) invalidates only the textures it overlaps byte by byte, not all in the same 16 KB host pages (on on macOS) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
@@ -993,6 +994,23 @@ the same way as Xenia's ROV path.
      - **Next:** the reloads left, about 14 per frame. The k_1_5_5_5 mip
        chain at 0x12704000 is 0.4 ms, the 64-bit float textures 0.6 ms
        (a 64 bpp fused shader), the k_8 mask 0.15 ms.
+  39. **Done (2026-10-17): the resolves with format conversion write the
+     texture too** (`vulkan_resolve_into_texture_full`, on by default, hot
+     reload; `docs/macos_port.md`, end of "Resolves: written straight into
+     the texture").
+     - The full resolves (8/16/32/64 bpp, from the EDRAM buffer) have a
+       variant that also stores the texels into the texture's storage view,
+       mip levels included. The shaders are the upstream SPIR-V decompiled
+       with spirv-cross, plus the stores.
+     - GPU-write reloads 13.9 -> 3.0 per frame. GPU time only -0.12 ms
+       (7.87 -> 7.76 ms, four alternating pairs, `fable_2_402`); power
+       flat. Both switches together against off: 8.32 -> 7.42 ms, 1.93 ->
+       1.73 W (`fable_2_401`).
+     - Same picture (block-wise diff and flicker test).
+     - Left: the two formats sharing 0x12CFD000, and 0x1ECFF000 (no
+       storage image).
+     - Testing note: one flicker run moved the hero, because
+       `--merge_controllers` passes on a controller used for another app.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
