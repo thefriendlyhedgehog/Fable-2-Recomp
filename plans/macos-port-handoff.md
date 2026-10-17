@@ -201,6 +201,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `draw_extent_log` | every 5 s, `[extent]` lines: draws whose estimated bottom is 1024 or more, by vertex shader, scissor and what limited the estimate (viewport, vertices, or why the CPU estimate gave up) |
 | - | `vulkan_tfetch_implicit_lod` | pixel shader fetches with a computed LOD sample with an implicit LOD and a bias instead of explicit gradients (on on macOS; restart) |
 | - | `vulkan_tfetch_specialize_signs` | host render targets: pixel shaders built for the signedness of their first 7 textures when it is all unsigned, all signed or gamma RGB + unsigned alpha, so fetches sample one view with constant signs (on on macOS) |
+| - | `vulkan_gpu_time` | timestamps around each submission; logs "GPU time: N ms/frame, M% of the time" after every frame statistics line (on; restart) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -809,6 +810,13 @@ the same way as Xenia's ROV path.
      `instruments*.ktrace` per trace in `$(getconf DARWIN_USER_TEMP_DIR)`
      on the system disk (`TMPDIR` doesn't move it); measure without traces
      where possible, and remove those files after tracing.
+  26. **Done (2026-10-17): GPU time in the log** (`vulkan_gpu_time`, on,
+     restart; `docs/macos_port.md`, "GPU time per frame without traces").
+     A timestamp at the start and end of each submission, read once its
+     fence signals, gives a "GPU time" line after each frame statistics
+     line. Use it instead of Metal traces at the default settings (the
+     game's 30 fps): logos 0.7 ms/frame (2%), title screen 4.7 ms (14%),
+     gameplay at the trail (~2300 draws) 10.6 ms (32%), `fable_2_284`.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

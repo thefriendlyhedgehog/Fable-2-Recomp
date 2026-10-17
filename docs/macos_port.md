@@ -900,6 +900,24 @@ Metal traces (their temp files take ~2 GB each on the system disk): at a
 Utilization" was 94 / 85 / 84% dynamic vs. 70 / 81 / 82% specialized
 (`fable_2_273`-`278`; that figure follows the GPU clock, so it's coarse).
 
+### GPU time per frame without traces
+
+Metal System Traces show the GPU time per encoder, but each one leaves a ~2
+GB `instruments*.ktrace` in `$(getconf DARWIN_USER_TEMP_DIR)` on the system
+disk, and the GPU's "Device Utilization" in `ioreg` follows its clock
+(~89% even at 5 fps). `vulkan_gpu_time` (on, restart) writes a timestamp
+query at the top of each submission's command buffer and at its bottom,
+reads both once the submission's fence has signaled (no waiting; up to 64
+submissions in flight, more are counted as not measured), and after each
+frame statistics line logs `GPU time: N ms/frame, M% of the time`. On
+MoltenVK the timestamps are sampled at encoder boundaries, so this is the
+span of the command buffer's encoders; submissions on the one queue run one
+after another, so the sum is the GPU's busy time. At the game's default
+30 fps (`fable_2_284`): logos (25 draws) 0.7 ms per frame, 2% of the time;
+title screen (~290 draws) 4.7 ms, 14%; gameplay at the trail (~2300 draws)
+10.6 ms, 32%. That agrees with the uncapped frame rate at the same view
+(~83 fps, 12 ms per frame).
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
