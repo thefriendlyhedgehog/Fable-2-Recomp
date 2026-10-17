@@ -200,6 +200,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_pass_log` | every 5 s, `[passes]` (one frame's render passes per submission) and `[pass areas]` lines, and Metal render encoders labeled `<submission>.<pass>` for `tools/mac_pass_costs.py` |
 | - | `draw_extent_log` | every 5 s, `[extent]` lines: draws whose estimated bottom is 1024 or more, by vertex shader, scissor and what limited the estimate (viewport, vertices, or why the CPU estimate gave up) |
 | - | `vulkan_tfetch_implicit_lod` | pixel shader fetches with a computed LOD sample with an implicit LOD and a bias instead of explicit gradients (on on macOS; restart) |
+| - | `vulkan_tfetch_specialize_signs` | host render targets: pixel shaders built for the signedness of their first 7 textures when it is all unsigned, all signed or gamma RGB + unsigned alpha, so fetches sample one view with constant signs (on on macOS) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -793,6 +794,21 @@ the same way as Xenia's ROV path.
      signed samples behind uniform branches and the per-component sign
      switches on system constants) is still there; specializing it per
      pipeline would mean more pipelines.
+  25. **Done (2026-10-17): texture signs specialized per pipeline**
+     (`vulkan_tfetch_specialize_signs`, on by default on macOS, hot reload;
+     `docs/macos_port.md`, "Texture fetches: signedness specialized per
+     pipeline"). On the host render target path the pixel shader
+     modification's unused FSI bits hold 2 bits per texture binding (the
+     first 7): all unsigned, all signed or gamma RGB with unsigned alpha
+     (about 80%, 12% and 3% of the fetches at the trail), so those fetches
+     use constant signs and sample one host view. Same picture (two
+     sweeps switching it, `out/sign_check{,2}`). Uncapped
+     (`--vsync=false`) at a 2321-draw trail view 80.6 -> 84.7 fps; constant
+     signs for every texture (the upper bound) had cut the base pass
+     fragment time by a third. Note: Metal System Traces leave a ~2 GB
+     `instruments*.ktrace` per trace in `$(getconf DARWIN_USER_TEMP_DIR)`
+     on the system disk (`TMPDIR` doesn't move it); measure without traces
+     where possible, and remove those files after tracing.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

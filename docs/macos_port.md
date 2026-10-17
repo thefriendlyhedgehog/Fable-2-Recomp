@@ -860,6 +860,46 @@ full-screen shadow mask pass (`1B4B5AE12EF270CA`, `0F99810F072BF0FC`)
 within one (1.4-1.9% of pixels; mean difference 1.8-3.3 vs. 1.6-3.1), and
 distant roof tiles and cobbles are equally sharp.
 
+### Texture fetches: signedness specialized per pipeline
+
+The rest of the per-fetch overhead is the signedness: every fetch reads the
+texture's swizzled signs from the system constants (`texture_swizzled_signs`,
+2 bits per component), samples the unsigned and the signed host view behind
+uniform branches and switches per component between unsigned, signed,
+biased and gamma. With the signs as a constant instead (a debug build that
+took every texture as unsigned, wrong for signed ones) the base pass took
+593-601 instead of 937-959 us of fragment time, the shadow mask pass 250
+instead of 365, the blur 95 instead of 211-215, and the GPU was 61% instead
+of 65-70% busy at the heavy view (`out/profile/{dyn,const}*.trace`,
+`fable_2_261`-`264`).
+
+At the trail, 80% of the fetches read textures whose signs are all unsigned,
+12% all signed (format 29, probably normal maps) and 3% gamma RGB with
+unsigned alpha (sign 3330); the rest are rare. `vulkan_tfetch_specialize_signs`
+(on by default on macOS, hot reload) builds pixel shaders on the host render
+target path for those: the pixel shader modification's
+`fsi_specialization_low` (15 bits the host render target path doesn't use)
+holds 2 bits per texture binding (`Shader::TextureBinding::binding_index`,
+the first 7): dynamic, all unsigned, all signed, gamma RGB + unsigned alpha
+(`Modification::TextureSignsSpecialization`). `GetCurrentPixelShaderModification`
+takes them from the fetch constants (`texture_util::SwizzleSigns`, as the
+texture cache does); the translator then uses the signs as a constant in
+place of the system constant word, and the host compiler drops the other
+view's sample and the switches. Textures the cache can't bind are unsigned in
+the system constants, so after `RequestTextures` the command processor
+compares the specialization with `GetActiveTextureSwizzledSigns` and falls
+back to the dynamic signs for those bindings (the bindings don't depend on
+the modification). A shader typically always sees the same kind of texture
+per binding, so this adds few pipelines. Same picture: two sweeps that
+switch it on and off (`out/sign_check`, `out/sign_check2`) differ within
+the snow noise (1.3-2.1% of pixels), and the glowing trail, which pulses,
+follows the time of the shot, not the mode. Measured without
+Metal traces (their temp files take ~2 GB each on the system disk): at a
+2321-draw view of the trail, uncapped (`--vsync=false`), 80.6 -> 84.7 fps
+(+5%, `fable_2_281`, `282`); at the 60 fps cap the GPU's "Device
+Utilization" was 94 / 85 / 84% dynamic vs. 70 / 81 / 82% specialized
+(`fable_2_273`-`278`; that figure follows the GPU clock, so it's coarse).
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

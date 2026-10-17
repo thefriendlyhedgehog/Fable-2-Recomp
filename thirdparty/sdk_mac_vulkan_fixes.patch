@@ -236,7 +236,7 @@ index dbd6b01..00fee73 100644
  
  }  // namespace rex::graphics
 diff --git a/include/rex/graphics/pipeline/shader/spirv_translator.h b/include/rex/graphics/pipeline/shader/spirv_translator.h
-index dce3dbf..9680427 100644
+index dce3dbf..eb57f35 100644
 --- a/include/rex/graphics/pipeline/shader/spirv_translator.h
 +++ b/include/rex/graphics/pipeline/shader/spirv_translator.h
 @@ -33,7 +33,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
@@ -258,7 +258,7 @@ index dce3dbf..9680427 100644
      } pixel;
      uint64_t value = 0;
  
-@@ -95,6 +98,24 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -95,6 +98,78 @@ class SpirvShaderTranslator : public ShaderTranslator {
        static_assert_size(*this, sizeof(value));
      }
  
@@ -280,10 +280,64 @@ index dce3dbf..9680427 100644
 +      pixel.depth_stencil_mode = DepthStencilMode((specialization >> 15) & 0b111);
 +    }
 +
++    // Texture signedness specialization of pixel shaders on the host render
++    // target path, which doesn't use fsi_specialization_low: 2 bits for each of
++    // the first kTextureSignsSpecializedBindings texture bindings
++    // (Shader::TextureBinding::binding_index), the swizzled signs of the
++    // texture if they're one of the common combinations, so its fetches use
++    // them as constants instead of the system constants, and the host compiler
++    // drops the sampling of the other host view and the per-component sign
++    // switches.
++    enum class TextureSignsSpecialization : uint32_t {
++      kDynamic,
++      kUnsigned,
++      kSigned,
++      // Gamma RGB with unsigned alpha (sign 3330 with the identity swizzle).
++      kGammaRgbUnsignedA,
++    };
++    static constexpr uint32_t kTextureSignsSpecializedBindings = 7;
++    static uint8_t GetTextureSignsSpecializationSwizzledSigns(
++        TextureSignsSpecialization specialization) {
++      switch (specialization) {
++        case TextureSignsSpecialization::kSigned:
++          return uint8_t(xenos::TextureSign::kSigned) * 0b01010101;
++        case TextureSignsSpecialization::kGammaRgbUnsignedA:
++          return uint8_t(xenos::TextureSign::kGamma) * 0b00010101;
++        default:
++          return uint8_t(xenos::TextureSign::kUnsigned) * 0b01010101;
++      }
++    }
++    static TextureSignsSpecialization GetTextureSignsSpecializationForSwizzledSigns(
++        uint8_t swizzled_signs) {
++      for (uint32_t i = 1; i < 4; ++i) {
++        if (swizzled_signs ==
++            GetTextureSignsSpecializationSwizzledSigns(TextureSignsSpecialization(i))) {
++          return TextureSignsSpecialization(i);
++        }
++      }
++      return TextureSignsSpecialization::kDynamic;
++    }
++    TextureSignsSpecialization GetTextureSignsSpecialization(uint32_t binding_index) const {
++      if (binding_index >= kTextureSignsSpecializedBindings) {
++        return TextureSignsSpecialization::kDynamic;
++      }
++      return TextureSignsSpecialization((pixel.fsi_specialization_low >> (2 * binding_index)) &
++                                        0b11);
++    }
++    void SetTextureSignsSpecialization(uint32_t binding_index,
++                                       TextureSignsSpecialization specialization) {
++      if (binding_index >= kTextureSignsSpecializedBindings) {
++        return;
++      }
++      pixel.fsi_specialization_low =
++          (pixel.fsi_specialization_low & ~(uint32_t(0b11) << (2 * binding_index))) |
++          (uint32_t(specialization) << (2 * binding_index));
++    }
++
      uint32_t GetVertexClipDistanceCount() const {
        return vertex.user_clip_plane_cull ? 0 : vertex.user_clip_plane_count;
      }
-@@ -151,6 +172,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -151,6 +226,10 @@ class SpirvShaderTranslator : public ShaderTranslator {
      // taking into account the potential relation with occlusion queries (but
      // should be safe at least temporarily).
      kSysFlag_FSIDepthStencilEarlyWrite_Shift,
@@ -294,7 +348,7 @@ index dce3dbf..9680427 100644
  
      kSysFlag_Count,
  
-@@ -199,6 +224,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -199,6 +278,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSysFlag_FSIDepthWrite = 1u << kSysFlag_FSIDepthWrite_Shift,
      kSysFlag_FSIStencilTest = 1u << kSysFlag_FSIStencilTest_Shift,
      kSysFlag_FSIDepthStencilEarlyWrite = 1u << kSysFlag_FSIDepthStencilEarlyWrite_Shift,
@@ -302,7 +356,7 @@ index dce3dbf..9680427 100644
    };
    static_assert(kSysFlag_Count <= 32, "Too many flags in the system constants");
  
-@@ -307,6 +333,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -307,6 +387,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
      uint32_t vertex_index_max;
      float tessellation_factor_range_min;
      float tessellation_factor_range_max;
@@ -312,7 +366,7 @@ index dce3dbf..9680427 100644
    };
  
    enum ConstantBuffer : uint32_t {
-@@ -399,6 +428,23 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -399,6 +482,23 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
      bool demote_to_helper_invocation;
      bool sample_rate_shading;
@@ -336,7 +390,7 @@ index dce3dbf..9680427 100644
    };
  
    SpirvShaderTranslator(const Features& features, bool native_2x_msaa_with_attachments,
-@@ -415,6 +461,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -415,6 +515,14 @@ class SpirvShaderTranslator : public ShaderTranslator {
        uint32_t dynamic_addressable_register_count,
        Shader::HostVertexShaderType host_vertex_shader_type =
            Shader::HostVertexShaderType::kVertex) const override;
@@ -351,7 +405,7 @@ index dce3dbf..9680427 100644
    uint64_t GetDefaultPixelShaderModification(
        uint32_t dynamic_addressable_register_count) const override;
  
-@@ -756,6 +810,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -756,6 +864,7 @@ class SpirvShaderTranslator : public ShaderTranslator {
    // flow of the main function, and that there are no returns before either
    // (there's a single return from the shader).
    bool edram_fragment_shader_interlock_;
@@ -359,7 +413,7 @@ index dce3dbf..9680427 100644
    uint32_t draw_resolution_scale_x_;
    uint32_t draw_resolution_scale_y_;
  
-@@ -879,6 +934,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -879,6 +988,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
      kSystemConstantEdramRTKeepMask,
      kSystemConstantEdramRTClamp,
      kSystemConstantEdramBlendConstant,
@@ -368,7 +422,7 @@ index dce3dbf..9680427 100644
    };
    spv::Id uniform_system_constants_;
    spv::Id uniform_float_constants_;
-@@ -897,6 +954,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -897,6 +1008,9 @@ class SpirvShaderTranslator : public ShaderTranslator {
  
    // VS as VS only - int, or VS as compute (kMemExportCompute) only - uint3.
    spv::Id input_vertex_index_;
@@ -378,7 +432,7 @@ index dce3dbf..9680427 100644
    // VS as TES only - int.
    spv::Id input_primitive_id_;
    // VS as TES only - float3.
-@@ -940,6 +1000,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
+@@ -940,6 +1054,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
    uint32_t output_per_vertex_member_count_;
    uint32_t output_per_vertex_member_clip_distance_;
    uint32_t output_per_vertex_member_cull_distance_;
@@ -2844,7 +2898,7 @@ index 1774f97..4b72960 100644
        main_fsi_early_depth_stencil_execute_quad_merge_ = &builder_->makeNewBlock();
        builder_->createSelectionMerge(main_fsi_early_depth_stencil_execute_quad_merge_,
 diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
-index 9ce3bb4..442e902 100644
+index 9ce3bb4..c0a266a 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
 @@ -19,9 +19,12 @@
@@ -2860,7 +2914,43 @@ index 9ce3bb4..442e902 100644
  namespace rex::graphics {
  
  void SpirvShaderTranslator::ProcessVertexFetchInstruction(
-@@ -1837,7 +1840,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+@@ -1295,11 +1298,31 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+       // All 32 bits containing the values for 4 fetch constants (use
+       // OpBitFieldUExtract to get the signednesses for the specific components
+       // of this texture).
+-      spv::Id swizzled_signs_word = builder_->createLoad(
+-          builder_->createAccessChain(spv::StorageClassUniform, uniform_system_constants_,
+-                                      id_vector_temp_),
+-          spv::NoPrecision);
++      // With the signs specialized (Modification::TextureSignsSpecialization),
++      // a constant with them at the same offset, for the host compiler to drop
++      // the sampling of the other view and the sign switches.
++      Modification::TextureSignsSpecialization signs_specialization =
++          Modification::TextureSignsSpecialization::kDynamic;
++      if (is_pixel_shader() && !edram_fragment_shader_interlock_) {
++        for (const Shader::TextureBinding& binding : current_shader().texture_bindings()) {
++          if (binding.fetch_constant == fetch_constant_index) {
++            signs_specialization = GetSpirvShaderModification().GetTextureSignsSpecialization(
++                uint32_t(binding.binding_index));
++            break;
++          }
++        }
++      }
+       uint32_t swizzled_signs_word_offset = 8 * (fetch_constant_index & 3);
++      spv::Id swizzled_signs_word =
++          signs_specialization != Modification::TextureSignsSpecialization::kDynamic
++              ? builder_->makeUintConstant(
++                    uint32_t(Modification::GetTextureSignsSpecializationSwizzledSigns(
++                        signs_specialization))
++                    << swizzled_signs_word_offset)
++              : builder_->createLoad(
++                    builder_->createAccessChain(spv::StorageClassUniform,
++                                                uniform_system_constants_, id_vector_temp_),
++                    spv::NoPrecision);
+ 
+       spv::Builder::TextureParameters texture_parameters = {};
+ 
+@@ -1837,7 +1860,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
            sample_result_signed =
                if_data_is_3d.createMergePhi(sample_result_signed_3d, sample_result_signed_stacked);
          } else {
@@ -2876,7 +2966,7 @@ index 9ce3bb4..442e902 100644
              texture_parameters.gradX = gradients_h;
              texture_parameters.gradY = gradients_v;
            }
-@@ -1847,7 +1857,9 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+@@ -1847,7 +1877,9 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
            }
            texture_parameters.coords =
                builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
@@ -7166,7 +7256,7 @@ index 3027dc8..73ae697 100644
  
    return max_y;
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..276d0d2 100644
+index 001f36b..6433281 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,9 +10,15 @@
@@ -8142,7 +8232,7 @@ index 001f36b..276d0d2 100644
          !Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
        REXGPU_ERROR("Unsupported Vulkan host vertex shader type {}",
                     uint32_t(host_vertex_shader_type));
-@@ -3835,7 +4577,10 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,7 +4577,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -8151,10 +8241,40 @@ index 001f36b..276d0d2 100644
 +    frame_timing::Scope textures_scope(frame_timing::kTextures);
 +    texture_cache_->RequestTextures(used_texture_mask);
 +  }
++
++  // vulkan_tfetch_specialize_signs: the pixel shader was chosen for the signs
++  // in the fetch constants, but textures the cache can't bind are unsigned in
++  // the system constants - use the dynamic signs for those (the texture and
++  // sampler bindings don't depend on the modification).
++  if (pixel_shader_translation &&
++      render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets &&
++      pixel_shader_modification.pixel.fsi_specialization_low) {
++    using Modification = SpirvShaderTranslator::Modification;
++    Modification checked_modification = pixel_shader_modification;
++    for (const Shader::TextureBinding& binding : pixel_shader->texture_bindings()) {
++      Modification::TextureSignsSpecialization specialization =
++          checked_modification.GetTextureSignsSpecialization(uint32_t(binding.binding_index));
++      if (specialization != Modification::TextureSignsSpecialization::kDynamic &&
++          Modification::GetTextureSignsSpecializationSwizzledSigns(specialization) !=
++              texture_cache_->GetActiveTextureSwizzledSigns(binding.fetch_constant)) {
++        checked_modification.SetTextureSignsSpecialization(
++            uint32_t(binding.binding_index), Modification::TextureSignsSpecialization::kDynamic);
++      }
++    }
++    if (checked_modification.value != pixel_shader_modification.value) {
++      pixel_shader_modification = checked_modification;
++      pixel_shader_translation = static_cast<VulkanShader::VulkanTranslation*>(
++          pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value));
++      if (!pipeline_cache_->EnsureShadersTranslated(vertex_shader_translation,
++                                                    pixel_shader_translation)) {
++        return draw_fail("shader_translation");
++      }
++    }
++  }
  
    const VulkanPipelineCache::PipelineLayoutProvider* pipeline_layout_provider;
    // Set up the render targets - this may perform dispatches and draws.
-@@ -3849,18 +4594,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3849,18 +4624,40 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // textures.
    VkPipeline pipeline;
    void* pipeline_handle = nullptr;
@@ -8201,7 +8321,7 @@ index 001f36b..276d0d2 100644
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -3933,7 +4700,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3933,7 +4730,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
  
    // Update dynamic graphics pipeline state.
@@ -8216,7 +8336,7 @@ index 001f36b..276d0d2 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -3978,6 +4751,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3978,6 +4781,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
  
    // Ensure vertex buffers are resident.
@@ -8224,7 +8344,7 @@ index 001f36b..276d0d2 100644
    const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
      uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
-@@ -3987,6 +4761,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3987,6 +4791,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        uint32_t vfetch_index = i * 32 + j;
        uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
        if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
@@ -8236,7 +8356,7 @@ index 001f36b..276d0d2 100644
          continue;
        }
        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
-@@ -4011,10 +4790,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4011,10 +4820,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
        VertexBufferState& state = vertex_buffer_states_[vfetch_index];
        if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
@@ -8252,7 +8372,7 @@ index 001f36b..276d0d2 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4023,6 +4806,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4023,6 +4836,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
        state.address = vfetch_constant.address;
        state.size = vfetch_constant.size;
@@ -8260,7 +8380,7 @@ index 001f36b..276d0d2 100644
        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
      }
    }
-@@ -4032,7 +4816,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4846,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -8270,7 +8390,7 @@ index 001f36b..276d0d2 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4829,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4859,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -8280,7 +8400,7 @@ index 001f36b..276d0d2 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4072,6 +4858,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4072,6 +4888,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
  
        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -8288,7 +8408,7 @@ index 001f36b..276d0d2 100644
        SubmitBarriers(true);
  
        VkBufferCopy guest_dma_index_copy_region = {};
-@@ -4094,32 +4881,152 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4094,32 +4911,152 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // TODO(Triang3l): Find some PM4 command that can be used for indication of
    // when memexports should be awaited instead of inserting the barrier in Use
    // every time if memory export was done in the previous draw?
@@ -8451,7 +8571,7 @@ index 001f36b..276d0d2 100644
    } else {
      std::pair<VkBuffer, VkDeviceSize> index_buffer;
      switch (primitive_processing_result.index_buffer_type) {
-@@ -4206,6 +5113,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
+@@ -4206,6 +5143,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -8459,7 +8579,7 @@ index 001f36b..276d0d2 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4331,6 +5239,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4331,6 +5269,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -8467,7 +8587,7 @@ index 001f36b..276d0d2 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4350,12 +5259,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +5289,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -8497,7 +8617,7 @@ index 001f36b..276d0d2 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,22 +5306,142 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,22 +5336,142 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
@@ -8510,7 +8630,10 @@ index 001f36b..276d0d2 100644
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
 +  // vulkan_debug_dump_resolves: index of the resolve in the frame report.
 +  int64_t dump_resolve_index = -1;
-+  if (readback_mode == ReadbackResolveMode::kDisabled) {
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+-    uint32_t written_address, written_length;
+-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                         written_address, written_length);
 +    const RegisterFile& regs = *register_file_;
 +    uint32_t resolve_in_frame = dump_frame_resolves++;
 +    if ((frame_report_active_ || dump_frame_active) &&
@@ -8573,10 +8696,7 @@ index 001f36b..276d0d2 100644
 +        break;
 +    }
 +  }
-   if (readback_mode == ReadbackResolveMode::kDisabled) {
--    uint32_t written_address, written_length;
--    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
--                                         written_address, written_length);
++  if (readback_mode == ReadbackResolveMode::kDisabled) {
 +    uint32_t written_address = 0, written_length = 0;
 +    bool result = render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
 +                                                written_address, written_length);
@@ -8645,7 +8765,7 @@ index 001f36b..276d0d2 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -4419,7 +5460,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +5490,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -8653,7 +8773,7 @@ index 001f36b..276d0d2 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4579,6 +5619,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4579,6 +5649,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
  
      texture_cache_->UseScaledResolveBufferForRead();
@@ -8661,7 +8781,7 @@ index 001f36b..276d0d2 100644
      SubmitBarriers(true);
  
      VkBufferMemoryBarrier pre_barrier = {};
-@@ -4635,6 +5676,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4635,6 +5706,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                               readback.buffers[write_index], 1, &readback_region);
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -8669,7 +8789,7 @@ index 001f36b..276d0d2 100644
      SubmitBarriers(true);
  
      VkBufferCopy readback_region = {};
-@@ -4849,6 +5891,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4849,6 +5921,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -8677,7 +8797,7 @@ index 001f36b..276d0d2 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4874,6 +5917,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -4874,6 +5947,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
      return false;
    }
  
@@ -8685,7 +8805,7 @@ index 001f36b..276d0d2 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4944,6 +5988,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +6018,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -8695,7 +8815,7 @@ index 001f36b..276d0d2 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +6017,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +6047,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -8711,7 +8831,7 @@ index 001f36b..276d0d2 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5037,6 +6087,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5037,6 +6117,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
    }
  
    shared_memory_->CompletedSubmissionUpdated();
@@ -8719,7 +8839,7 @@ index 001f36b..276d0d2 100644
  
    primitive_processor_->CompletedSubmissionUpdated();
  
-@@ -5111,7 +6162,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +6192,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -8731,7 +8851,7 @@ index 001f36b..276d0d2 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5136,6 +6191,31 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +6221,31 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -8763,7 +8883,7 @@ index 001f36b..276d0d2 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5165,6 +6245,273 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +6275,273 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -9037,7 +9157,7 @@ index 001f36b..276d0d2 100644
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +6577,29 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +6607,29 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -9067,7 +9187,7 @@ index 001f36b..276d0d2 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5308,9 +6678,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5308,9 +6708,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -9084,7 +9204,7 @@ index 001f36b..276d0d2 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5368,6 +6744,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5368,6 +6774,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        sparse_memory_binds_.clear();
      }
  
@@ -9093,7 +9213,7 @@ index 001f36b..276d0d2 100644
      SubmitBarriers(true);
  
      assert_false(command_buffers_writable_.empty());
-@@ -5385,6 +6763,58 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,6 +6793,58 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -9152,7 +9272,7 @@ index 001f36b..276d0d2 100644
      deferred_command_buffer_.Execute(command_buffer.buffer);
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
-@@ -5652,9 +7082,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5652,9 +7112,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
    swap_fxaa_source_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
  }
  
@@ -9270,7 +9390,7 @@ index 001f36b..276d0d2 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5701,6 +7238,21 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5701,6 +7268,21 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
    scissor_rect.offset.y = int32_t(scissor.offset[1]);
    scissor_rect.extent.width = scissor.extent[0];
    scissor_rect.extent.height = scissor.extent[1];
@@ -9292,7 +9412,7 @@ index 001f36b..276d0d2 100644
    SetScissor(scissor_rect);
  
    if (render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
-@@ -5718,6 +7270,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +7300,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
@@ -9304,7 +9424,7 @@ index 001f36b..276d0d2 100644
      // std::memcmp instead of != so in case of NaN, every draw won't be
      // invalidating it.
      dynamic_depth_bias_update_needed_ |=
-@@ -5990,6 +7547,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -5990,6 +7577,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (pa_cl_vte_cntl.vtx_w0_fmt) {
      flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
    }
@@ -9314,7 +9434,7 @@ index 001f36b..276d0d2 100644
    // Whether the primitive is polygonal, and gl_FrontFacing matters.
    if (primitive_polygonal) {
      flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
-@@ -6121,6 +7681,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6121,6 +7711,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    dirty |= system_constants_.tessellation_factor_range_max != tessellation_factor_max;
    system_constants_.tessellation_factor_range_min = tessellation_factor_min;
    system_constants_.tessellation_factor_range_max = tessellation_factor_max;
@@ -9324,7 +9444,7 @@ index 001f36b..276d0d2 100644
  
    // Conversion to host normalized device coordinates.
    for (uint32_t i = 0; i < 3; ++i) {
-@@ -6134,10 +7697,15 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6134,10 +7727,15 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (vgt_draw_initiator.prim_type == xenos::PrimitiveType::kPointList) {
      auto pa_su_point_minmax = regs.Get<reg::PA_SU_POINT_MINMAX>();
      auto pa_su_point_size = regs.Get<reg::PA_SU_POINT_SIZE>();
@@ -9515,7 +9635,7 @@ index b49e033..cbffc07 100644
  
  void DeferredCommandBuffer::CmdVkPipelineBarrier(
 diff --git a/src/graphics/vulkan/pipeline_cache.cpp b/src/graphics/vulkan/pipeline_cache.cpp
-index 91ac08f..d2d6f52 100644
+index 91ac08f..27896e7 100644
 --- a/src/graphics/vulkan/pipeline_cache.cpp
 +++ b/src/graphics/vulkan/pipeline_cache.cpp
 @@ -12,12 +12,14 @@
@@ -9533,7 +9653,15 @@ index 91ac08f..d2d6f52 100644
  #include <utility>
  #include <vector>
  
-@@ -55,6 +57,12 @@ REXCVAR_DEFINE_INT32(
+@@ -36,6 +38,7 @@
+ #include <rex/graphics/pipeline_util.h>
+ #include <rex/graphics/pipeline/shader/spirv_builder.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
++#include <rex/graphics/pipeline/texture/util.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/registers.h>
+ #include <rex/graphics/util/draw.h>
+@@ -55,6 +58,28 @@ REXCVAR_DEFINE_INT32(
      .range(-1, 32)
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
  
@@ -9543,10 +9671,26 @@ index 91ac08f..d2d6f52 100644
 +                    "compiler drops the code for the others (more pipelines, smaller shaders)")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +
++#if defined(__APPLE__)
++#define REX_TFETCH_SPECIALIZE_SIGNS_DEFAULT true
++#else
++#define REX_TFETCH_SPECIALIZE_SIGNS_DEFAULT false
++#endif
++REXCVAR_DEFINE_BOOL(vulkan_tfetch_specialize_signs, REX_TFETCH_SPECIALIZE_SIGNS_DEFAULT,
++                    "GPU/Vulkan",
++                    "Host render targets: build pixel shaders for the signedness of the textures "
++                    "they sample when it's all unsigned, all signed or gamma RGB with unsigned "
++                    "alpha (the first 7 textures of a shader), so their fetches sample one host "
++                    "view with constant signs instead of both views with per-component sign "
++                    "switches on the system constants (more pipelines, much cheaper fetches on "
++                    "Apple GPUs). On by default on macOS.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++#undef REX_TFETCH_SPECIALIZE_SIGNS_DEFAULT
++
  REXCVAR_DEFINE_BOOL(vulkan_tessellation_wireframe, false, "GPU/Vulkan",
                      "Render tessellation as wireframe")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -91,7 +99,17 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
+@@ -91,7 +116,17 @@ constexpr bool IsPatchIndexedHostVertexShaderType(
  
  std::string GetTessellationSystemConstantsBlockGlsl() {
    std::string source;
@@ -9565,7 +9709,7 @@ index 91ac08f..d2d6f52 100644
    source += fmt::format("  layout(offset = {}) uint xe_vertex_index_endian;\n",
                          offsetof(SpirvShaderTranslator::SystemConstants, vertex_index_endian));
    source += fmt::format("  layout(offset = {}) int xe_vertex_base_index;\n",
-@@ -291,12 +309,16 @@ bool VulkanPipelineCache::Initialize() {
+@@ -291,12 +326,16 @@ bool VulkanPipelineCache::Initialize() {
    bool edram_fragment_shader_interlock =
        render_target_cache_.GetPath() == RenderTargetCache::Path::kPixelShaderInterlock;
  
@@ -9583,7 +9727,7 @@ index 91ac08f..d2d6f52 100644
  
    if (edram_fragment_shader_interlock) {
      std::vector<uint8_t> depth_only_fragment_shader_code =
-@@ -420,6 +442,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -420,6 +459,13 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
        shader_storage_shareable_root /
        fmt::format("{:08X}.{}.vk.xpso", title_id, edram_fragment_shader_interlock ? "fsi" : "fbo");
    pipeline_storage_file_ = rex::filesystem::OpenFile(pipeline_storage_file_path, "a+b");
@@ -9597,7 +9741,7 @@ index 91ac08f..d2d6f52 100644
    if (!pipeline_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the Vulkan pipeline description storage file for "
-@@ -503,6 +532,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
+@@ -503,6 +549,10 @@ void VulkanPipelineCache::InitializeShaderStorage(const std::filesystem::path& c
    auto shader_storage_file_path =
        shader_storage_shareable_root / fmt::format("{:08X}.xsh", title_id);
    shader_storage_file_ = rex::filesystem::OpenFile(shader_storage_file_path, "a+b");
@@ -9608,7 +9752,7 @@ index 91ac08f..d2d6f52 100644
    if (!shader_storage_file_) {
      REXGPU_ERROR(
          "Failed to open the guest shader storage file for writing, persistent "
-@@ -947,8 +980,11 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
+@@ -947,8 +997,11 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentVertexShaderM
    if (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
      modification.vertex.output_point_parameters = uint32_t(ps_param_gen_used);
    } else {
@@ -9621,7 +9765,7 @@ index 91ac08f..d2d6f52 100644
                   regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type == xenos::PrimitiveType::kPointList);
    }
    modification.vertex.vertex_kill_and = uint32_t(
-@@ -987,6 +1023,33 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
+@@ -987,6 +1040,33 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
      modification.pixel.param_gen_point = 0;
    }
  
@@ -9655,7 +9799,25 @@ index 91ac08f..d2d6f52 100644
    if (render_target_cache_.GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
      using DepthStencilMode = SpirvShaderTranslator::Modification::DepthStencilMode;
      if (render_target_cache_.depth_float24_convert_in_pixel_shader() &&
-@@ -1111,8 +1174,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
+@@ -1005,6 +1085,17 @@ SpirvShaderTranslator::Modification VulkanPipelineCache::GetCurrentPixelShaderMo
+         modification.pixel.depth_stencil_mode = DepthStencilMode::kNoModifiers;
+       }
+     }
++    if (REXCVAR_GET(vulkan_tfetch_specialize_signs)) {
++      // As the texture cache gets them from the fetch constants. Textures the
++      // cache can't bind are unsigned there - the command processor checks the
++      // specialization against the bound textures.
++      for (const Shader::TextureBinding& binding : shader.texture_bindings()) {
++        modification.SetTextureSignsSpecialization(
++            uint32_t(binding.binding_index),
++            SpirvShaderTranslator::Modification::GetTextureSignsSpecializationForSwizzledSigns(
++                texture_util::SwizzleSigns(regs.GetTextureFetch(binding.fetch_constant))));
++      }
++    }
+   }
+ 
+   return modification;
+@@ -1111,8 +1202,13 @@ bool VulkanPipelineCache::ConfigurePipeline(
      }
    }
  
@@ -9671,7 +9833,7 @@ index 91ac08f..d2d6f52 100644
    uint8_t async_priority = pipeline_util::kPriorityLowest;
    if (use_async) {
      uint32_t bound_rts =
-@@ -1215,13 +1283,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
+@@ -1215,13 +1311,16 @@ bool VulkanPipelineCache::IsCreatingPipelines() const {
  
  void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
      void* handle, VkPipeline& pipeline_out, const PipelineLayoutProvider*& pipeline_layout_out,
@@ -9689,7 +9851,7 @@ index 91ac08f..d2d6f52 100644
      return;
    }
    const auto* pipeline = reinterpret_cast<const Pipeline*>(handle);
-@@ -1230,6 +1301,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
+@@ -1230,6 +1329,9 @@ void VulkanPipelineCache::GetPipelineAndLayoutByHandle(
    if (is_placeholder_out) {
      *is_placeholder_out = pipeline->is_placeholder.load(std::memory_order_acquire);
    }
@@ -9699,7 +9861,7 @@ index 91ac08f..d2d6f52 100644
  }
  
  bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& translator,
-@@ -1246,6 +1320,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
+@@ -1246,6 +1348,15 @@ bool VulkanPipelineCache::TranslateAnalyzedShader(SpirvShaderTranslator& transla
      return false;
    }
  
@@ -9715,7 +9877,7 @@ index 91ac08f..d2d6f52 100644
    // TODO(Triang3l): Log that the shader has been successfully translated in
    // common code.
  
-@@ -1423,7 +1506,10 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
+@@ -1423,7 +1534,10 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
      } else {
        switch (primitive_processing_result.host_primitive_type) {
          case xenos::PrimitiveType::kPointList:
@@ -9727,7 +9889,7 @@ index 91ac08f..d2d6f52 100644
            primitive_topology = PipelinePrimitiveTopology::kPointList;
            break;
          case xenos::PrimitiveType::kLineList:
-@@ -2964,11 +3050,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
+@@ -2964,11 +3078,22 @@ bool VulkanPipelineCache::TryGetPipelineCreationArgumentsForDescription(
    const ui::vulkan::VulkanDevice* const vulkan_device = command_processor_.GetVulkanDevice();
    bool use_dynamic_rendering =
        REXCVAR_GET(vulkan_dynamic_rendering) && vulkan_device->properties().dynamicRendering;
@@ -9751,7 +9913,7 @@ index 91ac08f..d2d6f52 100644
              : render_target_cache_.GetHostRenderTargetsRenderPass(description.render_pass_key);
      if (render_pass == VK_NULL_HANDLE) {
        return fail("render_pass_unavailable");
-@@ -3151,6 +3248,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3151,6 +3276,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
        }
      }
    }
@@ -9764,7 +9926,7 @@ index 91ac08f..d2d6f52 100644
    if (shader_stage_fragment.module == VK_NULL_HANDLE) {
      --shader_stage_count;
    }
-@@ -3268,9 +3371,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
+@@ -3268,9 +3399,12 @@ bool VulkanPipelineCache::EnsurePipelineCreated(const PipelineCreationArguments&
    VkSampleMask sample_mask = UINT32_MAX;
    VkPipelineMultisampleStateCreateInfo multisample_state = {};
    multisample_state.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -9779,7 +9941,7 @@ index 91ac08f..d2d6f52 100644
      multisample_state.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
    } else if (!edram_fragment_shader_interlock && !subpass_has_attachments) {
      // Keep parity with D3D12 host-render-target path, where draws without
-@@ -3588,6 +3694,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
+@@ -3588,6 +3722,58 @@ void VulkanPipelineCache::CreateQueuedPipelinesOnProcessorThread() {
    }
  }
  
