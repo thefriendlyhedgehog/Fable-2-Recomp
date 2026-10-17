@@ -922,6 +922,19 @@ the same way as Xenia's ROV path.
      (the shadow maps came out empty); the clears now end the render pass
      first. Next on the GPU: the strip clears' remaining transfers, the
      fixed cost per resolve, the reloads of resolved textures.
+  35. **Done (2026-10-17): the strip clears** (`docs/macos_port.md`,
+     "Transfers: the strip clears (tried, dropped)"). Two strips were not
+     taken as clear quads (Z -3.7e-9 with clipping disabled; the host
+     clamps rather than clips then): now they are, transfers 62 -> 60 per
+     frame (`fable_2_366`). Holding the strips' transfers until the next
+     clear and cutting that clear out too was implemented and dropped: same
+     picture, no gain (`fable_2_365`). The leftover slivers (columns between
+     the cleared width and the pitch) must still be copied, and transfers
+     cost per pass (~0.1-0.25 ms in timed frames) rather than per pixel.
+     **Next on the GPU: fewer passes**, e.g. a draw's transfers into all of
+     its render targets in one render pass with the draw (now one pass per
+     destination, then the draw's), and the per-resolve cost. Measure only
+     alternating within a run: other apps kept the GPU 75% busy at idle.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

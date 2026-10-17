@@ -1041,6 +1041,41 @@ What is left of the clear pattern: the 1x strip clears still transfer the
 rest of their tiles from other formats (cut out only where the strip is),
 and resolves cost ~70-150 us each whatever their size (~35 per frame).
 
+### Transfers: the strip clears (tried, dropped)
+
+Two strip clears (draws with vs `1E6883FCCDE1F688` at x -0.5) were not
+taken as clear quads: with clipping disabled their Z came out of the vertex
+shader as -3.7e-9, and the rectangle estimate required Z in 0..1. Without
+clipping the host doesn't clip Z (the pipeline uses depth clamping, and
+isn't created without it), so the estimate now only requires Z to be a
+number then, and reports it clamped to 0..1. At the trail: transfers 62 ->
+60 per frame, tiles 9489 -> 9181 (`fable_2_366`), same picture.
+
+Holding the strips' transfers back was tried and dropped. The idea: the
+strip draw writes only its rectangle, the transfers only outside it, so
+they can run after it; if the next draw clears the rest (the in-place 4x
+clear, or a 4x quad after a 4x strip), the transfers need to copy even less.
+Implemented (the transfers held until the next draw, resolve or end of
+submission, the cutout grown by the next clear quad's rectangle when the two
+make one rectangle), the picture stayed the same, but it gained nothing:
+render pass time 15.3 ms per timed frame either way (`fable_2_365`,
+alternating). What is left after the clears is still a sliver per transfer
+(the columns between the cleared width and the pitch, e.g. 256-320 of a
+4-tile target, or rows up to the next tile row), which has to be copied to
+keep the EDRAM exact, so the number of passes stays the same; and a depth
+transfer run right after the strip draw on the same target cost ~0.5 ms
+instead of ~0.25 ms. Transfers cost about the same per pass whatever their
+size (color into 320-wide targets ~0.11 ms, into 1120-wide ones ~0.11 ms,
+depth ~0.25 ms, in timed frames; a render pass restart ~0.12 ms untimed,
+`vulkan_debug_end_render_pass_every`). So fewer passes is what would pay:
+for example transfers into all of a draw's render targets in one render
+pass with the draw (now each destination gets a pass of its own, then the
+draw another).
+
+Measuring now: other apps using the GPU (another game port, RuneLite, the
+window server) kept it 75% busy at 2.5 W with Fable II closed, so times and
+power can only be compared within one run, alternating.
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5

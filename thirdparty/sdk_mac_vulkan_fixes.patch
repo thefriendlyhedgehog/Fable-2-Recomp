@@ -7794,7 +7794,7 @@ index ec0df7c..5dd4d9b 100644
  
    if (!exact_range) {
 diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
-index 3027dc8..5a2f72f 100644
+index 3027dc8..c82a0aa 100644
 --- a/src/graphics/util/draw_extent_estimator.cpp
 +++ b/src/graphics/util/draw_extent_estimator.cpp
 @@ -11,7 +11,12 @@
@@ -7846,7 +7846,7 @@ index 3027dc8..5a2f72f 100644
  namespace rex::graphics {
  
  void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister export_register,
-@@ -78,18 +100,335 @@ void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister expo
+@@ -78,18 +100,342 @@ void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister expo
    }
  }
  
@@ -8006,6 +8006,7 @@ index 3027dc8..5a2f72f 100644
 +    pixel_offset_y += float(pa_sc_window_offset.window_y_offset);
 +  }
 +
++  bool clip_disabled = regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable;
 +  float xs[3], ys[3], zs[3];
 +  float interpolators[3][xenos::kMaxInterpolators][4];
 +  uint32_t written_interpolators = 0;
@@ -8023,12 +8024,14 @@ index 3027dc8..5a2f72f 100644
 +    // unless vtx_z_fmt.
 +    float xy_w = pa_cl_vte_cntl.vtx_xy_fmt ? 1.0f : w;
 +    float z = pa_cl_vte_cntl.vtx_z_fmt ? position[2] : position[2] / w;
-+    // Not killed, all of the position written, and not clipped by depth (on
-+    // the host either, even if the guest doesn't clip).
++    // Not killed, all of the position written, and not clipped by depth. With
++    // clipping disabled, the host clamps the depth instead (the pipeline
++    // isn't created without depth clamping), so Z only needs to be a number
++    // then.
 +    if ((position_export_sink.vertex_kill.has_value() &&
 +         (position_export_sink.vertex_kill.value() & ~(UINT32_C(1) << 31))) ||
 +        position_export_sink.position_mask != 0b1111 || !(w > 0.0f) ||
-+        !(z >= 0.0f && z <= 1.0f)) {
++        !(clip_disabled ? std::isfinite(z) : (z >= 0.0f && z <= 1.0f))) {
 +      vertices_valid = false;
 +      break;
 +    }
@@ -8148,6 +8151,10 @@ index 3027dc8..5a2f72f 100644
 +                           ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_ZOFFSET)
 +                           : 0.0f;
 +      details.z = zs[0] * z_scale + z_offset;
++      if (clip_disabled) {
++        // Clamped to the viewport depth range, 0 to 1 without clipping.
++        details.z = std::min(std::max(details.z, 0.0f), 1.0f);
++      }
 +      details.z_uniform = true;
 +    }
 +    details.written_interpolators = written_interpolators;
@@ -8182,7 +8189,7 @@ index 3027dc8..5a2f72f 100644
      return xenos::kTexture2DCubeMaxWidthHeight;
    }
  
-@@ -97,12 +436,14 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
+@@ -97,12 +443,14 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
    if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type) &&
        regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
            xenos::VGTOutputPath::kTessellationEnable) {
@@ -8197,7 +8204,7 @@ index 3027dc8..5a2f72f 100644
      return xenos::kTexture2DCubeMaxWidthHeight;
    }
  
-@@ -269,6 +610,9 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+@@ -269,6 +617,9 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
    auto pa_sc_screen_scissor_br = regs.Get<reg::PA_SC_SCREEN_SCISSOR_BR>();
    scissor_bottom = std::min(scissor_bottom, int32_t(pa_sc_screen_scissor_br.br_y));
    uint32_t max_y = uint32_t(std::max(scissor_bottom, int32_t(0)));
@@ -8207,7 +8214,7 @@ index 3027dc8..5a2f72f 100644
  
    if (regs.Get<reg::PA_CL_CLIP_CNTL>().clip_disable) {
      // Actual extent from the vertices.
-@@ -294,8 +638,20 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+@@ -294,8 +645,20 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
          }
        }
        if (estimate_vertex_max_y) {
@@ -8229,7 +8236,7 @@ index 3027dc8..5a2f72f 100644
      }
    } else {
      // Viewport. Though the Xenos itself doesn't have an implicit viewport
-@@ -326,6 +682,29 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+@@ -326,6 +689,29 @@ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
      // argument in the !(a < b) case (always for NaN), min as float (max_y is
      // well below 2^24) to safely drop very large values.
      max_y = uint32_t(std::min(float(max_y), std::max(0.0f, viewport_bottom)));
