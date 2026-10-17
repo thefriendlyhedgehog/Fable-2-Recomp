@@ -765,6 +765,69 @@ heavy view 18.9-19.7 ms either way); the traces (`out/profile/rd_dep.trace`
 vs. `rd_nod.trace`, heavy view, per command buffer, about 2.2 per frame)
 show compute 1.50 vs. 1.63 ms and 42.5 vs. 43.9 dispatches, so about 0.3 ms
 of GPU time per frame.
+### Render pass areas and the EDRAM rows draws claim
+
+**Per-pass GPU time.** `vulkan_pass_log` (hot reload) logs, every 5 s, the
+host render passes of one frame per submission in recording order
+(`[passes]`: framebuffer size, MSAA, formats, draws, end reason, the most
+used pixel shaders) and the render areas they were begun with (`[pass
+areas]`). It also begins each pass position with its own copy of the
+`VkRenderPass`, named `<submission>.<pass> <target>`: MoltenVK labels every
+Metal render encoder with the render pass's debug name, so a Metal System
+Trace tells every pass apart. `tools/mac_pass_costs.py <trace> <log>`
+prints the median vertex and fragment time per pass with the log's
+description, and totals by kind of pass. A pass that begins with an
+ownership transfer keeps the draws that follow (`transfer ... | N draws`).
+
+**What it showed at the heavy view** (`out/profile/passes.trace`,
+`fable_2_232`, two submissions of 80 and 69 passes per frame): the base pass
+(1749 draws) 1.7 ms vertex and 1.8 ms fragment time, the depth prepass
+(1356 draws) 1.0 ms, and **~67 passes per frame with at most one draw,
+mostly render target ownership transfers, at 250-340 us of fragment time
+each: ~5.4 ms per frame, half of all fragment time.** Two causes:
+
+- Every pass began with the whole framebuffer as its render area, and host
+  render targets are as tall as the EDRAM allows (1120x2352 for the 1120x720
+  scene, 320x8192, 560x4688, 1040x2528 for the shadow maps). MoltenVK sizes
+  the Metal pass from the render area (`renderTargetWidth/Height`), and a
+  tiled GPU loads and stores the attachments over all of it: 1120x2352 depth
+  and stencil is ~13 MB each way. The upstream code had a TODO for this.
+- `execute_unclipped_draw_vs_on_cpu` was off in the SDK (on in Xenia).
+  Draws with clipping disabled (screen-space quads and clears with an
+  8192x8192 scissor, all over the post-processing chain) then count as using
+  their render target down to the end of the EDRAM, so the next render
+  target there gets an ownership transfer of all of it. Xenia's own flag
+  text names exactly this ("spurious EDRAM range ownership transfer round
+  trips").
+
+**Changes:**
+
+- `vulkan_tight_render_area` (default on, hot reload): when the deferred
+  command buffer is replayed, each render pass begins with the union of the
+  scissors of its draws and of its clear rectangles (scanned up to the end of
+  the pass, clamped to the framebuffer) instead of the whole framebuffer.
+  Ownership transfers set the scissor to the bounds of the rectangles they
+  copy instead of the whole framebuffer, and draws clamp the bottom of their
+  scissor to the rows the render target cache estimated for them
+  (`RenderTargetCache::last_update_height_used`, the same estimate the EDRAM
+  ownership uses, so nothing past it is ever read from the render target).
+- `execute_unclipped_draw_vs_on_cpu` now defaults to true: the vertex shader
+  of unclipped draws runs on the CPU (the existing shader interpreter) to
+  find their real bottom.
+
+**Results.** Sweep alternating both 8 times at the trail
+(`out/tight_area_check`): shots within 1.4-2.0% (snow), post-processing
+unchanged. Uncapped on `fbo`, both orders (`fable_2_239`-`244`): **heavy
+view 16.6 / 16.5 ms per frame with both, 19.8 / 19.6 ms with neither**, 16.7
+/ 16.6 ms with the estimate alone; the trail is unchanged at the 60 fps cap
+(16.7 ms), and so is the heavy view now. GPU load at the heavy view (traces
+`out/profile/area_old.trace` vs. `area_both.trace`, taken a few seconds
+after the camera turn): **86% vs. 67% busy**, render encoder time per
+command buffer 14.4 vs. 6.6 ms (7.2 ms with the estimate alone), at a higher
+frame rate. Per pass: the base pass 1.04 ms vertex / 0.98 ms fragment (from
+1.67 / 1.85), the prepass 0.58 ms vertex (from 0.95), single-draw transfer
+passes 1.7 ms of fragment time per frame in total (from 5.4).
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

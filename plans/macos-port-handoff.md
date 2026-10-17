@@ -197,6 +197,9 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
 | - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
+| - | `vulkan_pass_log` | every 5 s, `[passes]` (one frame's render passes per submission) and `[pass areas]` lines, and Metal render encoders labeled `<submission>.<pass>` for `tools/mac_pass_costs.py` |
+| - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
+| - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
 | - | `vulkan_debug_skip_resolve_dumps`, `vulkan_debug_skip_resolve_copies` | skip the fbo dumps / the resolve copies, to measure what they cost (wrong picture) |
 | - | `vulkan_long_frame_log` | per-area breakdown of frames over 100 ms |
@@ -745,6 +748,29 @@ the same way as Xenia's ROV path.
      (shaders 4-7). A 4x MSAA variant would read `texelFetch(..., sample)`
      from multisampled views (the dump's sample mapping: bit 0 horizontal,
      bit 1 vertical), but those copies are small.
+  23. **Done (2026-10-16): per-pass breakdown, and render passes limited to
+     what they draw** (`docs/macos_port.md`, "Render pass areas and the
+     EDRAM rows draws claim"). `vulkan_pass_log` labels every Metal render
+     encoder with its pass position and logs the frame's passes;
+     `tools/mac_pass_costs.py <trace> <log>` gives GPU time per pass.
+     It showed ~67 passes per frame with at most one draw (mostly ownership
+     transfers) costing ~5.4 ms of fragment time per frame, because every
+     pass loaded and stored the whole EDRAM-tall framebuffer and because
+     unclipped screen-space draws claimed their render target down to the
+     end of the EDRAM. Fixed with `vulkan_tight_render_area` (render area =
+     union of the pass's scissors; transfer and draw scissors bounded) and
+     `execute_unclipped_draw_vs_on_cpu` now on by default (as in Xenia).
+     Same picture. Uncapped: **heavy view 16.6 / 16.5 vs. 19.8 / 19.6 ms**
+     (`fable_2_239`-`244`), now at the 60 fps cap like the trail; GPU **86%
+     -> 67% busy** at the heavy view (render encoder time per command buffer
+     14.4 -> 6.6 ms). Since the fbo switch: heavy view 26.7 -> 16.6 ms
+     (capped). What is left per pass (`out/profile/passes_vs.trace`): the
+     base pass ~2 ms, the prepass ~0.7 ms, the 2-draw 1120x720 pass `1.8`
+     (shaders `1B4B5AE12EF270CA`, `0F99810F072BF0FC`) 0.45 ms of fragment
+     time, and still ~17 full-height single-draw passes per frame (the
+     clear-like shader `A4A965C189287B99` and depth-only draws at 320x8192,
+     160x4096, 1040x2528, 560x4688) whose height estimate stays at the whole
+     target: next to look at.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
