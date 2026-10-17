@@ -206,6 +206,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_transfer_log` | every 5 s, one frame's `[transfers]` lines: each render target ownership transfer (destination, source, EDRAM tiles, and the draw that caused it: shaders, primitive, depth/stencil and color state), plus resolves and the frame's draw count |
 | - | `clear_quad_transfer_cutout` | a draw that overwrites a rectangle of its render target outright (clear quad: rectangle list, depth ALWAYS with write and stencil REPLACE, or color mask F without blending) cuts that rectangle out of the transfers it causes (on on macOS) |
 | - | `clear_quad_in_place` | with the cutout: a clear quad with one value whose tiles a same-format render target of another MSAA mode owns clears that target instead, and the draw is skipped (on on macOS); `vulkan_transfer_log` shows `in-place clear` lines |
+| - | `vulkan_transfers_in_draw_pass` | host render targets: a draw's ownership transfers run in the draw's own render pass, which the draw continues, instead of a pass per destination (on on macOS); `vulkan_transfer_log` shows `not in the draw's render pass` lines with the reason |
 | - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
@@ -935,6 +936,24 @@ the same way as Xenia's ROV path.
      its render targets in one render pass with the draw (now one pass per
      destination, then the draw's), and the per-resolve cost. Measure only
      alternating within a run: other apps kept the GPU 75% busy at idle.
+  36. **Done (2026-10-17): transfers in the draw's render pass**
+     (`vulkan_transfers_in_draw_pass`, on by default on macOS, hot reload;
+     `docs/macos_port.md`, "Transfers: in the draw's render pass"). A draw's
+     transfers now run in the draw's own render pass (all its render targets
+     attached, each transfer writing its own attachment), and the draw
+     continues it, instead of one pass per destination and then the draw's.
+     Not when a transfer reads one of the draw's render targets, or a color
+     target's transfer format differs from its draw format (k_32_FLOAT, 2
+     per frame; `vulkan_transfer_log` says why). At the trail: transfer
+     passes 49 -> 13 per frame (the 11 in-place clears and those 2), about
+     139 -> 114 passes, timed frames ~20.0 -> ~18.5 ms (`fable_2_368`),
+     untimed GPU time ~11.1 -> ~9.6 ms per frame, GPU power 6.91 -> 6.77 W
+     over four alternating pairs (`fable_2_371`; within the noise of the
+     other apps). Same picture at the trail. **Next:** about 7 passes per
+     frame end on the shared memory barrier a draw pushes after a resolve
+     (compute write -> read, `VulkanSharedMemory::UseImpl`), even when the
+     draw reads nothing the resolve wrote; skipping it then would let the
+     passes holding only transfers continue into the draw.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

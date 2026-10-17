@@ -1076,6 +1076,54 @@ Measuring now: other apps using the GPU (another game port, RuneLite, the
 window server) kept it 75% busy at 2.5 W with Fable II closed, so times and
 power can only be compared within one run, alternating.
 
+### Transfers: in the draw's render pass
+
+Each render target taking over EDRAM tiles for a draw got the transfers in
+a render pass of its own (one attachment, in the transfer format), and then
+the draw opened another. A typical pair of clear-and-draw at the trail was
+"transfer depth | transfer color | draw", three passes where one would do,
+and on the M4 a pass costs about the same whatever it holds (see the strip
+clears above).
+
+`vulkan_transfers_in_draw_pass` (on by default on macOS, hot reload) does
+the transfers in the draw's own render pass and framebuffer instead: the
+transfer pipelines are made for the draw's render pass (the color transfer
+shader writes the output location of its render target, the others' write
+masks are 0, depth transfers don't write color), and the command processor
+then sees the pass it wants already open and continues it. This was already
+a TODO upstream; the pipeline code only needed the dynamic rendering formats
+of all the attachments. Render targets get their draw usage before the
+transfers, so the sources' barriers go in before the pass begins. It only
+applies when:
+
+- no transfer reads one of the draw's render targets (sampling an
+  attachment); the host depth of the depth destination itself is fine, it
+  is read from a copy in the EDRAM buffer made before;
+- each color destination's transfer format is its draw format (not for
+  k_16_16, k_16_16_16_16 and the 32-bit float formats, which transfer as
+  integers to keep NaNs and -1 exact);
+- stencil can be exported (no stencil clears and bit draws in the pass; the
+  MoltenVK depth clear trap above);
+- the destinations have the draw's pitch, so the framebuffer sizes match.
+
+Otherwise the transfers get their own passes as before; `vulkan_transfer_log`
+shows a `not in the draw's render pass` line with the reason. At the trail
+only 2 per frame stay out (a k_32_FLOAT target).
+
+At the trail: transfer passes 49 -> 13 per frame (left: the 11 in-place
+clears, which need their own pass, and those 2), about 139 -> 114 passes in
+all, timed frames ~20.0 -> ~18.5 ms (`fable_2_368`, three alternating
+pairs), untimed GPU time ~11.1 -> ~9.6 ms per frame and GPU power 6.91 ->
+6.77 W (`fable_2_371`, four alternating pairs; the power difference is
+within the noise of the other apps). Same picture: on/on and on/off shot
+differences are the same as off/off (animation).
+
+About 9 passes per frame now hold only transfers: something ends the pass
+between the transfers and the draw. Mostly (about 7 per frame) it is the
+shared memory barrier a draw pushes after a resolve (`VulkanSharedMemory`
+compute write -> read), pushed for any draw after a compute write, even if
+the draw reads nothing the resolve wrote; the rest are texture loads.
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5
