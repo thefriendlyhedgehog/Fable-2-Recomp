@@ -202,9 +202,11 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_tfetch_implicit_lod` | pixel shader fetches with a computed LOD sample with an implicit LOD and a bias instead of explicit gradients (on on macOS; restart) |
 | - | `vulkan_tfetch_specialize_signs` | host render targets: pixel shaders built for the signedness of their first 7 textures when it is all unsigned, all signed or gamma RGB + unsigned alpha, so fetches sample one view with constant signs (on on macOS) |
 | - | `vulkan_gpu_time` | timestamps around each submission; logs "GPU time: N ms/frame, M% of the time" after every frame statistics line (on; restart) |
-| - | `vulkan_pass_gpu_time` | with `vulkan_gpu_time`: times the render passes of one frame in ten and logs "GPU passes" lines (by kind, the 12 costliest by target and pixel shader); off |
+| - | `vulkan_pass_gpu_time` | with `vulkan_gpu_time`: times the render passes and resolves of one frame in ten and logs "GPU passes" lines (by kind, the 12 costliest by target and pixel shader); off |
 | - | `vulkan_transfer_log` | every 5 s, one frame's `[transfers]` lines: each render target ownership transfer (destination, source, EDRAM tiles, and the draw that caused it: shaders, primitive, depth/stencil and color state), plus resolves and the frame's draw count |
 | - | `clear_quad_transfer_cutout` | a draw that overwrites a rectangle of its render target outright (clear quad: rectangle list, depth ALWAYS with write and stencil REPLACE, or color mask F without blending) cuts that rectangle out of the transfers it causes (on on macOS) |
+| - | `clear_quad_in_place` | with the cutout: a clear quad with one value whose tiles a same-format render target of another MSAA mode owns clears that target instead, and the draw is skipped (on on macOS); `vulkan_transfer_log` shows `in-place clear` lines |
+| - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -892,6 +894,34 @@ the same way as Xenia's ROV path.
      running. What is left (0.8 cores): command processor 22% (MoltenVK
      encoding at submission about a quarter of it), 3D Engine 14%,
      GameThread 14%, two XThreads ~7% each.
+  33. **Done (2026-10-17): where the GPU time goes** (`docs/macos_port.md`,
+     "Transfers: clear quads cleared in place"). Switching parts off at the
+     trail (~10.5 ms per frame): resolve copies 3.2-3.5 ms (reloads of
+     resolved textures ~1 ms of it, `debug_skip_resolved_texture_loads`),
+     transfers ~2.3 ms (`vulkan_debug_skip_transfers`), depth prepass ~1.7
+     ms, resolve dumps ~0.3 ms: the EDRAM emulation is over half of it.
+     `vulkan_pass_gpu_time` now also times each resolve (kind "resolves":
+     ~35 per frame, 70-150 us each whatever the size). GPU power from the
+     kernel without root: `tools/mac_gpu_power.c` (IOReport GPU energy,
+     clock residency and the average clock; build line in the file); it
+     measures the whole system, so alternate A and B within one run.
+     Transfers alone: 5.87 vs 4.92 W.
+  34. **Done (2026-10-17): clear quads cleared in place**
+     (`clear_quad_in_place`, on by default on macOS, hot reload;
+     `docs/macos_port.md`, same section). The game clears a 1x target with a
+     1x strip and then a 4x quad over the same EDRAM, so each 4x clear moved
+     the tiles to a 4x target and the next 1x draw moved them back. A clear
+     quad with one value whose tiles a same-format target of another sample
+     count owns now clears that target instead (vkCmdClearAttachments, the
+     draw skipped). At the trail: 8 per frame, transfers 83 -> 62, tiles
+     13879 -> 9489 (`fable_2_354`), timed frames 20.1-21.5 -> 16.1-16.7
+     ms, render passes 14.5 -> 10.3 ms (`fable_2_356`), GPU power 7.57 ->
+     7.06 W over four alternating pairs (`fable_2_357`). Same picture at the trail,
+     after walking and in the pause menu. **MoltenVK trap:** a depth clear
+     between draws of one render pass loses the depth of the draws after it
+     (the shadow maps came out empty); the clears now end the render pass
+     first. Next on the GPU: the strip clears' remaining transfers, the
+     fixed cost per resolve, the reloads of resolved textures.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

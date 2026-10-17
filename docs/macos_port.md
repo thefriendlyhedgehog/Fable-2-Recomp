@@ -973,6 +973,74 @@ switching it: on/off pairs as far apart as on/on, 1.3-2.0% of pixels, the
 snow). `vulkan_transfer_log` (off, hot reload) logs one frame's transfers
 every 5 s with the draw that caused each.
 
+### Transfers: clear quads cleared in place
+
+What the GPU time at the trail goes to (30 fps, ~10.5 ms per frame,
+measured by switching each part off, so the picture is wrong in those
+runs): resolve copies 3.2-3.5 ms, of which ~1 ms is the texture reloads
+of resolved data (`debug_skip_resolved_texture_loads`); transfers ~2.3 ms
+(`vulkan_debug_skip_transfers`); the depth prepass ~1.7 ms; resolve dumps
+~0.3 ms. So emulating the EDRAM takes more than half of the GPU time. With
+the transfers switched on and off in one run, the system's GPU power was
+5.87 W against 4.92 W (`tools/mac_gpu_power.c`).
+
+Most transfers come from how the game clears. It clears a 1x render target
+in two quads: a strip at the edge at 1x (for example 16x256 at x 240 of a
+256x256 target, 64x1024 at x 960 of the 1024x1024 shadow maps), then the
+rest with a quad at 4x MSAA over the same EDRAM (120x128 pixels, i.e.
+240x256 samples), and draws on at 1x. Each 4x clear moved the tiles into a
+4x render target and the next 1x draw moved them all back: of 83
+transfers per frame, 52 were caused by clear quads and 14 by the draw
+right after one.
+
+`clear_quad_in_place` (on on macOS, hot reload; needs
+`clear_quad_transfer_cutout`) replaces such a clear quad by clears of the
+render targets that already own its tiles in the same format: one value in
+every sample is the same bytes in the EDRAM at any MSAA mode, so the
+owner keeps the tiles and nothing is copied. In `RenderTargetCache::Update`
+(`PrepareClearQuadInPlace`) a clear quad qualifies if:
+
+- it overwrites all of its render targets (32bpp only), its rectangle is
+  exact (at MSAA, edges on pixel edges), and no memexport or occlusion
+  query depends on it being drawn;
+- for each render target, the tile rows of the rectangle belong to one
+  render target with the same base, pitch and format but another sample
+  count (for depth, holding the host depth as well), and the rectangle is
+  whole pixels of it;
+- the values are uniform and the host would store exactly them: Z the same
+  at the three corners, exact in the depth format (unorm24, or float24),
+  no polygon offset, the stencil reference (the same for both faces); the
+  color from running the pixel shader on the CPU
+  (`DrawExtentEstimator::EvaluateUniformPixelShaderColor`: no texture
+  fetches, kill or depth output, its interpolator inputs the same at all
+  corners), no exponent bias, `k_8_8_8_8` or `k_2_10_10_10`, components
+  not halfway between two steps.
+
+The Vulkan cache then clears the owners with the resolve clear code
+(`vkCmdClearAttachments`) and the command processor skips the draw. The
+clears get a render pass of their own: on MoltenVK, a depth clear between
+draws in one render pass lost the depth of the draws after it (the shadow
+casters in the same pass, so the shadow maps were empty and the ground had
+no shadows; ending the pass first fixed it, the render area was not the
+cause). At the start of a pass the clear works, and the draws after it
+continue in that pass.
+
+At the trail (`fable_2_354`): 8 clear quads per frame cleared in place
+(the scene's 256x256 targets, both shadow maps, the 320x176 and 560x352
+depth clears), transfers 83 -> 62 per frame, tiles copied 13879 -> 9489.
+In `vulkan_pass_gpu_time` frames (alternating, `fable_2_356`): 20.1-21.5
+-> 16.1-16.7 ms per timed frame, render passes 14.5 -> 10.3 ms (transfers
+4.4-5.4 -> 3.4-3.8 ms, passes with 0-2 draws 2.8-3.2 -> 1.1-1.5 ms). GPU
+power, four alternating pairs of 26 s (`fable_2_357`): 7.57 -> 7.06 W
+(the system's, with a browser using the GPU too); the untimed GPU time is
+~1.3 ms lower but noisy, as the GPU clock follows the load. The picture is
+the same at the trail, after walking and in the pause menu (on/off pairs
+as close as off/off).
+
+What is left of the clear pattern: the 1x strip clears still transfer the
+rest of their tiles from other formats (cut out only where the strip is),
+and resolves cost ~70-150 us each whatever their size (~35 per frame).
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5
