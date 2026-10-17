@@ -2221,10 +2221,10 @@ index fe0aa4e..4a0798e 100644
  }
  
 diff --git a/src/graphics/pipeline/shader/spirv_translator.cpp b/src/graphics/pipeline/shader/spirv_translator.cpp
-index 1774f97..aee6bbe 100644
+index 1774f97..4b72960 100644
 --- a/src/graphics/pipeline/shader/spirv_translator.cpp
 +++ b/src/graphics/pipeline/shader/spirv_translator.cpp
-@@ -21,11 +21,70 @@
+@@ -21,11 +21,85 @@
  #include <fmt/format.h>
  
  #include <rex/assert.h>
@@ -2256,6 +2256,21 @@ index 1774f97..aee6bbe 100644
 +                    "flow, and overlapping fragments race. On by default on macOS.")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 +#undef REX_FSI_END_INTERLOCK_IN_FUNCTION_DEFAULT
++
++#if defined(__APPLE__)
++#define REX_TFETCH_IMPLICIT_LOD_DEFAULT true
++#else
++#define REX_TFETCH_IMPLICIT_LOD_DEFAULT false
++#endif
++REXCVAR_DEFINE_BOOL(vulkan_tfetch_implicit_lod, REX_TFETCH_IMPLICIT_LOD_DEFAULT, "GPU/Vulkan",
++                    "Pixel shaders: sample 1D / 2D / cube textures whose LOD the guest computes "
++                    "with an implicit LOD and the fetch's LOD as the bias, instead of explicit "
++                    "gradients (coarse derivatives scaled by 2^LOD). The same LOD up to how the "
++                    "host computes its derivatives, and cheaper on Apple GPUs (the full-screen "
++                    "shadow mask pass of Fable II 18% less fragment time). On by default on "
++                    "macOS.")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++#undef REX_TFETCH_IMPLICIT_LOD_DEFAULT
 +
 +REXCVAR_DEFINE_BOOL(vulkan_fsi_quad_skip_quad_ops, true, "GPU/Vulkan",
 +                    "Fragment shader interlock: decide whether a 2x2 quad that failed the early "
@@ -2295,7 +2310,7 @@ index 1774f97..aee6bbe 100644
  namespace rex::graphics {
  
  SpirvShaderTranslator::Features::Features(bool all)
-@@ -42,7 +101,12 @@ SpirvShaderTranslator::Features::Features(bool all)
+@@ -42,7 +116,12 @@ SpirvShaderTranslator::Features::Features(bool all)
        rounding_mode_rte_float32(all),
        fragment_shader_sample_interlock(all),
        demote_to_helper_invocation(all),
@@ -2309,7 +2324,7 @@ index 1774f97..aee6bbe 100644
  
  SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const vulkan_device)
      : max_storage_buffer_range(vulkan_device->properties().maxStorageBufferRange),
-@@ -59,7 +123,16 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+@@ -59,7 +138,16 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
        rounding_mode_rte_float32(vulkan_device->properties().shaderRoundingModeRTEFloat32),
        fragment_shader_sample_interlock(vulkan_device->properties().fragmentShaderSampleInterlock),
        demote_to_helper_invocation(vulkan_device->properties().shaderDemoteToHelperInvocation),
@@ -2327,7 +2342,7 @@ index 1774f97..aee6bbe 100644
    const uint32_t vulkan_api_version = vulkan_device->properties().apiVersion;
    if (vulkan_api_version >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
      spirv_version = spv::Spv_1_5;
-@@ -70,6 +143,9 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
+@@ -70,6 +158,9 @@ SpirvShaderTranslator::Features::Features(const ui::vulkan::VulkanDevice* const
    } else {
      spirv_version = spv::Spv_1_0;
    }
@@ -2337,7 +2352,7 @@ index 1774f97..aee6bbe 100644
  }
  
  uint64_t SpirvShaderTranslator::GetDefaultVertexShaderModification(
-@@ -113,6 +189,7 @@ void SpirvShaderTranslator::Reset() {
+@@ -113,6 +204,7 @@ void SpirvShaderTranslator::Reset() {
    uniform_float_constants_ = spv::NoResult;
  
    input_vertex_index_ = spv::NoResult;
@@ -2345,7 +2360,7 @@ index 1774f97..aee6bbe 100644
    input_primitive_id_ = spv::NoResult;
    input_tess_coord_ = spv::NoResult;
    input_patch_control_point_indices_ = spv::NoResult;
-@@ -175,6 +252,7 @@ void SpirvShaderTranslator::StartTranslation() {
+@@ -175,6 +267,7 @@ void SpirvShaderTranslator::StartTranslation() {
    // TODO(Triang3l): Logger.
    builder_ = std::make_unique<SpirvBuilder>(features_.spirv_version, (kSpirvMagicToolId << 16) | 1,
                                              nullptr);
@@ -2353,7 +2368,7 @@ index 1774f97..aee6bbe 100644
  
    builder_->addCapability(IsSpirvTessEvalShader() ? spv::CapabilityTessellation
                                                    : spv::CapabilityShader);
-@@ -309,6 +387,9 @@ void SpirvShaderTranslator::StartTranslation() {
+@@ -309,6 +402,9 @@ void SpirvShaderTranslator::StartTranslation() {
        {"edram_rt_keep_mask", offsetof(SystemConstants, edram_rt_keep_mask), type_uint4_array_2},
        {"edram_rt_clamp", offsetof(SystemConstants, edram_rt_clamp), type_float4_array_4},
        {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant), type_float4_},
@@ -2363,7 +2378,7 @@ index 1774f97..aee6bbe 100644
    };
    id_vector_temp_.clear();
    id_vector_temp_.reserve(rex::countof(system_constants));
-@@ -1157,7 +1238,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
+@@ -1157,7 +1253,7 @@ std::vector<uint8_t> SpirvShaderTranslator::CompleteTranslation() {
      builder_->addExecutionMode(function_main_, spv::ExecutionModeOriginUpperLeft);
      if (output_fragment_depth_ != spv::NoResult) {
        builder_->addExecutionMode(function_main_, spv::ExecutionModeDepthReplacing);
@@ -2372,7 +2387,7 @@ index 1774f97..aee6bbe 100644
            GetSpirvShaderModification().pixel.depth_stencil_mode ==
                Modification::DepthStencilMode::kFloat24Truncating) {
          builder_->addExecutionMode(function_main_, spv::ExecutionModeDepthLess);
-@@ -1668,6 +1749,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1668,6 +1764,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
                                                     type_int_, "gl_VertexIndex");
      builder_->addDecoration(input_vertex_index_, spv::DecorationBuiltIn, spv::BuiltInVertexIndex);
      main_interface_.push_back(input_vertex_index_);
@@ -2388,7 +2403,7 @@ index 1774f97..aee6bbe 100644
    }
  
    uint32_t output_location = 0;
-@@ -1702,6 +1792,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1702,6 +1807,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
        builder_->addDecoration(output_point_coordinates_, spv::DecorationInvariant);
        main_interface_.push_back(output_point_coordinates_);
        ++output_location;
@@ -2397,7 +2412,7 @@ index 1774f97..aee6bbe 100644
      } else {
        // Create the point size output. Not using gl_PointSize from gl_PerVertex
        // not to rely on the shaderTessellationAndGeometryPointSize feature, and
-@@ -1725,6 +1817,7 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1725,6 +1832,7 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
    output_per_vertex_member_count_ = uint32_t(struct_per_vertex_members.size());
    output_per_vertex_member_clip_distance_ = UINT32_MAX;
    output_per_vertex_member_cull_distance_ = UINT32_MAX;
@@ -2405,7 +2420,7 @@ index 1774f97..aee6bbe 100644
    if (clip_distance_count) {
      assert_true(features_.clip_distance);
      builder_->addCapability(spv::CapabilityClipDistance);
-@@ -1745,11 +1838,28 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1745,11 +1853,28 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
      struct_per_vertex_members.push_back(type_cull_distance);
      output_per_vertex_member_count_ = uint32_t(struct_per_vertex_members.size());
    }
@@ -2434,7 +2449,7 @@ index 1774f97..aee6bbe 100644
    if (output_per_vertex_member_clip_distance_ != UINT32_MAX) {
      builder_->addMemberName(type_struct_per_vertex, output_per_vertex_member_clip_distance_,
                              "gl_ClipDistance");
-@@ -1762,6 +1872,12 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
+@@ -1762,6 +1887,12 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderBeforeMain() {
      builder_->addMemberDecoration(type_struct_per_vertex, output_per_vertex_member_cull_distance_,
                                    spv::DecorationBuiltIn, spv::BuiltInCullDistance);
    }
@@ -2447,7 +2462,7 @@ index 1774f97..aee6bbe 100644
    builder_->addDecoration(type_struct_per_vertex, spv::DecorationBlock);
    type_output_per_vertex_ = type_struct_per_vertex;
    output_per_vertex_ = builder_->createVariable(spv::NoPrecision, spv::StorageClassOutput,
-@@ -1925,6 +2041,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+@@ -1925,6 +2056,8 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
      }
      if (IsSpirvVertexShader() || IsSpirvComputeShader()) {
        spv::Id vertex_index;
@@ -2456,7 +2471,7 @@ index 1774f97..aee6bbe 100644
        spv::Id compute_vertex_processing_index = spv::NoResult;
        spv::Id compute_load_vertex_index = spv::NoResult;
        spv::Id compute_vertex_index_is_32bit = spv::NoResult;
-@@ -1984,37 +2102,156 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+@@ -1984,37 +2117,156 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
        }
        if (IsSpirvVertexShader() &&
            (host_vertex_shader_type == Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
@@ -2641,7 +2656,7 @@ index 1774f97..aee6bbe 100644
          }
          // Check if the index needs to be loaded from the index buffer.
          spv::Id load_vertex_index = builder_->createBinOp(
-@@ -2431,6 +2668,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
+@@ -2431,6 +2683,15 @@ void SpirvShaderTranslator::StartVertexOrTessEvalShaderInMain() {
          if_cp_indexed.makeEndIf();
        } else {
          store_register_component(0, 0, vertex_index_float);
@@ -2657,7 +2672,7 @@ index 1774f97..aee6bbe 100644
        }
      }
    }
-@@ -2633,6 +2879,46 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
+@@ -2633,6 +2894,46 @@ void SpirvShaderTranslator::CompleteVertexOrTessEvalShaderInMain() {
      builder_->createStore(point_size, output_point_size_);
    }
  
@@ -2704,7 +2719,7 @@ index 1774f97..aee6bbe 100644
    // Expand the point sprite.
    if (shader_modification.vertex.host_vertex_shader_type ==
        Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
-@@ -2874,16 +3160,27 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
+@@ -2874,16 +3175,27 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
        }
      }
  
@@ -2740,7 +2755,7 @@ index 1774f97..aee6bbe 100644
      }
    }
  
-@@ -3052,34 +3349,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
+@@ -3052,34 +3364,62 @@ void SpirvShaderTranslator::StartFragmentShaderInMain() {
        // failed the depth / stencil test, and there are no depth and stencil
        // values to conditionally write after running the shader to check if
        // samples don't additionally need to be discarded.
@@ -2828,6 +2843,50 @@ index 1774f97..aee6bbe 100644
        spv::Block& main_fsi_early_depth_stencil_execute_quad = builder_->makeNewBlock();
        main_fsi_early_depth_stencil_execute_quad_merge_ = &builder_->makeNewBlock();
        builder_->createSelectionMerge(main_fsi_early_depth_stencil_execute_quad_merge_,
+diff --git a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+index 9ce3bb4..442e902 100644
+--- a/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
++++ b/src/graphics/pipeline/shader/spirv_translator_fetch.cpp
+@@ -19,9 +19,12 @@
+ #include <fmt/format.h>
+ 
+ #include <rex/assert.h>
++#include <rex/cvar.h>
+ #include <rex/graphics/pipeline/shader/spirv_translator.h>
+ #include <rex/math.h>
+ 
++REXCVAR_DECLARE(bool, vulkan_tfetch_implicit_lod);
++
+ namespace rex::graphics {
+ 
+ void SpirvShaderTranslator::ProcessVertexFetchInstruction(
+@@ -1837,7 +1840,14 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+           sample_result_signed =
+               if_data_is_3d.createMergePhi(sample_result_signed_3d, sample_result_signed_stacked);
+         } else {
+-          if (use_computed_lod) {
++          // vulkan_tfetch_implicit_lod: the same LOD as a bias of an implicit
++          // LOD sample instead of scaled explicit gradients.
++          bool implicit_lod = use_computed_lod && is_pixel_shader() &&
++                              !instr.attributes.use_register_gradients &&
++                              REXCVAR_GET(vulkan_tfetch_implicit_lod);
++          if (implicit_lod) {
++            texture_parameters.bias = lod;
++          } else if (use_computed_lod) {
+             texture_parameters.gradX = gradients_h;
+             texture_parameters.gradY = gradients_v;
+           }
+@@ -1847,7 +1857,9 @@ void SpirvShaderTranslator::ProcessTextureFetchInstruction(
+           }
+           texture_parameters.coords =
+               builder_->createCompositeConstruct(type_float3_, id_vector_temp_);
+-          SampleTexture(texture_parameters, image_operands_mask, image_2d_array_or_cube_unsigned,
++          SampleTexture(texture_parameters,
++                        implicit_lod ? spv::ImageOperandsMaskNone : image_operands_mask,
++                        image_2d_array_or_cube_unsigned,
+                         image_2d_array_or_cube_signed, sampler, is_any_unsigned, is_any_signed,
+                         sample_result_unsigned, sample_result_signed);
+         }
 diff --git a/src/graphics/pipeline/shader/spirv_translator_rb.cpp b/src/graphics/pipeline/shader/spirv_translator_rb.cpp
 index 765c141..146b763 100644
 --- a/src/graphics/pipeline/shader/spirv_translator_rb.cpp

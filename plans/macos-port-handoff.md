@@ -199,6 +199,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
 | - | `vulkan_pass_log` | every 5 s, `[passes]` (one frame's render passes per submission) and `[pass areas]` lines, and Metal render encoders labeled `<submission>.<pass>` for `tools/mac_pass_costs.py` |
 | - | `draw_extent_log` | every 5 s, `[extent]` lines: draws whose estimated bottom is 1024 or more, by vertex shader, scissor and what limited the estimate (viewport, vertices, or why the CPU estimate gave up) |
+| - | `vulkan_tfetch_implicit_lod` | pixel shader fetches with a computed LOD sample with an implicit LOD and a bias instead of explicit gradients (on on macOS; restart) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -781,6 +782,17 @@ the same way as Xenia's ROV path.
      one 280x180 post-processing draw (`28DBE18F313350BF`) 0.23 ms; the
      other passes are under 0.1 ms each. Shading cost, not pass overhead,
      is what remains.
+  24. **Done (2026-10-16): texture fetches with implicit LOD**
+     (`vulkan_tfetch_implicit_lod`, on by default on macOS, restart;
+     `docs/macos_port.md`, "Texture fetches: implicit LOD instead of
+     explicit gradients"). Pixel shader fetches whose LOD the guest computes
+     sample with an implicit LOD plus the same bias instead of explicit
+     gradients. Same picture (sweeps in both modes); full-screen shadow mask
+     pass -18% fragment time, blur -8%, base pass -3 to -6%, GPU 70% -> ~66%
+     busy at the heavy view. The other per-fetch overhead (the unsigned and
+     signed samples behind uniform branches and the per-component sign
+     switches on system constants) is still there; specializing it per
+     pipeline would mean more pipelines.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

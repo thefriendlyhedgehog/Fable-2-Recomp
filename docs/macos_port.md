@@ -836,6 +836,30 @@ render target). What remains is shading: the base pass, the prepass, a
 full-screen 2-draw pass (0.44 ms) and one 280x180 post-processing draw
 (0.23 ms).
 
+### Texture fetches: implicit LOD instead of explicit gradients
+
+Every guest `tfetch` the translator emits samples with explicit gradients:
+coarse derivatives of the coordinates scaled by 2^LOD (the fetch constant's
+and the instruction's LOD bias), so the host computes the guest's LOD
+(`spirv_translator_fetch.cpp`). It also samples the unsigned and the signed
+view behind uniform branches and applies the per-component sign handling
+(`texture_swizzled_signs`) with switches on system constants: a 13-tap blur
+(`28DBE18F313350BF`) becomes ~2250 lines of Metal. Dumps for reading them:
+`out/capture/rex/shader_<hash>_*.vk_fbo.bin.frag` (`spirv-cross --msl`).
+
+`vulkan_tfetch_implicit_lod` (on by default on macOS, restart) samples 1D,
+2D and cube fetches whose LOD is computed with an implicit LOD and the same
+LOD as the bias (pixel shaders, no register gradients). Same LOD up to how
+the host computes its derivatives. Traces at the heavy view, two each
+(`out/profile/grad*.trace` vs. `imp*.trace`, `fable_2_254`-`257`): the
+full-screen shadow mask pass (`1B4B5AE12EF270CA`, `0F99810F072BF0FC`)
+445 / 448 -> 365 / 363 us of fragment time, the blur 237 / 231 -> 214 /
+214 us, the base pass 1009 / 1009 -> 981 / 944 us; GPU 70% / 70% -> 68% /
+65% busy (about 0.2-0.3 ms per frame). Sweeps in each mode
+(`out/lod_check_{grad,imp}`): shots differ between the modes no more than
+within one (1.4-1.9% of pixels; mean difference 1.8-3.3 vs. 1.6-3.1), and
+distant roof tiles and cobbles are equally sharp.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits
