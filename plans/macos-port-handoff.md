@@ -856,6 +856,42 @@ the same way as Xenia's ROV path.
      (`fable_2_302`-`305`) and alternating within one run (`fable_2_306`).
      The pass timer overstates small passes (in timed frames each one
      waits for the one before). Left on: less work, same picture.
+  30. **Done (2026-10-17): waits for several objects no longer spin**
+     (`src/core/threading_posix.cpp`; `docs/macos_port.md`, "CPU: busy
+     waits"). The polling wait for several objects slept
+     `min(remaining, 1 ms)` with the remaining time truncated to whole
+     milliseconds, and alertable waits pass it 1 ms slices: under 1 ms left
+     became `sleep_for(0)`, so every alertable wait for several objects
+     spun. The audio worker waits that way for its semaphores and used 79%
+     of a core (with audio muted). It now sleeps the real remaining time,
+     and the alertable slices round up (a timed wait ends up to 1 ms late; a
+     signal still ends it at once). At the trail at 30 fps: 2.34 -> 1.55
+     cores, the process's CPU energy 9.8 -> 5.9 W. Listen for audio
+     problems (the user's `fable_2.toml` mutes audio).
+  31. **Done (2026-10-17): the game's main loop sleeps while no step is
+     due** (`[perf] game_loop_sleep_us`, default 250, 0 = yield only;
+     `src/core/hotfunc/frame/ProcessGameFrame_82276C30.cpp`). The loop
+     yields and re-reads the timebase until the next simulation step is
+     due, which kept GameThread 90% busy (27% in the kernel, from the
+     yields). Sleeping 250 us after the yield: GameThread 14%, the process
+     0.82 cores and 3.1 W, still 30 fps, same picture (`out/cpu_check`),
+     same loading time.
+  32. **Done (2026-10-17): smaller command processor costs.**
+     `RegisterFile::GetRegisterInfo` (called on every register write to
+     decide on a debug message) is a table instead of a switch over the
+     register list (it was ~6% of the thread); IssueDraw checks for
+     memexport ranges before looking up the readback cvar by name (a mutex,
+     a string and a map lookup per draw). The frame statistics now log
+     `Command processor CPU: N ms/frame, M% of the time` (the thread's CPU
+     clock): ~7 ms per frame, 21%, at the trail. Note `vulkan_long_frame_log
+     = true` in the user's `fable_2.toml` makes every draw read the clock
+     ~10 times (~4% of the thread). Measure CPU with
+     `tools/mac_thread_cpu.c` (per thread, plus the process's energy and
+     instructions), not `sample` at its default 1 ms interval: that cut
+     the game's CPU use by more than half and showed waiting threads as
+     running. What is left (0.8 cores): command processor 22% (MoltenVK
+     encoding at submission about a quarter of it), 3D Engine 14%,
+     GameThread 14%, two XThreads ~7% each.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

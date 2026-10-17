@@ -194,6 +194,13 @@ hotfunc_yield_every = 1
 # busy for nothing. 0 = spin like the game does on the Xbox 360.
 # Default: 250
 frame_wait_sleep_us = 250
+
+# How long the game's main loop sleeps after its yield when no simulation
+# step is due yet, in microseconds. The game yields and re-reads the clock
+# until the next step; without the sleep that keeps a CPU core busy.
+# 0 = yield only, like the game does on the Xbox 360.
+# Default: 250
+game_loop_sleep_us = 250
 )TOML_EOF";
 
 std::string_view TypeName(toml::node_type t) {
@@ -339,6 +346,8 @@ bool Load(const std::filesystem::path& path) {
         values.hotfunc_yield_every));
     values.frame_wait_sleep_us = static_cast<int32_t>(Read<int64_t>(
         perf_table, "perf", "frame_wait_sleep_us", "integer", values.frame_wait_sleep_us));
+    values.game_loop_sleep_us = static_cast<int32_t>(Read<int64_t>(
+        perf_table, "perf", "game_loop_sleep_us", "integer", values.game_loop_sleep_us));
   }
 
   g_values = values;

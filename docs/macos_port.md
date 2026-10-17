@@ -973,6 +973,44 @@ switching it: on/off pairs as far apart as on/on, 1.3-2.0% of pixels, the
 snow). `vulkan_transfer_log` (off, hot reload) logs one frame's transfers
 every 5 s with the draw that caused each.
 
+### CPU: busy waits
+
+At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5
+W against 3.2 W for the GPU, from `powermetrics`), and almost half of that
+was waiting. Two busy waits:
+
+- **Waits for several objects** (`src/core/threading_posix.cpp`). Without a
+  native wait for several condition variables, `PosixConditionBase::
+  WaitMultiple` polls: lock each handle's mutex, check, sleep
+  `min(remaining, 1 ms)`. The remaining time was truncated to whole
+  milliseconds, and the alertable waits call it with 1 ms slices
+  (`ComputeAlertableWaitTimeout`, itself truncating): after the first check
+  less than 1 ms was left, the sleep was `sleep_for(0)`, and the wait spun
+  for its whole length, allocating a vector each round. The audio worker
+  waits for its client semaphores that way (alertable, 500 ms) and used 79%
+  of a core, all in user space, even with audio muted. It now sleeps the
+  real remaining time, and the alertable slices round up, so a timed
+  alertable wait ends up to 1 ms late (a signal still ends it at once).
+- **The game's main loop** (`ProcessGameFrame_82276C30`). It computes from
+  the timebase whether a simulation step is due; if not, it calls
+  `NtYieldExecution` and checks again. On the Xbox 360 the yield hands the
+  hardware thread to others; here it is a `sched_yield` loop that kept
+  GameThread 90% busy (27% in the kernel). The override sleeps
+  `[perf] game_loop_sleep_us` (250) after the yield.
+
+At the trail: 2.34 -> 1.55 -> 0.82 cores, the process's CPU energy 9.8 ->
+5.9 -> 3.1 W, still 30 fps. The frame limiter wait was the first of these
+(`[perf] frame_wait_sleep_us`).
+
+Measuring: `tools/mac_thread_cpu.c` reads each thread's CPU time and the
+process's energy, instruction and cycle counts from the kernel
+(`proc_pidinfo`, `proc_pid_rusage`; no root), over an interval. `sample` at
+its default 1 ms interval suspends the process so often that the game used
+less than half its normal CPU while sampled, and threads waiting for a core
+showed as running; with `sample <pid> 15 10` (10 ms) it agrees with the
+kernel's accounting. The frame statistics also log the command processor
+thread's CPU time per frame.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

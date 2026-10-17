@@ -99,6 +99,11 @@
 //   }
 #include "fable_2_pch.h"
 
+#include <chrono>
+#include <thread>
+
+#include "fable2_config.h"
+
 extern "C" void CallActivePlayerMethod_821A11E8(PPCContext& ctx, uint8_t* base);
 extern "C" void ConstructRefCounted_8222CF18(PPCContext& ctx, uint8_t* base);
 extern "C" void DispatchFrameCallback_821A6010(PPCContext& ctx, uint8_t* base);
@@ -1069,6 +1074,7 @@ extern "C" void ProcessGameFrame_82276C30(PPCContext& __restrict ctx, uint8_t* b
 	// beq cr6,0x8227722c  (setup+loop runs when !cr6.eq)
 	if (!ctx.cr6.eq) {
 	setup_frame(ctx, base);
+	const int32_t loop_sleep_us = fable2::config::Get().game_loop_sleep_us;
 	// ===== Main per-frame work loop: drain pending work, decrement the budget =====
 	do {
 	if (!frame_gate(ctx, base)) break;
@@ -1081,6 +1087,11 @@ extern "C" void ProcessGameFrame_82276C30(PPCContext& __restrict ctx, uint8_t* b
 	// bl 0x82cbd098
 	ctx.lr = 0x8227720C;
 	Yield_82CBD098(ctx, base);
+	// Not a guest statement: the guest only yields here, so waiting for the
+	// next step kept the core busy ([perf] game_loop_sleep_us).
+	if (loop_sleep_us > 0) {
+		std::this_thread::sleep_for(std::chrono::microseconds(loop_sleep_us));
+	}
 	}
 	check_loop_backedge(ctx, base);
 	} while (!ctx.cr6.eq);

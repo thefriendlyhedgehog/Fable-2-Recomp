@@ -117,6 +117,13 @@ struct Values {
   // deadline, which at the 30 fps cap is most of every frame. 0 = spin as
   // the guest does.
   int32_t frame_wait_sleep_us = 250;
+  // game_loop_sleep_us: how long the game's main loop
+  // (src/core/hotfunc/frame/ProcessGameFrame_82276C30.cpp) sleeps after its
+  // yield when no simulation step is due yet, in microseconds. The guest
+  // yields and re-reads the timebase until the next step, which kept the
+  // game thread's core busy (sched_yield and timebase reads). 0 = yield only,
+  // as the guest does.
+  int32_t game_loop_sleep_us = 250;
 };
 
 // Load the config from `path`.
