@@ -1124,6 +1124,28 @@ shared memory barrier a draw pushes after a resolve (`VulkanSharedMemory`
 compute write -> read), pushed for any draw after a compute write, even if
 the draw reads nothing the resolve wrote; the rest are texture loads.
 
+`vulkan_skip_draw_barriers_after_writes` (on by default on macOS, hot
+reload) skips that barrier when it isn't needed. `VulkanSharedMemory` now
+keeps the ranges written by compute shaders and transfers (resolves,
+uploads left in the command stream) since the last barrier that made all
+writes visible to draws (a whole-buffer barrier to a draw usage); a draw
+whose vertex fetch and index ranges are known and miss all of them, and
+which writes nothing itself, needs no barrier, and the pass goes on. The
+first draw reading one of the ranges gets the barrier as before (whole
+buffer, from the writer's stage), and the next resolve's barrier also waits
+for the draws in between (their stages are in its source mask, as for the
+disjoint draw barriers). Until the first such barrier after creation, or
+with over 256 ranges pending, every draw gets it. Draws reading unknown
+ranges (vertex fetches in the pixel shader) always do.
+
+At the trail: compute write -> read barriers 33 -> 25 per frame, passes
+~118 -> ~110, timed frames ~17.8 -> ~16.4 ms (`fable_2_372`), GPU power
+6.64 -> 6.46 W over four alternating pairs (`fable_2_375`). Same picture;
+in the flicker test (16 shots 250 ms apart, standing still) the shots
+differ from the first by 2.3-3.0% with it and 2.5-3.0% without it
+(`fable_2_373`, `fable_2_374`), rising steadily with the animation, no
+outliers.
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5

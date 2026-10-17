@@ -1415,7 +1415,7 @@ index 34f7033..02f068b 100644
  
    VkPipelineLayout resolve_fsi_clear_pipeline_layout_ = VK_NULL_HANDLE;
 diff --git a/include/rex/graphics/vulkan/shared_memory.h b/include/rex/graphics/vulkan/shared_memory.h
-index 104bdad..4e2a7c3 100644
+index 104bdad..050a885 100644
 --- a/include/rex/graphics/vulkan/shared_memory.h
 +++ b/include/rex/graphics/vulkan/shared_memory.h
 @@ -11,6 +11,7 @@
@@ -1524,7 +1524,7 @@ index 104bdad..4e2a7c3 100644
    void GetUsageMasks(Usage usage, VkPipelineStageFlags& stage_mask,
                       VkAccessFlags& access_mask) const;
  
-@@ -72,6 +145,83 @@ class VulkanSharedMemory : public SharedMemory {
+@@ -72,6 +145,90 @@ class VulkanSharedMemory : public SharedMemory {
  
    std::unique_ptr<ui::vulkan::VulkanUploadBufferPool> upload_buffer_pool_;
    std::vector<VkBufferCopy> upload_regions_;
@@ -1605,6 +1605,13 @@ index 104bdad..4e2a7c3 100644
 +  std::unordered_map<uint32_t, RacePage> race_pages_;
 +  uint64_t race_cpu_writes_ = 0;
 +  std::chrono::steady_clock::time_point race_last_log_;
++
++  // vulkan_skip_draw_barriers_after_writes: the ranges (start, end) written by
++  // compute shaders and transfers (resolves, uploads in the command stream)
++  // since the last barrier that made all writes visible to draws, if
++  // non_draw_pending_writes_known_ (none yet after creation).
++  std::vector<std::pair<uint32_t, uint32_t>> non_draw_pending_writes_;
++  bool non_draw_pending_writes_known_ = false;
  };
  
  }  // namespace rex::graphics::vulkan
@@ -12642,7 +12649,7 @@ index 0298f06..407bf7c 100644
  
  bool VulkanRenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump_row_length_used,
 diff --git a/src/graphics/vulkan/shared_memory.cpp b/src/graphics/vulkan/shared_memory.cpp
-index 6788214..f68b480 100644
+index 6788214..60dbca9 100644
 --- a/src/graphics/vulkan/shared_memory.cpp
 +++ b/src/graphics/vulkan/shared_memory.cpp
 @@ -11,10 +11,19 @@
@@ -12665,7 +12672,7 @@ index 6788214..f68b480 100644
  #include <rex/cvar.h>
  #include <rex/graphics/vulkan/command_processor.h>
  #include <rex/graphics/vulkan/deferred_command_buffer.h>
-@@ -26,9 +35,42 @@
+@@ -26,9 +35,56 @@
  REXCVAR_DEFINE_BOOL(vulkan_sparse_shared_memory, true, "GPU/Vulkan",
                      "Use sparse shared memory on Vulkan")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -12686,6 +12693,20 @@ index 6788214..f68b480 100644
 +                    "Insert no shared memory barrier between draws whose memory export and "
 +                    "vertex fetch ranges don't overlap (a barrier between draws ends the render "
 +                    "pass); false: a barrier after every memory export draw, as before");
++#if defined(__APPLE__)
++#define REX_VULKAN_SKIP_DRAW_BARRIERS_AFTER_WRITES_DEFAULT true
++#else
++#define REX_VULKAN_SKIP_DRAW_BARRIERS_AFTER_WRITES_DEFAULT false
++#endif
++REXCVAR_DEFINE_BOOL(vulkan_skip_draw_barriers_after_writes,
++                    REX_VULKAN_SKIP_DRAW_BARRIERS_AFTER_WRITES_DEFAULT, "GPU/Vulkan",
++                    "With vulkan_skip_disjoint_draw_barriers: after resolves and uploads in the "
++                    "command stream, insert a shared memory barrier only before a draw whose "
++                    "known vertex fetch and index ranges overlap what they wrote, instead of "
++                    "before the next draw whatever it reads (each such barrier ends the render "
++                    "pass). On by default on macOS.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++#undef REX_VULKAN_SKIP_DRAW_BARRIERS_AFTER_WRITES_DEFAULT
  
  namespace rex::graphics::vulkan {
  
@@ -12708,7 +12729,7 @@ index 6788214..f68b480 100644
  VulkanSharedMemory::VulkanSharedMemory(VulkanCommandProcessor& command_processor,
                                         memory::Memory& memory,
                                         VkPipelineStageFlags guest_shader_pipeline_stages)
-@@ -43,10 +85,35 @@ VulkanSharedMemory::~VulkanSharedMemory() {
+@@ -43,10 +99,35 @@ VulkanSharedMemory::~VulkanSharedMemory() {
  bool VulkanSharedMemory::Initialize() {
    InitializeCommon();
  
@@ -12744,7 +12765,7 @@ index 6788214..f68b480 100644
    const VkBufferCreateFlags sparse_flags =
        VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
  
-@@ -169,6 +236,101 @@ bool VulkanSharedMemory::Initialize() {
+@@ -169,6 +250,101 @@ bool VulkanSharedMemory::Initialize() {
    return true;
  }
  
@@ -12846,7 +12867,7 @@ index 6788214..f68b480 100644
  void VulkanSharedMemory::Shutdown(bool from_destructor) {
    upload_buffer_pool_.reset();
  
-@@ -181,6 +343,7 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
+@@ -181,6 +357,7 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
      dfn.vkFreeMemory(device, memory, nullptr);
    }
    buffer_memory_.clear();
@@ -12854,7 +12875,7 @@ index 6788214..f68b480 100644
  
    // If calling from the destructor, the SharedMemory destructor will call
    // ShutdownCommon.
-@@ -191,23 +354,443 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
+@@ -191,23 +368,458 @@ void VulkanSharedMemory::Shutdown(bool from_destructor) {
  
  void VulkanSharedMemory::CompletedSubmissionUpdated() {
    upload_buffer_pool_->Reclaim(command_processor_.GetCompletedSubmission());
@@ -13220,8 +13241,20 @@ index 6788214..f68b480 100644
 +  if (draw) {
 +    // Between draws (kRead and kGuestDrawReadWrite, no other write pending),
 +    // only a conflict with the accesses since the last barrier needs one.
-+    bool conflict = (last_usage_ != Usage::kRead && last_usage_ != Usage::kGuestDrawReadWrite) ||
-+                    last_written_range_.second != 0;
++    bool after_non_draw_write =
++        last_usage_ != Usage::kRead && last_usage_ != Usage::kGuestDrawReadWrite;
++    bool conflict = after_non_draw_write || last_written_range_.second != 0;
++    if (after_non_draw_write && REXCVAR_GET(vulkan_skip_draw_barriers_after_writes) &&
++        non_draw_pending_writes_known_ && draw->reads_known && !written_range.second) {
++      // After resolves and uploads: only a draw reading what they wrote needs
++      // the barrier (the draws since the last barrier only read, they wrote
++      // nothing).
++      conflict = false;
++      for (size_t i = 0; !conflict && i < draw->count; ++i) {
++        conflict = RangesOverlap(non_draw_pending_writes_, draw->ranges[i].first,
++                                 draw->ranges[i].first + draw->ranges[i].second);
++      }
++    }
 +    if (!conflict && !draw_pending_writes_.empty()) {
 +      conflict = !draw->reads_known ||
 +                 RangesOverlap(draw_pending_writes_, written_range.first, written_end);
@@ -13258,6 +13291,9 @@ index 6788214..f68b480 100644
 +      draw_pending_writes_.clear();
 +      draw_pending_reads_.clear();
 +      untracked_reads_ = false;
++      // Everything written so far is visible to draws.
++      non_draw_pending_writes_.clear();
++      non_draw_pending_writes_known_ = true;
 +    } else {
 +      ++draw_barriers_skipped_;
 +      if (written_range.second) {
@@ -13301,13 +13337,31 @@ index 6788214..f68b480 100644
        // Committing the previous write, while not changing the access mask
        // (passing false as whether to skip the barrier if no masks are changed
        // for this reason).
-@@ -223,8 +806,14 @@ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_
+@@ -223,8 +835,32 @@ void VulkanSharedMemory::Use(Usage usage, std::pair<uint32_t, uint32_t> written_
      command_processor_.PushBufferMemoryBarrier(
          buffer_, offset, size, src_stage_mask, dst_stage_mask, src_access_mask, dst_access_mask,
          VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, false);
 +    draw_pending_writes_.clear();
 +    draw_pending_reads_.clear();
 +    untracked_reads_ = false;
++    if (size == VK_WHOLE_SIZE &&
++        (usage == Usage::kRead || usage == Usage::kGuestDrawReadWrite)) {
++      // Everything written so far is visible to draws.
++      non_draw_pending_writes_.clear();
++      non_draw_pending_writes_known_ = true;
++    }
++  }
++  if (written_range.second &&
++      (usage == Usage::kComputeWrite || usage == Usage::kTransferDestination)) {
++    if (non_draw_pending_writes_.size() >= 256) {
++      // Too many to check for each draw: barriers again until the next one
++      // making everything visible.
++      non_draw_pending_writes_.clear();
++      non_draw_pending_writes_known_ = false;
++    } else if (non_draw_pending_writes_known_) {
++      non_draw_pending_writes_.emplace_back(written_range.first,
++                                            written_range.first + written_range.second);
++    }
    }
    last_written_range_ = written_range;
 +  // Reads whose ranges aren't known (any non-tracked use) may conflict with
@@ -13316,7 +13370,7 @@ index 6788214..f68b480 100644
  }
  
  bool VulkanSharedMemory::AllocateSparseHostGpuMemoryRange(uint32_t offset_allocations,
-@@ -273,15 +862,49 @@ bool VulkanSharedMemory::UploadRanges(
+@@ -273,15 +909,49 @@ bool VulkanSharedMemory::UploadRanges(
    if (upload_page_ranges.empty()) {
      return true;
    }

@@ -207,6 +207,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `clear_quad_transfer_cutout` | a draw that overwrites a rectangle of its render target outright (clear quad: rectangle list, depth ALWAYS with write and stencil REPLACE, or color mask F without blending) cuts that rectangle out of the transfers it causes (on on macOS) |
 | - | `clear_quad_in_place` | with the cutout: a clear quad with one value whose tiles a same-format render target of another MSAA mode owns clears that target instead, and the draw is skipped (on on macOS); `vulkan_transfer_log` shows `in-place clear` lines |
 | - | `vulkan_transfers_in_draw_pass` | host render targets: a draw's ownership transfers run in the draw's own render pass, which the draw continues, instead of a pass per destination (on on macOS); `vulkan_transfer_log` shows `not in the draw's render pass` lines with the reason |
+| - | `vulkan_skip_draw_barriers_after_writes` | with `vulkan_skip_disjoint_draw_barriers`: after resolves and in-stream uploads, a shared memory barrier only before a draw whose known vertex and index ranges overlap what they wrote (on on macOS) |
 | - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
@@ -954,6 +955,21 @@ the same way as Xenia's ROV path.
      (compute write -> read, `VulkanSharedMemory::UseImpl`), even when the
      draw reads nothing the resolve wrote; skipping it then would let the
      passes holding only transfers continue into the draw.
+  37. **Done (2026-10-17): no shared memory barrier before draws not reading
+     what a resolve wrote** (`vulkan_skip_draw_barriers_after_writes`, on by
+     default on macOS, hot reload; `docs/macos_port.md`, end of
+     "Transfers: in the draw's render pass"). `VulkanSharedMemory` keeps the
+     ranges written by compute and transfers (resolves, uploads in the
+     command stream) since the last barrier making everything visible to
+     draws; a draw whose known vertex and index ranges miss them, and which
+     writes nothing, skips the barrier. At the trail: compute write -> read
+     barriers 33 -> 25 per frame, passes ~118 -> ~110, timed frames ~17.8
+     -> ~16.4 ms (`fable_2_372`), GPU power 6.64 -> 6.46 W over four
+     alternating pairs (`fable_2_375`). Same picture; flicker test (16
+     shots 250 ms apart) 2.3-3.0% vs 2.5-3.0% with it off (`fable_2_373`,
+     `fable_2_374`), animation only. Next on the GPU: the per-resolve fixed
+     cost (~35 resolves per frame, 70-150 us each), the reloads of resolved
+     textures (~1 ms).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
