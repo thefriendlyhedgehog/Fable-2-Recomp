@@ -826,7 +826,15 @@ after the camera turn): **86% vs. 67% busy**, render encoder time per
 command buffer 14.4 vs. 6.6 ms (7.2 ms with the estimate alone), at a higher
 frame rate. Per pass: the base pass 1.04 ms vertex / 0.98 ms fragment (from
 1.67 / 1.85), the prepass 0.58 ms vertex (from 0.95), single-draw transfer
-passes 1.7 ms of fragment time per frame in total (from 5.4).
+passes 1.3-1.7 ms of fragment time per frame in total (from 5.4).
+
+With the draw scissor clamp only the 1024-row shadow maps still begin
+taller than 1024 rows (`draw_extent_log` lists the draws whose estimate is
+1024 or more and what limited it; the `[passes]` lines show each pass's
+largest estimate and its draws without one, the groups of 24 that use no
+render target). What remains is shading: the base pass, the prepass, a
+full-screen 2-draw pass (0.44 ms) and one 280x180 post-processing draw
+(0.23 ms).
 
 ### Frame pacing: guest clock and the drawable wait
 

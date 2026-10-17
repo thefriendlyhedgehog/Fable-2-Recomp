@@ -198,6 +198,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
 | - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
 | - | `vulkan_pass_log` | every 5 s, `[passes]` (one frame's render passes per submission) and `[pass areas]` lines, and Metal render encoders labeled `<submission>.<pass>` for `tools/mac_pass_costs.py` |
+| - | `draw_extent_log` | every 5 s, `[extent]` lines: draws whose estimated bottom is 1024 or more, by vertex shader, scissor and what limited the estimate (viewport, vertices, or why the CPU estimate gave up) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -764,13 +765,22 @@ the same way as Xenia's ROV path.
      (`fable_2_239`-`244`), now at the 60 fps cap like the trail; GPU **86%
      -> 67% busy** at the heavy view (render encoder time per command buffer
      14.4 -> 6.6 ms). Since the fbo switch: heavy view 26.7 -> 16.6 ms
-     (capped). What is left per pass (`out/profile/passes_vs.trace`): the
-     base pass ~2 ms, the prepass ~0.7 ms, the 2-draw 1120x720 pass `1.8`
-     (shaders `1B4B5AE12EF270CA`, `0F99810F072BF0FC`) 0.45 ms of fragment
-     time, and still ~17 full-height single-draw passes per frame (the
-     clear-like shader `A4A965C189287B99` and depth-only draws at 320x8192,
-     160x4096, 1040x2528, 560x4688) whose height estimate stays at the whole
-     target: next to look at.
+     (capped). The ~17 full-height single-draw passes per frame seen in
+     `out/profile/passes_vs.trace` (clear-like shader `A4A965C189287B99`
+     and depth-only draws at 320x8192, 160x4096, 560x4688) were from before
+     the draw scissor clamp; with it (checked 2026-10-16, `fable_2_252`,
+     `253`, `draw_extent_log` and the per-pass height estimates now in the
+     `[passes]` lines) only the 1024-row shadow maps begin taller than
+     1024 rows, and transfers with at most one draw total 1.3 ms of fragment
+     time per frame (~30 us each). The draws without an estimate are the
+     groups of 24 that use no render target (16x16 scissors). What is left
+     per pass (`out/profile/passes_now.trace`, GPU 70% busy at the 60 fps
+     cap): the base pass ~1.0 ms vertex + 1.0 ms fragment, the prepass ~0.7
+     ms, the 2-draw full-screen pass `1.8` (1120x720, shaders
+     `1B4B5AE12EF270CA`, `0F99810F072BF0FC`) 0.44 ms of fragment time, and
+     one 280x180 post-processing draw (`28DBE18F313350BF`) 0.23 ms; the
+     other passes are under 0.1 ms each. Shading cost, not pass overhead,
+     is what remains.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
