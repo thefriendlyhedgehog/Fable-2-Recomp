@@ -1346,6 +1346,31 @@ the same way as Xenia's ROV path.
        framebuffer fetch (would remove the compute encoder and the store and
        reload of the render target per resolve; depends on MoltenVK input
        attachments). Measure again with the GPU free first.
+     - **Measured again with the GPU free** (2026-10-18, `fable_2_503`,
+       trail, 60 fps cap, 2315 draws; four alternating rounds of three
+       windows; other processes 2-8% of the GPU, WindowServer 13% in the
+       last round). The windows within a state agree within 0.15 ms:
+
+       | State | GPU per frame | Restarts | CP CPU |
+       | --- | --- | --- | --- |
+       | normal | 7.26-7.49 ms (~7.35) | 28-29 | 5.15-5.3 ms |
+       | copy dispatches left out (`=1`) | 6.19-6.45 ms (~6.3) | 27-28 | 4.95-5.2 ms |
+       | the dump dispatches left out too (`=2`) | 6.01-6.14 ms (~6.07) | 28-29 | 4.9 ms |
+       | resolve copies skipped | 5.89-6.09 ms (~6.0) | 17-18 | 4.75-5.0 ms |
+
+       - **This corrects the noisy numbers above:** the ~23 resolves cost
+         ~1.35 ms per frame, almost all of it their dispatches: the copy
+         dispatches ~1.05 ms (~45 us each), the render target dumps to the
+         EDRAM buffer (for the resolves from EDRAM) ~0.25 ms. The pass ends
+         and barriers they cause cost only ~0.07 ms per frame (11 fewer
+         restarts).
+       - Each copy is small (most are 280x184 or 560x360 post-processing
+         steps), so the ~45 us is mostly the GPU waiting at each draw ->
+         dispatch -> draw dependency rather than bandwidth. The per-pass
+         timer would tell size from wait.
+       - The same alternation at the autotest's default 5 fps cap
+         (`fable_2_502`, clocks low): 10.6 / 9.35 / 8.9 / 8.1 ms. Run
+         `AUTOTEST_FRAME_MS=0` for GPU numbers.
      - **The in-pass resolve doesn't work on stock MoltenVK 1.4.1** (checked
        2026-10-18 in its source, `thirdparty/rexglue-sdk-src/thirdparty/moltenvk`;
        the game runs the prebuilt 1.4.1). No code was written:
@@ -1368,8 +1393,9 @@ the same way as Xenia's ROV path.
          (`build_sdk_mac.sh -mvk-private` already stages one): framebuffer
          fetch for input attachments that are color attachments of the
          subpass, and no restart for those barriers. Expected gain, from the
-         measurement above: at most the dispatches' ~1.1 ms less the
-         fragment work, so roughly 0.3-0.6 ms per frame.
+         measurement above: at most the copy dispatches' ~1.05 ms less the
+         fragment work. The pass ends themselves are cheap (~0.07 ms), so
+         the gain depends on how much of each dispatch is waiting.
   51. **Done (2026-10-18): the tiny passes in the square, and uploads
      compared with a cached copy** (`vulkan_hoist_uploads_of_read_pages_cache`,
      on, hot reload; `docs/macos_port.md`, end of "Uploads of pages read

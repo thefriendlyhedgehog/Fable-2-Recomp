@@ -1333,6 +1333,17 @@ render encoder in place of the compute one. A gain needs a patched MoltenVK
 no restart for those barriers), built from source and staged as
 `build_sdk_mac.sh -mvk-private` does.
 
+What resolves cost, measured with the GPU free (trail, 60 fps cap,
+`debug_skip_resolve_dispatches`, four alternating rounds, `fable_2_503`):
+
+- ~1.35 ms of the frame's 7.35 ms of GPU time;
+- the copy dispatches ~1.05 ms (about 23 per frame, ~45 us each);
+- the render target dumps for resolves from EDRAM ~0.25 ms;
+- the pass ends and barriers only ~0.07 ms.
+
+An earlier run that said ~1 ms for the pass ends had another app using a
+quarter to half of the GPU.
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5
