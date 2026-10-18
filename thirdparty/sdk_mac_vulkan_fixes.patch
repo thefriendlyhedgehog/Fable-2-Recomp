@@ -523,10 +523,10 @@ index dce3dbf..eb57f35 100644
    spv::Id output_per_vertex_;
  
 diff --git a/include/rex/graphics/pipeline/texture/cache.h b/include/rex/graphics/pipeline/texture/cache.h
-index d26cd4f..08d8ede 100644
+index d26cd4f..7cf66be 100644
 --- a/include/rex/graphics/pipeline/texture/cache.h
 +++ b/include/rex/graphics/pipeline/texture/cache.h
-@@ -226,7 +226,13 @@ class TextureCache {
+@@ -226,7 +226,16 @@ class TextureCache {
      bool mips_outdated(const std::unique_lock<std::recursive_mutex>& global_lock) const {
        return mips_outdated_;
      }
@@ -538,10 +538,13 @@ index d26cd4f..08d8ede 100644
 +    // texture, vulkan_resolve_into_texture), the same way.
 +    bool MakePartUpToDateAndWatch(const std::unique_lock<std::recursive_mutex>& global_lock,
 +                                  bool mips);
++    // For TakeTextureOutOfCache: no longer in the least recently used list
++    // (MarkAsUsed must not be called afterwards).
++    void RemoveFromUsageList();
  
      void WatchCallback(const std::unique_lock<std::recursive_mutex>& global_lock, bool is_mip);
  
-@@ -238,6 +244,19 @@ class TextureCache {
+@@ -238,6 +247,19 @@ class TextureCache {
  
      void LogAction(const char* action) const;
  
@@ -561,7 +564,7 @@ index d26cd4f..08d8ede 100644
     protected:
      // If track_usage is false, the texture won't be added to the LRU list.
      explicit Texture(TextureCache& texture_cache, const TextureKey& key, bool track_usage = true);
-@@ -273,6 +292,8 @@ class TextureCache {
+@@ -273,6 +295,8 @@ class TextureCache {
      // Watch handles for the memory ranges.
      SharedMemory::WatchHandle base_watch_handle_ = nullptr;
      SharedMemory::WatchHandle mips_watch_handle_ = nullptr;
@@ -570,7 +573,21 @@ index d26cd4f..08d8ede 100644
    };
  
    // Rules of data access in load shaders:
-@@ -619,6 +640,30 @@ class TextureCache {
+@@ -539,6 +563,13 @@ class TextureCache {
+   // there was an error.
+   void ResetTextureBindings(bool from_destructor = false);
+ 
++  // vulkan_resolve_into_texture: the keys of the textures with the base page,
++  // and taking a texture out of the cache (the map and the usage list, with
++  // the bindings reset) to destroy it once the GPU is done with it, so the
++  // next request creates it again.
++  std::vector<TextureKey> GetTextureKeysAtBasePage(uint32_t base_page) const;
++  std::unique_ptr<Texture> TakeTextureOutOfCache(const TextureKey& key);
++
+   const TextureBinding* GetValidTextureBinding(uint32_t fetch_constant_index) const {
+     const TextureBinding& binding = texture_bindings_[fetch_constant_index];
+     return binding.key.is_valid ? &binding : nullptr;
+@@ -619,6 +650,30 @@ class TextureCache {
    // Bit vector with bits reset on fetch constant writes to avoid parsing fetch
    // constants again and again.
    uint32_t texture_bindings_in_sync_ = 0;
@@ -1727,10 +1744,18 @@ index 104bdad..050a885 100644
  
  }  // namespace rex::graphics::vulkan
 diff --git a/include/rex/graphics/vulkan/texture_cache.h b/include/rex/graphics/vulkan/texture_cache.h
-index 04856ee..f5e2976 100644
+index 04856ee..29a6379 100644
 --- a/include/rex/graphics/vulkan/texture_cache.h
 +++ b/include/rex/graphics/vulkan/texture_cache.h
-@@ -193,6 +193,8 @@ class VulkanTextureCache final : public TextureCache {
+@@ -13,6 +13,7 @@
+ #include <array>
+ #include <memory>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <utility>
+ #include <vector>
+ 
+@@ -193,6 +194,8 @@ class VulkanTextureCache final : public TextureCache {
        kTransferDestination,
        kGuestShaderSampled,
        kSwapSampled,
@@ -1739,7 +1764,7 @@ index 04856ee..f5e2976 100644
      };
  
      // Takes ownership of the image and its memory.
-@@ -269,6 +271,27 @@ class VulkanTextureCache final : public TextureCache {
+@@ -269,6 +272,27 @@ class VulkanTextureCache final : public TextureCache {
      std::unique_ptr<VulkanTexture> texture_3d_as_2d_;
      VkImageView image_view_3d_as_2d_unsigned_ = VK_NULL_HANDLE;
      VkImageView image_view_3d_as_2d_signed_ = VK_NULL_HANDLE;
@@ -1767,7 +1792,7 @@ index 04856ee..f5e2976 100644
    };
  
    struct VulkanTextureBinding {
-@@ -389,6 +412,71 @@ class VulkanTextureCache final : public TextureCache {
+@@ -389,6 +413,85 @@ class VulkanTextureCache final : public TextureCache {
    std::vector<uint64_t> scaled_resolve_sparse_allocated_;
    bool scaled_resolve_last_usage_write_ = false;
    std::pair<uint64_t, uint64_t> scaled_resolve_last_written_range_{0, 0};
@@ -1836,6 +1861,20 @@ index 04856ee..f5e2976 100644
 +  // PrepareResolveIntoTexture.
 +  std::unordered_multimap<uint32_t, VulkanTexture*> storage_textures_by_base_page_;
 +  uint32_t resolve_into_texture_count_ = 0;
++
++ public:
++  void CompletedSubmissionUpdated(uint64_t completed_submission_index) override;
++
++ private:
++  // The storage format the texture would get on GPU-written memory, or
++  // VK_FORMAT_UNDEFINED.
++  VkFormat GetPossibleStorageFormat(const TextureKey& key) const;
++  // vulkan_resolve_into_texture_recreate: takes the textures at the base page
++  // without a storage image out of the cache (once per page), keeping them
++  // until the GPU is done with them.
++  void RetireTexturesForStorageAt(uint32_t base_page);
++  std::vector<std::unique_ptr<Texture>> retired_textures_;
++  std::unordered_set<uint32_t> storage_upgrade_checked_pages_;
  };
  
  }  // namespace rex::graphics::vulkan
@@ -3944,7 +3983,7 @@ index 765c141..146b763 100644
                                 builder_->makeUintConstant(kSysFlag_MsaaSamples_Shift),
                                 builder_->makeUintConstant(2));
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..a6b5e6b 100644
+index 76f5600..def5c9a 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
 @@ -23,9 +23,29 @@
@@ -3977,7 +4016,39 @@ index 76f5600..a6b5e6b 100644
  REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
                       "Texture cache memory limit for render-to-texture (MB)")
      .range(1, 256)
-@@ -316,6 +336,93 @@ void TextureCache::BeginFrame() {
+@@ -305,6 +325,31 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
+   }
+ }
+ 
++std::vector<TextureCache::TextureKey> TextureCache::GetTextureKeysAtBasePage(
++    uint32_t base_page) const {
++  std::vector<TextureKey> keys;
++  for (const auto& [key, texture] : textures_) {
++    if (key.base_page == base_page) {
++      keys.push_back(key);
++    }
++  }
++  return keys;
++}
++
++std::unique_ptr<TextureCache::Texture> TextureCache::TakeTextureOutOfCache(
++    const TextureKey& key) {
++  auto found_texture_it = textures_.find(key);
++  if (found_texture_it == textures_.end()) {
++    return nullptr;
++  }
++  std::unique_ptr<Texture> texture = std::move(found_texture_it->second);
++  textures_.erase(found_texture_it);
++  texture->RemoveFromUsageList();
++  ResetTextureBindings();
++  COUNT_profile_set("gpu/texture_cache/textures", textures_.size());
++  return texture;
++}
++
+ void TextureCache::BeginSubmission(uint64_t new_submission_index) {
+   assert_true(new_submission_index > current_submission_index_);
+   current_submission_index_ = new_submission_index;
+@@ -316,6 +361,93 @@ void TextureCache::BeginFrame() {
    // sure bindings are reset so a new attempt will surely be made if the texture
    // is requested again.
    ResetTextureBindings();
@@ -4071,7 +4142,7 @@ index 76f5600..a6b5e6b 100644
  }
  
  void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
-@@ -435,8 +542,56 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+@@ -435,8 +567,56 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
      }
    }
  
@@ -4128,7 +4199,7 @@ index 76f5600..a6b5e6b 100644
      return false;
    }
  
-@@ -444,8 +599,15 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+@@ -444,8 +624,15 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
    // resolves as well to detect when the CPU wants to reuse the memory for a
    // regular texture or a vertex buffer, and thus the scaled resolve version is
    // not up to date anymore.
@@ -4145,7 +4216,7 @@ index 76f5600..a6b5e6b 100644
  
    return true;
  }
-@@ -573,6 +735,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -573,6 +760,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
      for (const PendingSharedMemoryRange& pending_range : pending_shared_memory_ranges) {
        pending_shared_memory_range_pairs.emplace_back(pending_range.start, pending_range.length);
      }
@@ -4153,7 +4224,7 @@ index 76f5600..a6b5e6b 100644
      batched_shared_memory_request_succeeded = shared_memory().RequestRanges(
          pending_shared_memory_range_pairs.data(), pending_shared_memory_range_pairs.size());
    }
-@@ -636,6 +799,19 @@ void TextureCache::Texture::LogAction(const char* action) const {
+@@ -636,6 +824,19 @@ void TextureCache::Texture::LogAction(const char* action) const {
  // not be destroyed immediately after creation if dropping of old textures is
  // performed somehow. The list is maintained by the Texture, not the
  // TextureCache itself (unlike the `textures_` container).
@@ -4173,7 +4244,7 @@ index 76f5600..a6b5e6b 100644
  TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& key, bool track_usage)
      : texture_cache_(texture_cache),
        key_(key),
-@@ -663,6 +839,12 @@ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& ke
+@@ -663,6 +864,12 @@ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& ke
  }
  
  TextureCache::Texture::~Texture() {
@@ -4186,7 +4257,7 @@ index 76f5600..a6b5e6b 100644
    if (mips_watch_handle_) {
      texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
    }
-@@ -686,9 +868,22 @@ TextureCache::Texture::~Texture() {
+@@ -686,9 +893,22 @@ TextureCache::Texture::~Texture() {
    texture_cache_.UpdateTexturesTotalHostMemoryUsage(0, host_memory_usage_);
  }
  
@@ -4210,7 +4281,7 @@ index 76f5600..a6b5e6b 100644
    if (base_outdated_) {
      assert_not_zero(GetGuestBaseSize());
      base_outdated_ = false;
-@@ -703,6 +898,40 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
+@@ -703,6 +923,59 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
          key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
      outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
    }
@@ -4248,10 +4319,29 @@ index 76f5600..a6b5e6b 100644
 +      key().base_page << 12, GetGuestBaseSize(), TextureCache::WatchCallback, this, nullptr, 0);
 +  outdated_mask_.fetch_and(~kOutdatedBitBase, std::memory_order_release);
 +  return true;
++}
++
++void TextureCache::Texture::RemoveFromUsageList() {
++  if (!in_usage_list_) {
++    return;
++  }
++  if (used_previous_) {
++    used_previous_->used_next_ = used_next_;
++  } else {
++    texture_cache_.texture_used_first_ = used_next_;
++  }
++  if (used_next_) {
++    used_next_->used_previous_ = used_previous_;
++  } else {
++    texture_cache_.texture_used_last_ = used_previous_;
++  }
++  in_usage_list_ = false;
++  used_previous_ = nullptr;
++  used_next_ = nullptr;
  }
  
  void TextureCache::Texture::MarkAsUsed() {
-@@ -753,6 +982,11 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
+@@ -753,6 +1026,11 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
    Texture& texture = *static_cast<Texture*>(context);
    texture.WatchCallback(global_lock, argument != 0);
    texture.texture_cache().texture_became_outdated_.store(true, std::memory_order_release);
@@ -4263,7 +4353,7 @@ index 76f5600..a6b5e6b 100644
  }
  
  void TextureCache::DestroyAllTextures(bool from_destructor) {
-@@ -892,6 +1126,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
+@@ -892,6 +1170,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
    for (size_t i = 0; i < pending_range_count; ++i) {
      pending_range_pairs[i] = std::make_pair(pending_ranges[i].start, pending_ranges[i].length);
    }
@@ -28219,10 +28309,10 @@ index 6788214..60dbca9 100644
    bool successful = true;
    upload_regions_.clear();
 diff --git a/src/graphics/vulkan/texture_cache.cpp b/src/graphics/vulkan/texture_cache.cpp
-index ecbd940..679ab15 100644
+index ecbd940..487a4a9 100644
 --- a/src/graphics/vulkan/texture_cache.cpp
 +++ b/src/graphics/vulkan/texture_cache.cpp
-@@ -34,6 +34,38 @@
+@@ -34,6 +34,47 @@
  #include <rex/ui/vulkan/util.h>
  
  REXCVAR_DEFINE_BOOL(non_seamless_cube_map, false, "GPU", "Use non-seamless cube map sampling");
@@ -28248,6 +28338,15 @@ index ecbd940..679ab15 100644
 +                    "texture is not reloaded. On by default on macOS.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +#undef REX_VULKAN_RESOLVE_INTO_TEXTURE_DEFAULT
++REXCVAR_DEFINE_INT32(debug_resolve_into_texture_exclude, 0, "GPU/Vulkan",
++                     "Debug: vulkan_resolve_into_texture leaves out the resolves to this "
++                     "guest address (the texture is reloaded as before), to measure one.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++REXCVAR_DEFINE_BOOL(vulkan_resolve_into_texture_recreate, true, "GPU/Vulkan",
++                    "With vulkan_resolve_into_texture: a texture at a resolve destination "
++                    "that was created without a storage image (before its memory was written "
++                    "by the GPU) is created again with one, so the resolves write it too.")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
 +REXCVAR_DECLARE(bool, texture_load_log);
 +REXCVAR_DEFINE_BOOL(vulkan_debug_base_mip_only, false, "GPU/Vulkan",
 +                    "Debug: sample only the base mip level of every texture, to check whether "
@@ -28261,7 +28360,7 @@ index ecbd940..679ab15 100644
  
  namespace rex::graphics::vulkan {
  
-@@ -49,6 +81,12 @@ namespace shaders {
+@@ -49,6 +90,12 @@ namespace shaders {
  #include "../shaders/vulkan_spirv/texture_load_64bpb_scaled_cs.h"
  #include "../shaders/vulkan_spirv/texture_load_8bpb_cs.h"
  #include "../shaders/vulkan_spirv/texture_load_8bpb_scaled_cs.h"
@@ -28274,7 +28373,7 @@ index ecbd940..679ab15 100644
  #include "../shaders/vulkan_spirv/texture_load_bgrg8_rgb8_cs.h"
  #include "../shaders/vulkan_spirv/texture_load_ctx1_cs.h"
  #include "../shaders/vulkan_spirv/texture_load_depth_float_cs.h"
-@@ -99,6 +137,29 @@ namespace shaders {
+@@ -99,6 +146,29 @@ namespace shaders {
  
  namespace {
  
@@ -28304,7 +28403,7 @@ index ecbd940..679ab15 100644
  // Keep invalid fetch constant texture reads aligned with D3D12 null SRV
  // descriptors, which force all sampled channels to 0.
  constexpr VkFormat kInvalidTextureFetchFallbackFormat = VK_FORMAT_R8G8B8A8_UNORM;
-@@ -481,11 +542,28 @@ VulkanTextureCache::~VulkanTextureCache() {
+@@ -481,11 +551,29 @@ VulkanTextureCache::~VulkanTextureCache() {
    if (load_pipeline_layout_ != VK_NULL_HANDLE) {
      dfn.vkDestroyPipelineLayout(device, load_pipeline_layout_, nullptr);
    }
@@ -28319,6 +28418,7 @@ index ecbd940..679ab15 100644
  
    // Textures memory is allocated using the Vulkan Memory Allocator, destroy all
    // textures before destroying VMA.
++  retired_textures_.clear();
    DestroyAllTextures(true);
  
 +  // After the textures, which return their storage image descriptors.
@@ -28333,7 +28433,7 @@ index ecbd940..679ab15 100644
    if (vma_allocator_ != VK_NULL_HANDLE) {
      vmaDestroyAllocator(vma_allocator_);
    }
-@@ -596,6 +674,7 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -596,6 +684,7 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
      if (binding_texture != nullptr) {
        // Will be referenced by the command buffer, so mark as used.
        binding_texture->MarkAsUsed();
@@ -28341,7 +28441,7 @@ index ecbd940..679ab15 100644
        VulkanTexture::Usage old_usage =
            binding_texture->SetUsage(VulkanTexture::Usage::kGuestShaderSampled);
        if (old_usage != VulkanTexture::Usage::kGuestShaderSampled) {
-@@ -612,6 +691,7 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -612,6 +701,7 @@ void VulkanTextureCache::RequestTextures(uint32_t used_texture_mask) {
      VulkanTexture* binding_texture_signed = static_cast<VulkanTexture*>(binding->texture_signed);
      if (binding_texture_signed != nullptr) {
        binding_texture_signed->MarkAsUsed();
@@ -28349,7 +28449,7 @@ index ecbd940..679ab15 100644
        VulkanTexture::Usage old_usage =
            binding_texture_signed->SetUsage(VulkanTexture::Usage::kGuestShaderSampled);
        if (old_usage != VulkanTexture::Usage::kGuestShaderSampled) {
-@@ -735,11 +815,18 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
+@@ -735,11 +825,18 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
    bool min_mag_linear = parameters.mag_linear && parameters.min_linear;
    bool mip_filter_bilinear_or_trilinear =
        mip_filter == xenos::TextureFilter::kPoint || mip_filter == xenos::TextureFilter::kLinear;
@@ -28369,7 +28469,7 @@ index ecbd940..679ab15 100644
    bool has_mips = mip_max_level > mip_min_level;
    int32_t anisotropic_override = REXCVAR_GET(anisotropic_override);
    if (anisotropic_override > -1 && anisotropic_override < 6 && has_mips &&
-@@ -1016,6 +1103,7 @@ VkImageView VulkanTextureCache::RequestSwapTexture(uint32_t& width_scaled_out,
+@@ -1016,6 +1113,7 @@ VkImageView VulkanTextureCache::RequestSwapTexture(uint32_t& width_scaled_out,
      return VK_NULL_HANDLE;
    }
    texture->MarkAsUsed();
@@ -28377,7 +28477,73 @@ index ecbd940..679ab15 100644
    VulkanTexture::Usage old_usage = texture->SetUsage(VulkanTexture::Usage::kSwapSampled);
    if (old_usage != VulkanTexture::Usage::kSwapSampled) {
      VkPipelineStageFlags src_stage_mask, dst_stage_mask;
-@@ -1149,6 +1237,27 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+@@ -1114,6 +1212,65 @@ uint32_t VulkanTextureCache::GetMaxHostTextureDepthOrArraySize(
+   }
+ }
+ 
++VkFormat VulkanTextureCache::GetPossibleStorageFormat(const TextureKey& key) const {
++  if (!REXCVAR_GET(vulkan_texture_load_to_image) || key.scaled_resolve ||
++      key.dimension != xenos::DataDimension::k2DOrStacked || key.GetDepthOrArraySize() != 1) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  const HostFormatPair& host_format = GetHostFormatPair(key);
++  const HostFormat& load_host_format =
++      (key.signed_separate || host_format.format_unsigned.load_shader == kLoadShaderIndexUnknown)
++          ? host_format.format_signed
++          : host_format.format_unsigned;
++  const FormatInfo* guest_format_info = FormatInfo::Get(key.format);
++  if (load_host_format.load_shader == kLoadShaderIndexUnknown ||
++      load_image_pipelines_[load_host_format.load_shader] == VK_NULL_HANDLE ||
++      load_host_format.block_compressed || guest_format_info->block_width != 1 ||
++      guest_format_info->block_height != 1) {
++    return VK_FORMAT_UNDEFINED;
++  }
++  return GetLoadToImageStorageFormat(load_host_format.load_shader);
++}
++
++void VulkanTextureCache::RetireTexturesForStorageAt(uint32_t base_page) {
++  if (!storage_upgrade_checked_pages_.insert(base_page).second) {
++    return;
++  }
++  for (const TextureKey& key : GetTextureKeysAtBasePage(base_page)) {
++    if (GetPossibleStorageFormat(key) == VK_FORMAT_UNDEFINED) {
++      continue;
++    }
++    std::unique_ptr<Texture> texture = TakeTextureOutOfCache(key);
++    if (!texture) {
++      continue;
++    }
++    if (static_cast<VulkanTexture&>(*texture).storage_capable()) {
++      // Not expected (it would be in storage_textures_by_base_page_).
++      continue;
++    }
++    texture->LogAction("Retired for a storage image");
++    if (REXCVAR_GET(texture_load_log)) {
++      REXGPU_INFO("[texture loads] {:08X} {}x{} fmt {}: created again with a storage image "
++                  "(resolved into)",
++                  base_page << 12, key.GetWidth(), key.GetHeight(), uint32_t(key.format));
++    }
++    retired_textures_.push_back(std::move(texture));
++  }
++}
++
++void VulkanTextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_index) {
++  // Destroy the retired textures the GPU is done with.
++  for (size_t i = 0; i < retired_textures_.size();) {
++    if (retired_textures_[i]->last_usage_submission_index() <= completed_submission_index) {
++      retired_textures_[i] = std::move(retired_textures_.back());
++      retired_textures_.pop_back();
++    } else {
++      ++i;
++    }
++  }
++  TextureCache::CompletedSubmissionUpdated(completed_submission_index);
++}
++
+ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(TextureKey key) {
+   VkFormat formats[] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
+   const HostFormatPair& host_format = GetHostFormatPair(key);
+@@ -1149,6 +1306,15 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
    bool is_3d = key.dimension == xenos::DataDimension::k3D;
    uint32_t depth_or_array_size = key.GetDepthOrArraySize();
  
@@ -28386,26 +28552,14 @@ index ecbd940..679ab15 100644
 +  // after each resolve), if its load shader has a variant writing into an
 +  // image.
 +  VkFormat storage_format = VK_FORMAT_UNDEFINED;
-+  if (REXCVAR_GET(vulkan_texture_load_to_image) && !key.scaled_resolve &&
-+      key.dimension == xenos::DataDimension::k2DOrStacked && depth_or_array_size == 1) {
-+    const HostFormat& load_host_format =
-+        (key.signed_separate || host_format.format_unsigned.load_shader == kLoadShaderIndexUnknown)
-+            ? host_format.format_signed
-+            : host_format.format_unsigned;
-+    const FormatInfo* guest_format_info = FormatInfo::Get(key.format);
-+    if (load_host_format.load_shader != kLoadShaderIndexUnknown &&
-+        load_image_pipelines_[load_host_format.load_shader] != VK_NULL_HANDLE &&
-+        !load_host_format.block_compressed && guest_format_info->block_width == 1 &&
-+        guest_format_info->block_height == 1 &&
-+        shared_memory().IsRangeGpuWritten(key.base_page << 12, 1)) {
-+      storage_format = GetLoadToImageStorageFormat(load_host_format.load_shader);
-+    }
++  if (shared_memory().IsRangeGpuWritten(key.base_page << 12, 1)) {
++    storage_format = GetPossibleStorageFormat(key);
 +  }
 +
    VkImageCreateInfo image_create_info;
    VkImageCreateInfo* image_create_info_last = &image_create_info;
    image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-@@ -1174,19 +1283,27 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+@@ -1174,19 +1340,27 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
    image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
    image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
    image_create_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -28437,7 +28591,7 @@ index ecbd940..679ab15 100644
    }
  
    VmaAllocationCreateInfo allocation_create_info = {};
-@@ -1199,7 +1316,14 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
+@@ -1199,7 +1373,14 @@ std::unique_ptr<TextureCache::Texture> VulkanTextureCache::CreateTexture(Texture
      return nullptr;
    }
  
@@ -28453,7 +28607,7 @@ index ecbd940..679ab15 100644
  }
  
  bool VulkanTextureCache::EnsureScaledResolveMemoryCommitted(uint32_t start_unscaled,
-@@ -1364,12 +1488,82 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1364,12 +1545,82 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
          level_host_layout.y_pitch_blocks * level_guest_z_extent_texels;
      host_buffer_size += level_host_layout.slice_size_bytes * array_size;
    }
@@ -28542,7 +28696,7 @@ index ecbd940..679ab15 100644
    }
  
    // Begin loading.
-@@ -1381,15 +1575,18 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1381,15 +1632,18 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    VulkanSharedMemory& vulkan_shared_memory = static_cast<VulkanSharedMemory&>(shared_memory());
    std::array<VkWriteDescriptorSet, 3> write_descriptor_sets;
    uint32_t write_descriptor_set_count = 0;
@@ -28567,7 +28721,7 @@ index ecbd940..679ab15 100644
      write_descriptor_set_dest_buffer_info.range = host_buffer_size;
      VkWriteDescriptorSet& write_descriptor_set_dest =
          write_descriptor_sets[write_descriptor_set_count++];
-@@ -1500,19 +1697,50 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1500,19 +1754,50 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    }
    if (texture_key.scaled_resolve) {
      UseScaledResolveBufferForRead();
@@ -28625,7 +28779,7 @@ index ecbd940..679ab15 100644
  
    VkDescriptorSet descriptor_set_source_current = VK_NULL_HANDLE;
  
-@@ -1532,9 +1760,15 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1532,9 +1817,15 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
  
      VkDescriptorSet descriptor_set_source =
          is_base ? descriptor_set_source_base : descriptor_set_source_mips;
@@ -28642,7 +28796,7 @@ index ecbd940..679ab15 100644
                                               kLoadDescriptorSetIndexSource, 1,
                                               &descriptor_set_source, 0, nullptr);
      }
-@@ -1591,7 +1825,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1591,7 +1882,7 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
      load_constants.host_pitch =
          load_shader_info.bytes_per_host_block * level_host_layout.x_pitch_blocks;
  
@@ -28651,7 +28805,7 @@ index ecbd940..679ab15 100644
                                        sizeof(load_constants), &load_constants);
  
      uint32_t level_array_slice_stride_bytes_scaled =
-@@ -1599,22 +1833,33 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1599,22 +1890,33 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
          (texture_resolution_scale_x * texture_resolution_scale_y);
      for (uint32_t slice = 0; slice < array_size; ++slice) {
        if (slice != 0) {
@@ -28688,7 +28842,7 @@ index ecbd940..679ab15 100644
    if (pipeline_float_convert != VK_NULL_HANDLE) {
      assert_not_null(load_shader_info_float_convert);
      static std::array<uint8_t, 64> float_fallback_log_mask = {};
-@@ -1628,15 +1873,24 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1628,15 +1930,24 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
      }
      // Make the normalized intermediate data visible for conversion and keep it
      // writable for in-place conversion to float16.
@@ -28722,7 +28876,7 @@ index ecbd940..679ab15 100644
      command_buffer.CmdVkBindDescriptorSets(VK_PIPELINE_BIND_POINT_COMPUTE, load_pipeline_layout_,
                                             kLoadDescriptorSetIndexDestination, 1,
                                             &descriptor_set_dest, 0, nullptr);
-@@ -1708,7 +1962,11 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1708,7 +2019,11 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
                                              sizeof(load_constants_float_convert.host_offset),
                                              &load_constants_float_convert.host_offset);
          }
@@ -28735,7 +28889,7 @@ index ecbd940..679ab15 100644
          command_buffer.CmdVkDispatch(group_count_x, group_count_y,
                                       load_constants_float_convert.size_blocks[2]);
          load_constants_float_convert.guest_offset += level_array_slice_stride_bytes;
-@@ -1718,37 +1976,94 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1718,37 +2033,94 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
    }
  
    // Submit copying from the copy buffer to the host texture.
@@ -28852,7 +29006,7 @@ index ecbd940..679ab15 100644
      if (level >= level_packed) {
        uint32_t level_offset_blocks_x, level_offset_blocks_y, level_offset_z;
        texture_util::GetPackedMipOffset(width, height, depth, guest_format, level,
-@@ -1782,6 +2097,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
+@@ -1782,6 +2154,14 @@ bool VulkanTextureCache::LoadTextureDataFromResidentMemoryImpl(Texture& texture,
          std::max((height * texture_resolution_scale_y) >> level, UINT32_C(1));
      copy_region.imageExtent.depth = std::max(depth >> level, UINT32_C(1));
    }
@@ -28867,7 +29021,7 @@ index ecbd940..679ab15 100644
  
    return true;
  }
-@@ -1851,6 +2174,30 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
+@@ -1851,6 +2231,30 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
    for (const auto& view_pair : views_) {
      dfn.vkDestroyImageView(device, view_pair.second, nullptr);
    }
@@ -28898,7 +29052,7 @@ index ecbd940..679ab15 100644
    if (image_view_3d_as_2d_unsigned_ != VK_NULL_HANDLE) {
      dfn.vkDestroyImageView(device, image_view_3d_as_2d_unsigned_, nullptr);
    }
-@@ -1860,6 +2207,64 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
+@@ -1860,6 +2264,64 @@ VulkanTextureCache::VulkanTexture::~VulkanTexture() {
    vmaDestroyImage(vulkan_texture_cache.vma_allocator_, image_, allocation_);
  }
  
@@ -28963,7 +29117,7 @@ index ecbd940..679ab15 100644
  VkImageView VulkanTextureCache::VulkanTexture::GetView(bool is_signed, uint32_t host_swizzle,
                                                         bool is_array) {
    xenos::DataDimension dimension = key().dimension;
-@@ -2955,6 +3360,84 @@ bool VulkanTextureCache::Initialize() {
+@@ -2955,6 +3417,84 @@ bool VulkanTextureCache::Initialize() {
      }
    }
  
@@ -29048,7 +29202,7 @@ index ecbd940..679ab15 100644
    // Use true null descriptors when supported; otherwise, keep compatibility
    // fallback null images.
    if (device_properties.nullDescriptor) {
-@@ -3237,6 +3720,200 @@ void VulkanTextureCache::GetTextureUsageMasks(VulkanTexture::Usage usage,
+@@ -3237,6 +3777,209 @@ void VulkanTextureCache::GetTextureUsageMasks(VulkanTexture::Usage usage,
        access_mask = VK_ACCESS_SHADER_READ_BIT;
        layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
        break;
@@ -29073,8 +29227,17 @@ index ecbd940..679ab15 100644
 +    reason = "off or address not page-aligned";
 +    return false;
 +  }
++  if (dest_base == uint32_t(REXCVAR_GET(debug_resolve_into_texture_exclude))) {
++    reason = "excluded (debug_resolve_into_texture_exclude)";
++    return false;
++  }
 +  auto range = storage_textures_by_base_page_.equal_range(dest_base >> 12);
 +  if (range.first == range.second) {
++    // A texture created before its memory was GPU-written has no storage
++    // image: retired, so the next request creates it with one.
++    if (REXCVAR_GET(vulkan_resolve_into_texture_recreate)) {
++      RetireTexturesForStorageAt(dest_base >> 12);
++    }
 +    return false;
 +  }
 +  VulkanTexture* target = nullptr;

@@ -213,6 +213,8 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_reuse_texture_descriptor_sets` | bind a texture/sampler descriptor set written earlier in the frame with the same bindings instead of writing a new one per draw (on; counts on the `Command processor CPU` line) |
 | - | `type0_register_ranges` | type-0 packets write consecutive registers through the range path (constants in bulk) (on) |
 | - | `frame_timing_fast_clock` | `vulkan_long_frame_log` times its areas with `mach_absolute_time` instead of `steady_clock` (on on macOS) |
+| - | `vulkan_resolve_into_texture_recreate` | a texture at a resolve destination created without a storage image is created again with one (on) |
+| - | `debug_resolve_into_texture_exclude` | a guest address whose resolves don't write into the texture (it is reloaded as before), for comparisons (0 = none) |
 | - | `vulkan_resolve_into_texture_full` | with the above: also the resolves from the EDRAM buffer with format conversion (8/16/32/64 bpp, mip levels), not only the direct 32 bpp ones (on) |
 | - | `shared_memory_exact_gpu_write_watches` | a GPU write (resolve) invalidates only the textures it overlaps byte by byte, not all in the same 16 KB host pages (on on macOS) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
@@ -1033,6 +1035,23 @@ the same way as Xenia's ROV path.
        script's 20 s frame reports cost a 200 ms frame each and CPU;
        `mac_autotest.sh` no longer waits for one then. `MAC_CAPTURE_EXE`
        picks another binary for `mac_capture.sh`.
+  41. **Done (2026-10-18): the frontbuffer copy is written by its resolve
+     too** (`vulkan_resolve_into_texture_recreate`, on, hot reload;
+     `docs/macos_port.md`, "Resolves: written straight into the texture").
+     - The 1280x720 texture at 0x1ECFF000, which the swap fetches, was
+       created before its memory was GPU-written, so it had no storage image
+       and was reloaded every frame.
+     - Such textures at a resolve destination are now taken out of the cache
+       (kept until the GPU is done with them) and created again with a
+       storage image.
+     - Reloads after a GPU write 3.0 -> 2.0 per frame; same picture, flicker
+       test clean.
+     - GPU time not measurable this time: remote screen sharing loaded the
+       GPU. Expect little; one 1280x720 reload per frame.
+     - Left: 0x12CFD000, resolved in two formats.
+     - Note: on 2026-10-18 the save loaded once into a spot past the trail
+       (3180 draws per frame, `fable_2_439`); later runs were back at the
+       trail. Check the draw count before comparing numbers across runs.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

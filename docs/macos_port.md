@@ -1256,8 +1256,38 @@ At the trail: GPU-write reloads 13.9 -> 3.0 per frame, written by resolves
 
 - 0x12CFD000, which the game resolves in two formats (k_8_8_8_8 and
   k_2_10_10_10), so each resolve rightly outdates the other texture;
-- the 1280x720 copy at 0x1ECFF000: the resolve log says there is no
-  storage texture at that address (why is not checked yet).
+- the 1280x720 copy at 0x1ECFF000 (since fixed, below).
+
+The 1280x720 copy is the frontbuffer: the presenter fetches it at every
+swap (`RequestSwapTexture`). A texture gets a storage image only if its
+memory is already GPU-written when it is created. This one was created
+before gameplay, and a texture used every frame is never evicted, so it
+never got a storage image and was reloaded after every resolve into it.
+
+`vulkan_resolve_into_texture_recreate` (on, hot reload) fixes that. When a
+resolve finds no storage texture at its destination, the textures at that
+base page that would get a storage image are taken out of the cache (once
+per page). They leave the map and the least-recently-used list
+(`TextureCache::TakeTextureOutOfCache`), and the Vulkan cache keeps them
+until the GPU has completed their last submission. The next request creates
+the texture again, now with a storage image, and the resolves write it.
+
+At the trail: reloads after a GPU write 3.0 -> 2.0 per frame, and 29
+written by resolves. The GPU time couldn't be measured this time: remote
+screen sharing (RustDesk, WindowServer) loaded the GPU, and the frame GPU
+time varied 8-42 ms between runs and 10-21 ms within one. The work removed
+is one 1280x720 32-bit reload per frame. The 11 reloads removed before saved
+0.12 ms, so expect little. `debug_resolve_into_texture_exclude=<address>`
+leaves one destination out, to compare within a run when the GPU is quiet.
+
+Same picture:
+
+- 8 alternating sweep shots with the frontbuffer excluded and included:
+  the per-channel mean absolute differences are the same (5.96/5.12/4.00 vs
+  5.57-5.98/4.87-5.19/3.78-4.09).
+- The channel means agree within the noise between excluded shots (up to
+  2.2/255).
+- Flicker test: 1.4-1.7%, brightness flat (`out/ab_paths/flicker_frontbuffer/`).
 
 The gain is small: GPU time 7.87 -> 7.76 ms per frame, lower in all four
 alternating pairs, and GPU power 1.865 -> 1.849 W (`fable_2_402`). These
