@@ -194,6 +194,8 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_fsi_end_interlock_in_function` | the raster order group fix (on by default on macOS; restart) |
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
+| - | `vulkan_hoist_uploads_of_read_pages` | also hoist uploads of pages read earlier in the submission when the read bytes are unchanged (on by default on macOS; hot reload; the "Uploads of pages read earlier" line counts them; -2.1 to -2.5 ms GPU per frame in the square) |
+| - | `debug_hoist_used_page_uploads` | hoist those uploads without the check (debug: measures what they cost; can be wrong for the picture) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
 | - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
@@ -1249,6 +1251,71 @@ the same way as Xenia's ROV path.
        trail"). Earlier on 2026-10-18 it loaded into the opening cutscene in
        the square (`fable_2_441`/`442`); an unattended run let that play
        out and the game autosaved after it.
+  49. **Done (2026-10-18): per-pass GPU timing of the square, and uploads
+     of pages read earlier in the submission hoisted**
+     (`vulkan_hoist_uploads_of_read_pages`, on by default on macOS, hot
+     reload; `docs/macos_port.md`, "Uploads of pages read earlier in the
+     submission").
+     - **Per pass** (`vulkan_pass_gpu_time`, crowd at Murgo's wagon, 4324
+       draws, `fable_2_493`; timed frames take 22.5 ms against 13.2 ms
+       untimed):
+       - the main scene pass (`8D900846800943C8`, ~1100 draws) 2.7-3.0 ms;
+       - **49 depth-only passes per frame into a 1040x2528 target, ~6 draws
+         each, 2.2-2.4 ms** (the trail has none of these);
+       - 35 resolves 3.0 ms;
+       - 15 transfers 0.75 ms;
+       - 8.2 ms outside render passes (3.4 ms at the trail).
+     - **Cause:** 40 render pass ends per frame were shared memory uploads
+       even with `vulkan_hoist_shared_memory_uploads` (0 at the trail). An
+       upload can move to the start of the submission only if nothing
+       earlier in it used its pages. In the square the CPU writes vertex
+       data into pages earlier draws already read, so each such upload
+       stayed in the command stream and split the pass. The other 41
+       barrier ends per frame are mostly the render target dumps before
+       resolves (`DumpRenderTargets`, ~19 each).
+     - **Upper bound** (`debug_hoist_used_page_uploads`, hoists them all;
+       can be wrong for the picture): GPU 11.9-12.1 -> 10.1-10.6 ms,
+       restarts 58 -> 25 per frame (`fable_2_494`).
+     - **The fix:** such an upload is hoisted if, in every page, the bytes
+       read earlier in the submission are the same in the new data as in
+       the page's previous hoisted upload in the submission (the staged
+       copy is still mapped). About 43-46 uploads per frame qualify; in the
+       command stream stay ~4 (page GPU-written), ~2 (no earlier hoisted
+       upload to compare with) and ~1.5-1.9 (read bytes did change: those
+       would have been wrong with the debug switch).
+     - **Result, alternating within one run:**
+       - 4388 draws (`fable_2_495`): GPU 12.7-12.9 -> 10.3-10.4 ms per
+         frame, restarts 56 -> 27;
+       - 4670 draws (`fable_2_496`): 13.5-14.0 -> 11.1-11.9 ms, restarts
+         63-69 -> 40-43, upload ends 33-38 -> 9-12;
+       - command processor CPU about the same (11.6-11.7 ms);
+       - with the timer (`fable_2_496`): the depth-only passes now ~6 per
+         frame (85-254 draws each), 8.2 -> 5.6 ms outside passes, timed
+         frame 22.5 -> 18.9 ms;
+       - GPU power (whole system): 4 of 5 pairs 0.3-0.7 W lower, one
+         higher; no firm number.
+     - Same picture: on/off shots alike, a 16-shot burst with it on shows
+       no broken or flickering geometry; 4 min in the square with it on at
+       60 fps (3 of 49 windows at 59.7).
+     - **Left on the GPU in the square** (timed frames): ~39 resolves 3.1
+       ms, ~47 passes with 0-2 draws 3.0 ms, main pass ~2 ms.
+     - **Crash seen once** (`fable_2_495`, during an "on" phase, ~5 min
+       into the run): the game's pool allocator on the 3D Engine thread
+       read guest address 0 (`Pool_AcquireNode_83230688` from
+       `Allocate_SizeBucketed_83231D20`; macOS crash report
+       `fable_2-2026-10-18-140410.ips`). Like the hung `fable_2_466` (a
+       guest read of 0x24, before this change) it is a null read in guest
+       code with the tick-rate patches on; the change only moves GPU-side
+       copies of data the CPU already wrote and writes no guest memory.
+       Not seen again in the next run (8 min, `fable_2_496`). Watch for it
+       with the patches on.
+     - The route to the square, with the command file (camera moves
+       depend on the hero, so check with screenshots): `press LU 6000`,
+       `RR 600`, `LU 4000`, `RL 700` twice, `LU 2500` + `LU+LR 2500`, `RL
+       600`, `LU+LL 3500`, `LU+LL 2000` (the stone slab), `LR 1500`, `LU
+       3000`, `LL 1200`, `LD 1500`, `RL 700`, `LU+LR 1000` + `LU 3000`
+       (the alley with the cart), `LU 4500`, `LU+LL 600` + `LU 4500`, `LU
+       4000`.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

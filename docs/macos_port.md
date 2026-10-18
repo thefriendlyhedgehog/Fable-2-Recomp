@@ -1535,6 +1535,76 @@ WxH swapchain` and sets it to the extent. The line appeared after every
 creation in the test, and since the fix 30 of 30 resizes on both displays
 show the picture.
 
+### Uploads of pages read earlier in the submission
+
+Measured in the Bowerstone square at the 60 fps cap, in the crowd at
+Murgo's wagon (about 4400 draws).
+
+**What the pass timer showed.** `vulkan_pass_gpu_time` found 49
+depth-only passes per frame into a 1040x2528 target, with about 6 draws
+each. The trail has none of these.
+
+**Why the pass was split.** The "Render pass ends per frame" line counted
+40 shared memory uploads per frame, against 0 at the trail.
+`vulkan_hoist_shared_memory_uploads` moves an upload to the start of the
+submission only if nothing earlier in the submission used its pages.
+Otherwise the upload would overtake those reads. In the square the CPU
+writes vertex data into pages that earlier draws have already read. So
+each of those uploads stayed in the command stream and ended the render
+pass.
+
+**What changed.** `vulkan_hoist_uploads_of_read_pages` (on by default on
+macOS, hot reload) hoists such an upload when the reads it would overtake
+cannot tell the difference:
+
+- **What it records:** for each page, the span of bytes read in the
+  submission. Reads come from `MarkBytesUsedInSubmission`. The first and
+  last page of a read get a byte span; the pages in between are read
+  whole, which a bitmap records.
+- **What it keeps:** the staged data of the page's latest hoisted upload
+  in the submission. That copy stays mapped until the submission
+  completes.
+- **The check:** a new upload of a page that was read is hoisted if the
+  page was not GPU-written in the submission, it has an earlier hoisted
+  upload to compare with, and the read bytes are equal in the two copies.
+  The data is now staged before this decision.
+
+The rule is safe because both hoisted copies run first and the later one
+wins. So the earlier draws now see the new copy, which is identical in the
+bytes they read. By induction this holds across any number of re-uploads
+in one submission.
+
+An upload that fails the check stays where it was. A page with an upload
+in the command stream counts as GPU-written, so no later upload of it
+overtakes that one.
+
+Counts per frame are in the log line "Uploads of pages read earlier in
+the submission":
+
+- about 45 hoisted;
+- about 4 kept because the page was GPU-written;
+- about 2 kept because there was no earlier hoisted upload to compare
+  with;
+- 1.5-1.9 kept because the read bytes changed. Those would have shown
+  wrong vertex data with `debug_hoist_used_page_uploads`, which skips the
+  check.
+
+**Results** (alternating within one run):
+
+| Spot | GPU per frame, off -> on | Render pass restarts per frame |
+| --- | --- | --- |
+| 4388 draws | 12.7-12.9 -> 10.3-10.4 ms | 56 -> 27 |
+| 4670 draws | 13.5-14.0 -> 11.1-11.9 ms | 63-69 -> 40-43 |
+
+- In frames timed by the pass timer, the depth-only passes merge to about
+  6 per frame, and the time outside render passes drops from 8.2 to 5.6 ms.
+- Command processor CPU stays the same.
+- The picture is the same, including a 16-shot burst.
+
+**What is left on the GPU in the square:** about 39 resolves (3.1 ms in
+timed frames), 47 passes with at most two draws (3.0 ms), and the main
+scene pass (about 2 ms).
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:
