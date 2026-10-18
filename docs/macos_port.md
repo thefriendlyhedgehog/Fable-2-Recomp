@@ -1455,6 +1455,31 @@ next frame, every second vblank. Two host problems disturbed that:
   vkAcquireNextImageKHR, which makes MoltenVK fetch the drawable there,
   outside the lock.
 
+### Window resize: MoltenVK leaves the layer at 1x1
+
+After a resize (maximizing, dragging the window edge, moving the window to
+another display), the window sometimes stayed black or a flat grey until the
+next resize. On the main display this happened about 1 resize in 4; after a
+move to the 60 Hz second display, every time. The UI thread was painting, and
+it spent all its time in `-[CAMetalLayer nextDrawable]` (in MoltenVK's
+drawable fetch, with or without `vulkan_fetch_drawable_before_submit`).
+
+`MVKSwapchain::initCAMetalLayer` (MoltenVK 1.4.1) sets the layer's
+`drawableSize` to the new extent. It then compares the new extent with the
+surface's extent, which is that same `drawableSize` and so always equal. If
+the old swapchain still has unpresented images, it sets `drawableSize` to
+1x1, a workaround for presentations that never complete. Nothing sets the
+size back, so the new swapchain presents 1x1 drawables, stretched over the
+window. SDL's Metal view sometimes resizes the layer again on its own, which
+is why only some resizes broke.
+
+With `vulkan_fix_layer_drawable_size` (on), the presenter reads the layer's
+`drawableSize` after creating a swapchain. If it differs from the swapchain
+extent, the presenter logs `CAMetalLayer drawableSize 1x1 after creating the
+WxH swapchain` and sets it to the extent. The line appeared after every
+creation in the test, and since the fix 30 of 30 resizes on both displays
+show the picture.
+
 ### Performance (open)
 
 GPU at 100% with a low frame rate after the fix. Things known to cost:

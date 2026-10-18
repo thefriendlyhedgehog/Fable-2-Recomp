@@ -217,6 +217,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `debug_resolve_into_texture_exclude` | a guest address whose resolves don't write into the texture (it is reloaded as before), for comparisons (0 = none) |
 | - | `vulkan_resolve_into_texture_full` | with the above: also the resolves from the EDRAM buffer with format conversion (8/16/32/64 bpp, mip levels), not only the direct 32 bpp ones (on) |
 | - | `shared_memory_exact_gpu_write_watches` | a GPU write (resolve) invalidates only the textures it overlaps byte by byte, not all in the same 16 KB host pages (on on macOS) |
+| - | `vulkan_fix_layer_drawable_size` | macOS: after creating a swapchain, set the CAMetalLayer's drawableSize back to the swapchain size when MoltenVK left it at 1x1 (on; off = black or grey window after some resizes) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -1052,6 +1053,54 @@ the same way as Xenia's ROV path.
      - Note: on 2026-10-18 the save loaded once into a spot past the trail
        (3180 draws per frame, `fable_2_439`); later runs were back at the
        trail. Check the draw count before comparing numbers across runs.
+  42. **Done (2026-10-18): the window stays black or grey after a resize**
+     (`vulkan_fix_layer_drawable_size`, on, restart; `docs/macos_port.md`,
+     "Window resize: MoltenVK leaves the layer at 1x1").
+     - Seen by the user when maximizing the window. Reproduced by resizing
+       through `System Events`. About 1 resize in 4 left the window black
+       (or flat grey) until the next resize. After a move to the 60 Hz second
+       display, every resize did.
+     - Cause: when the old swapchain still has unpresented images, MoltenVK
+       sets the CAMetalLayer's drawableSize to 1x1 after setting the new
+       size. The log line `CAMetalLayer drawableSize 1x1 after creating ...`
+       showed this on 30 of 30 swapchain creations.
+     - Fix: the presenter sets drawableSize back to the swapchain size. Since
+       then, 30 of 30 resizes on both displays show the picture.
+     - Ruled out on the way:
+       - not `vulkan_fetch_drawable_before_submit` (fails the same with it
+         off);
+       - not Core Animation transactions (a `[CATransaction flush]` after
+         presents changed nothing).
+  43. **Measured (2026-10-18): this round's switches, all off vs. all on**
+     - Switches: `vulkan_transfers_in_draw_pass`,
+       `vulkan_skip_draw_barriers_after_writes`, `vulkan_resolve_into_texture`,
+       `shared_memory_exact_gpu_write_watches`,
+       `vulkan_reuse_texture_descriptor_sets`, `type0_register_ranges` and
+       `frame_timing_fast_clock`.
+     - Method: alternated within one sweep, 4 pairs of 35 s each, in two runs
+       (`fable_2_441`, `fable_2_442`). Power came from `out/mac_gpu_power`
+       and `out/mac_thread_cpu` every 5 s.
+     - Scene: the save now loads into the Bowerstone intro (Murgo's wagon,
+       ~5300 draws per frame, a cutscene that changes the draw count between
+       2000 and 5600), so the pairs are noisy. A shell `sleep` before the
+       sweep (`"sleep 220;sweep"`) gets past the cutscene; the in-game
+       `wait` does not.
+     - Means over both runs, off -> on:
+
+       | Measure | Off | On | Change |
+       | --- | --- | --- | --- |
+       | GPU time (ms/frame) | 14.8 | 11.4 | -23% |
+       | Command processor CPU (ms/frame) | 13.0 | 10.3 | -21% |
+       | GPU power (W) | 3.00 | 2.79 | -7% |
+       | Process CPU power (W) | 5.33 | 4.86 | -9% |
+       | Cores | 1.16 | 1.04 | |
+
+       The 30 fps cap held throughout. 6 of 8 pairs were lower in both GPU
+       and CPU power.
+     - Hitches at 30 fps: pipeline compiles for pipelines the storage doesn't
+       have yet (new area). These are about 100 ms each, and 893 ms once for
+       several in one frame. They go away once stored (683 -> 709 pipelines
+       created from storage between two runs).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

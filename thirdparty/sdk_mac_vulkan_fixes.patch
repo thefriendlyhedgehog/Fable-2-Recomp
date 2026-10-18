@@ -29591,13 +29591,31 @@ index 8197bb4..26cae81 100644
  #undef XE_UI_VULKAN_ENUM_LIMIT
  #undef XE_UI_VULKAN_FEATURE
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..c6be365 100644
+index 23645ef..92185f2 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
-@@ -58,6 +58,13 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_mailbox, true, "UI/Vulkan",
+@@ -43,6 +43,9 @@
+ #include <rex/ui/surface_win.h>
+ #endif
+ #if REX_PLATFORM_MAC
++#include <CoreGraphics/CGGeometry.h>
++#include <objc/message.h>
++#include <objc/runtime.h>
+ #include <rex/ui/surface_mac.h>
+ #endif
+ 
+@@ -58,10 +61,26 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_mailbox, true, "UI/Vulkan",
  REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_fifo_relaxed, true, "UI/Vulkan",
                      "Allow FIFO relaxed present mode");
  
++REXCVAR_DEFINE_BOOL(vulkan_fix_layer_drawable_size, true, "UI/Vulkan",
++                    "macOS: after creating a swapchain, set the CAMetalLayer's drawableSize "
++                    "back to the swapchain size if MoltenVK left it different. When the old "
++                    "swapchain still has unpresented images, MoltenVK sets drawableSize to 1x1 "
++                    "after setting the new size (a workaround for presentations that do not "
++                    "complete), so the window shows one stretched pixel (black or grey) until "
++                    "the next resize");
++
 +REXCVAR_DEFINE_BOOL(vulkan_fetch_drawable_before_submit, true, "UI/Vulkan",
 +                    "MoltenVK: fetch the swapchain image's CAMetalDrawable right after acquiring "
 +                    "the image (VK_EXT_metal_objects), not inside vkQueueSubmit. MoltenVK fetches "
@@ -29608,7 +29626,45 @@ index 23645ef..c6be365 100644
  namespace rex {
  namespace ui {
  namespace vulkan {
-@@ -1572,6 +1579,29 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+ 
++
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+ namespace {
+ 
+@@ -1036,6 +1055,32 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+     paint_context_.swapchain_framebuffers.emplace_back(image_view, framebuffer);
+   }
+ 
++#if REX_PLATFORM_MAC
++  if (REXCVAR_GET(vulkan_fix_layer_drawable_size) &&
++      new_surface.GetType() == Surface::kTypeIndex_CAMetalLayer) {
++    // MVKSwapchain::initCAMetalLayer sets the new drawableSize, then compares
++    // the new extent with the layer's (now always equal) and, if the old
++    // swapchain has unpresented images, sets drawableSize to 1x1 to make them
++    // complete - and leaves it at that for the new swapchain.
++    id layer = (id)static_cast<const CAMetalLayerSurface&>(new_surface).layer();
++    if (layer) {
++      CGSize drawable_size =
++          reinterpret_cast<CGSize (*)(id, SEL)>(objc_msgSend)(layer, sel_registerName("drawableSize"));
++      if (uint32_t(drawable_size.width) != paint_context_.swapchain_extent.width ||
++          uint32_t(drawable_size.height) != paint_context_.swapchain_extent.height) {
++        REXLOG_INFO("VulkanPresenter: CAMetalLayer drawableSize {}x{} after creating the {}x{} "
++                    "swapchain, setting it to the swapchain size",
++                    drawable_size.width, drawable_size.height,
++                    paint_context_.swapchain_extent.width, paint_context_.swapchain_extent.height);
++        reinterpret_cast<void (*)(id, SEL, CGSize)>(objc_msgSend)(
++            layer, sel_registerName("setDrawableSize:"),
++            CGSizeMake(paint_context_.swapchain_extent.width,
++                       paint_context_.swapchain_extent.height));
++      }
++    }
++  }
++#endif
++
+   is_vsync_implicit_out = paint_context_.swapchain_is_fifo;
+   return SurfacePaintConnectResult::kSuccess;
+ }
+@@ -1572,6 +1617,29 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    VkResult acquire_result =
        dfn.vkAcquireNextImageKHR(device, paint_context_.swapchain, UINT64_MAX, acquire_semaphore,
                                  VK_NULL_HANDLE, &swapchain_image_index);
@@ -29638,7 +29694,7 @@ index 23645ef..c6be365 100644
    switch (acquire_result) {
      case VK_SUCCESS:
      case VK_SUBOPTIMAL_KHR:
-@@ -1840,6 +1870,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1840,6 +1908,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                  swapchain_effect, paint_context_.swapchain_render_pass);
              if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
                guest_output_flow.effect_count = 0;
