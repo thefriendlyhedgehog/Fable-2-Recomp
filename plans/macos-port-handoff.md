@@ -1225,6 +1225,30 @@ the same way as Xenia's ROV path.
          display's deadline); link at phase 0.5 or 0.25: 0-2.
        - At 60 fps on that display: 598-601 of 600 frames on screen for one
          refresh.
+  48. **Measured (2026-10-18): heavy views at the 60 fps cap** (60 fps and
+     both tick-rate patches on, as the user now plays; `game_msaa = 1`, 2x).
+
+     | View | Draws | fps | Longest frame | GPU time | Command processor CPU |
+     | --- | --- | --- | --- | --- | --- |
+     | Trail, looking back at the building (`fable_2_491`) | 3854 | 60.0 | 18 ms | 10.0 ms (60%) | 9.2 ms |
+     | Bowerstone square, in the crowd at Murgo's wagon (`fable_2_492`) | 4404 | 60.0 | 18 ms | 13.7 ms (82%) | 11.2 ms |
+
+     - In the square the game takes 2.1-2.3 cores, 8.1-9.2 W of CPU (all
+       performance cores) and 55% of the GPU (whole system 7.9 W). Threads:
+       - GPU Commands 65%;
+       - 3D Engine 48%;
+       - GameThread 39%;
+       - texture streamer, cloth and others about 8% each.
+     - At the trail at 60 fps the game takes 0.98 cores and 4.5 W.
+     - Pacing in the square: 563-582 of 601 frames within half a refresh of
+       16.7 ms, none doubled.
+     - The way there: the trail from the save's start, past the big tree
+       and the lamppost, through the alley and right at the crate by the
+       arch with the posters (about 1 min of walking).
+     - **Save note:** the save now loads at the trail ("Follow the glowing
+       trail"). Earlier on 2026-10-18 it loaded into the opening cutscene in
+       the square (`fable_2_441`/`442`); an unattended run let that play
+       out and the game autosaved after it.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
