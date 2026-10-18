@@ -1101,35 +1101,34 @@ the same way as Xenia's ROV path.
        have yet (new area). These are about 100 ms each, and 893 ms once for
        several in one frame. They go away once stored (683 -> 709 pipelines
        created from storage between two runs).
-  44. **Open (2026-10-18): 60 fps cap, measured under GPU load from
-     remote viewing.** Runs of 300 s each at the trail (2313 draws per
-     frame), default vs. `--video_mode_refresh_rate=120` (`fable_2_451`,
-     `fable_2_452`):
+  44. **Measured (2026-10-18): the 60 fps cap holds at the trail**
+     (`--video_mode_refresh_rate=120`, restart). Runs of 300 s each at the
+     trail (2313 draws per frame), `fable_2_453` (30) and `fable_2_454` (60):
 
      | Measure | 30 fps cap | 60 fps cap |
      | --- | --- | --- |
-     | Frame rate | 30.0 | 47-52 |
-     | Frames over 40 ms (per ~190 s) | 0 | 785 |
-     | Longest frame | 39 ms | 75 ms |
-     | GPU time (ms/frame) | 8.7 | 19-22 |
-     | Command processor CPU (ms/frame) | 6.6 | 5.4 |
-     | GPU power, whole system (W) | 4.6 | 11.0 |
-     | Process CPU power (W) | 3.4 | 3.5 |
+     | Frame rate | 30.0 | 60.0 |
+     | Frames over 40 ms (per ~290 s) | 2 | 0 |
+     | Longest frame | 47 ms | 19 ms |
+     | GPU time (ms/frame) | 7.6 | 10.8 |
+     | Command processor CPU (ms/frame) | 5.7 | 5.5 |
+     | Process CPU power (W) | 3.05 | 4.20 |
+     | Cores | 0.75 | 1.07 |
+     | GPU power, whole system (W) | 5.9 | 7.6 |
 
-     - The numbers are not clean. `VTEncoderXPCService` (the hardware video
-       encoder of a remote viewing session) took 24-72% of the GPU even with
-       the game closed (`tools/mac_gpu_by_process.sh`). The idle GPU drew
-       3.3 W, against 0.02 W without it. Both runs' GPU power is high for
-       this reason.
-     - Doubled GPU time per frame for the same draws looks like contention,
-       not game work. On 2026-10-16 the same trail view ran 80-85 fps
-       uncapped (item above, `--vsync=false`).
-     - Redo without remote viewing before deciding on 60 fps. Check
-       `tools/mac_gpu_by_process.sh` first.
-     - Game speed at 60 is not checked yet. At 30 fps an event at ~150 s
-       changed the view (2313 -> 4290 draws); it did not come within 300 s at
-       60. Such timings also vary between 30 fps runs, so this is not
-       conclusive.
+     - The GPU was shared, so GPU power and GPU time are upper bounds. Other
+       GPU users, from `tools/mac_gpu_by_process.sh` every 10 s: during the
+       30 fps run WindWaker-play (~65%), Safari and the Claude app (~24%
+       each); during the 60 fps run soh-macos (~32%) and the Claude app
+       (~31%). The process CPU numbers are the game's own.
+     - Game busy share of the GPU: ~23% at 30 fps vs ~65% at 60 fps.
+     - The first try (`fable_2_452`, 47-52 fps) ran while a remote viewing
+       session's video encoder took 24-72% of the GPU.
+     - Not checked yet:
+       - game speed at 60 (whether the game logic follows the frame rate);
+       - the heavy view behind the hero (26-27 fps at the 30 cap);
+       - the tick-rate patches (`high_tick_rate`, `higher_hf_tick_rate`),
+         which run the UI and physics faster.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
