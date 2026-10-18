@@ -1346,6 +1346,30 @@ the same way as Xenia's ROV path.
        framebuffer fetch (would remove the compute encoder and the store and
        reload of the render target per resolve; depends on MoltenVK input
        attachments). Measure again with the GPU free first.
+     - **The in-pass resolve doesn't work on stock MoltenVK 1.4.1** (checked
+       2026-10-18 in its source, `thirdparty/rexglue-sdk-src/thirdparty/moltenvk`;
+       the game runs the prebuilt 1.4.1). No code was written:
+       - MoltenVK never sets SPIRV-Cross's `use_framebuffer_fetch_subpasses`,
+         so `subpassLoad` becomes a texture read of the attachment's memory,
+         not a read of the tile;
+       - so on Apple GPUs (`tileBasedDeferredRendering`) a barrier inside a
+         pass whose destination access has `INPUT_ATTACHMENT_READ` with
+         `BY_REGION`, or an image barrier to `GENERAL`, ends the Metal render
+         pass and starts a new one (`MVKCmdPipelineBarrier::encode`,
+         `kMVKCommandUseRestartSubpass`): the tiles are stored and loaded
+         again, as now;
+       - Metal barriers inside render passes are off on Apple GPUs
+         (`memoryBarriers = false`), and without a barrier the read is
+         undefined.
+       - So the in-pass draw would only replace the compute encoder with a
+         render encoder restart. The next draw samples the resolved texture
+         in another render target anyway (item 50), so that pass end stays.
+       - Making it pay needs a patched, source-built MoltenVK
+         (`build_sdk_mac.sh -mvk-private` already stages one): framebuffer
+         fetch for input attachments that are color attachments of the
+         subpass, and no restart for those barriers. Expected gain, from the
+         measurement above: at most the dispatches' ~1.1 ms less the
+         fragment work, so roughly 0.3-0.6 ms per frame.
   51. **Done (2026-10-18): the tiny passes in the square, and uploads
      compared with a cached copy** (`vulkan_hoist_uploads_of_read_pages_cache`,
      on, hot reload; `docs/macos_port.md`, end of "Uploads of pages read

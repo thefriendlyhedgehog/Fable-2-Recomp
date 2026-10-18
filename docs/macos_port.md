@@ -1307,6 +1307,32 @@ Same picture:
 - One earlier attempt moved the hero: with `--merge_controllers`, input from
   a controller used for another app reaches the game. Rerun such a test.
 
+### Resolves inside the render pass (not possible on stock MoltenVK)
+
+The idea: do the direct resolve as a full-screen draw at the end of the
+render pass that drew the source, reading the render target as an input
+attachment, instead of ending the pass for a compute dispatch. On a
+tile-based GPU that would read the tile and save the compute encoder and a
+dependency per resolve.
+
+MoltenVK 1.4.1 (the prebuilt the game uses; its source is in
+`thirdparty/rexglue-sdk-src/thirdparty/moltenvk`) can't do this:
+
+- It never enables SPIRV-Cross's `use_framebuffer_fetch_subpasses`. An input
+  attachment read is a texture read of the image's memory, which is stale
+  while the tile is still being rendered.
+- On Apple GPUs `MVKCmdPipelineBarrier::encode` therefore ends the Metal
+  render pass and begins a new one (`kMVKCommandUseRestartSubpass`) for any
+  in-pass barrier to `GENERAL`, or with `BY_REGION` and
+  `INPUT_ATTACHMENT_READ`. Metal memory barriers inside render encoders are
+  off there (`memoryBarriers = false`).
+
+So an in-pass resolve would store and reload the tiles as now, with a
+render encoder in place of the compute one. A gain needs a patched MoltenVK
+(framebuffer fetch for input attachments that are also color attachments,
+no restart for those barriers), built from source and staged as
+`build_sdk_mac.sh -mvk-private` does.
+
 ### CPU: busy waits
 
 At the default 30 fps the game used 2.3 cores (the whole system's CPU 10.5
