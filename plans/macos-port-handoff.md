@@ -195,6 +195,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_invariant_position` | invariant vertex position (on; restart) |
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_hoist_uploads_of_read_pages` | also hoist uploads of pages read earlier in the submission when the read bytes are unchanged (on by default on macOS; hot reload; the "Uploads of pages read earlier" line counts them; -2.1 to -2.5 ms GPU per frame in the square) |
+| - | `debug_skip_resolve_dispatches` | 1: leave out the resolve copy dispatches but keep their barriers and pass ends; 2: the dump dispatches too (debug: fixed cost vs. shader work; stale textures) |
 | - | `debug_hoist_used_page_uploads` | hoist those uploads without the check (debug: measures what they cost; can be wrong for the picture) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
@@ -1316,6 +1317,34 @@ the same way as Xenia's ROV path.
        3000`, `LL 1200`, `LD 1500`, `RL 700`, `LU+LR 1000` + `LU 3000`
        (the alley with the cart), `LU 4500`, `LU+LL 600` + `LU 4500`, `LU
        4000`.
+  50. **Measured (2026-10-18): what a resolve costs at the trail**
+     (60 fps cap, 2313 draws; `debug_skip_resolve_dispatches`, new, hot
+     reload). Alternating within one run (`fable_2_498`), three rounds;
+     **noisy: WindWaker-play used 25-60% of the GPU during the run**:
+
+     | State | GPU per frame |
+     | --- | --- |
+     | normal | ~9.0 ms (8.4-9.7) |
+     | copy dispatches left out, barriers and pass ends kept (`=1`) | ~7.9 ms |
+     | the dump dispatches left out too (`=2`) | ~7.7 ms |
+     | resolve copies skipped (`vulkan_debug_skip_resolve_copies`) | ~6.9 ms |
+
+     - So the ~23 resolve copies per frame cost ~2 ms: ~1.1 ms the copy
+       dispatches (shader work and waiting), ~1 ms fixed (pass ends,
+       barriers; ~45 us per resolve). The dumps are cheap.
+     - The frame (`fable_2_499` frame report): 33 resolves, only one clears
+       (the frontbuffer 0x1ECFF000), and every resolve is followed by a draw
+       that samples it (post-processing chains at 280x184 and 560x360, three
+       copies in a row to 0x133E1000 and to 0x12D9F000). So clears can't be
+       folded into the next pass, and resolves can't be batched: the cost is
+       the draw -> copy -> draw dependency each time (`P B D B P` in the
+       `[pass commands]` lines).
+     - Options left, larger: resolves that write only the texture and copy
+       to guest memory only when something else reads the range (part of
+       the shader work); resolves inside the producing render pass with
+       framebuffer fetch (would remove the compute encoder and the store and
+       reload of the render target per resolve; depends on MoltenVK input
+       attachments). Measure again with the GPU free first.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
