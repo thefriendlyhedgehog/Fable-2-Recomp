@@ -1601,6 +1601,28 @@ the submission":
 - Command processor CPU stays the same.
 - The picture is the same, including a 16-shot burst.
 
+**When the reads saw an earlier submission's upload.** About 1-10 uploads
+per frame (it varies a lot) still stayed in the command stream, each
+cutting the main scene pass. In these the page had been read earlier in
+the submission, but its content came from an upload in an earlier
+submission, so there was no staged copy to compare with.
+`vulkan_hoist_uploads_of_read_pages_cache` (on, hot reload) keeps a copy
+of such pages:
+
+- A page that had nothing to compare with is marked. Its later uploads are
+  copied into a 16 MB cache (1024 pages, reused round robin; the game's
+  dynamic vertex pages are uploaded every frame).
+- Each page has a content generation. Every upload and every GPU write to
+  the page increments it. A cached copy is used only while its generation
+  is the page's current one, so it is what the GPU buffer holds.
+- The next upload of the page compares the read bytes with that copy, as
+  above.
+
+With it, no upload in the square stays in the command stream. The
+"GPU-written page" cases those uploads caused go away too. Restarts drop
+by 2-8 per frame, and GPU time is about 0.7 ms lower per frame (four
+alternating pairs; the crowd was moving and other apps used the GPU).
+
 **What is left on the GPU in the square:** about 39 resolves (3.1 ms in
 timed frames), 47 passes with at most two draws (3.0 ms), and the main
 scene pass (about 2 ms).

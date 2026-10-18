@@ -196,6 +196,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_hoist_shared_memory_uploads` | uploads at submission start instead of mid-pass (on by default on macOS; flicker fixed 2026-10-14, +38% fps; earlier: **caused the flickering dark ground areas, do not pass it**) |
 | - | `vulkan_hoist_uploads_of_read_pages` | also hoist uploads of pages read earlier in the submission when the read bytes are unchanged (on by default on macOS; hot reload; the "Uploads of pages read earlier" line counts them; -2.1 to -2.5 ms GPU per frame in the square) |
 | - | `debug_skip_resolve_dispatches` | 1: leave out the resolve copy dispatches but keep their barriers and pass ends; 2: the dump dispatches too (debug: fixed cost vs. shader work; stale textures) |
+| - | `vulkan_hoist_uploads_of_read_pages_cache` | keep a copy (16 MB) of the latest upload of pages that had nothing to compare with, so their next upload can be hoisted too (on; hot reload) |
 | - | `debug_hoist_used_page_uploads` | hoist those uploads without the check (debug: measures what they cost; can be wrong for the picture) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
@@ -1345,6 +1346,42 @@ the same way as Xenia's ROV path.
        framebuffer fetch (would remove the compute encoder and the store and
        reload of the render target per resolve; depends on MoltenVK input
        attachments). Measure again with the GPU free first.
+  51. **Done (2026-10-18): the tiny passes in the square, and uploads
+     compared with a cached copy** (`vulkan_hoist_uploads_of_read_pages_cache`,
+     on, hot reload; `docs/macos_port.md`, end of "Uploads of pages read
+     earlier in the submission").
+     - **What the ~44 passes with at most two draws are**
+       (`vulkan_pass_log`, crowd at the wagon, `fable_2_500`):
+       - ~20 post-processing steps: one draw, then a resolve of it (the mip
+         chain at 160/80 wide, the 280x184 and 560x360 chains);
+       - ~10 clear quads (`A4A965C189287B99`), most followed by a transfer
+         of the slivers between the cleared width and the pitch (the strip
+         clears of item 35: needed);
+       - ~8 ended by other barriers;
+       - **~5-15 main-scene passes cut by uploads** (1-58 draws each,
+         varying a lot per frame).
+     - The upload cuts were the "nothing to compare with" case of item 49:
+       a page read earlier in the submission whose content came from an
+       upload in an earlier submission. Hoisting all of them
+       (`debug_hoist_used_page_uploads`) gave 13.7 -> 12.4 ms GPU per frame,
+       restarts 39 -> 30 (WindWaker-play used ~36% of the GPU).
+     - **The fix:** a page that had nothing to compare with gets its later
+       uploads copied into a 16 MB cache (1024 pages, round robin); a
+       per-page content generation, incremented by every upload and GPU
+       write, tells whether the copy is still what the GPU has. The next
+       such upload compares the read bytes with that copy.
+     - **Result** (four alternating pairs, `fable_2_501`; the crowd moved,
+       3400-5500 draws per window; WindWaker-auto and others 6-18% of the
+       GPU): uploads in the command stream 1-10 -> 0 per frame (the
+       "GPU-written page" cascades they caused went too), restarts 30-35 ->
+       28-29, GPU time 0.25-1.8 ms lower per pair (~0.7 ms on average).
+       "Read bytes changed" stays at 0-0.5 per frame. Same picture (16-shot
+       burst).
+     - Left: the post-processing steps and the strip clears, which follow
+       the game's draw -> resolve -> draw chain (item 50).
+     - **Story note:** during this run the street show in the square ended
+       and a quest started ("0 of 5 gold pieces"). The log shows no save
+       activity, but check where the save loads next time.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
