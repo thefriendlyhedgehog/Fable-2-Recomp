@@ -4336,10 +4336,10 @@ index 765c141..146b763 100644
                                 builder_->makeUintConstant(kSysFlag_MsaaSamples_Shift),
                                 builder_->makeUintConstant(2));
 diff --git a/src/graphics/pipeline/texture/cache.cpp b/src/graphics/pipeline/texture/cache.cpp
-index 76f5600..def5c9a 100644
+index 76f5600..f832e5a 100644
 --- a/src/graphics/pipeline/texture/cache.cpp
 +++ b/src/graphics/pipeline/texture/cache.cpp
-@@ -23,9 +23,29 @@
+@@ -23,9 +23,40 @@
  #include <rex/graphics/pipeline/texture/util.h>
  #include <rex/graphics/register_file.h>
  #include <rex/graphics/xenos.h>
@@ -4360,16 +4360,27 @@ index 76f5600..def5c9a 100644
 +                    "Log why textures are loaded (first load, CPU write, GPU write such as a "
 +                    "resolve, other) and the textures loaded most often, every 300 frames.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
-+REXCVAR_DEFINE_BOOL(texture_skip_unchanged_reloads, false, "GPU",
++// On by default on macOS: a CPU write anywhere in a 16 KB host page outdates
++// every texture in it, and at the trail ~28 reloads per frame had the same
++// data (with asynchronous MoltenVK submits, half of them inline, ending
++// render passes).
++#if defined(__APPLE__)
++#define REX_TEXTURE_SKIP_UNCHANGED_RELOADS_DEFAULT true
++#else
++#define REX_TEXTURE_SKIP_UNCHANGED_RELOADS_DEFAULT false
++#endif
++REXCVAR_DEFINE_BOOL(texture_skip_unchanged_reloads, REX_TEXTURE_SKIP_UNCHANGED_RELOADS_DEFAULT,
++                    "GPU",
 +                    "When a texture is outdated by a CPU write, hash its guest data and skip "
 +                    "the reload if it is the same as at the last load (the write was to other "
 +                    "data in the same protected host page: 16 KB on Apple Silicon). Only for "
 +                    "textures whose pages hold no GPU-written data.")
 +    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++#undef REX_TEXTURE_SKIP_UNCHANGED_RELOADS_DEFAULT
  REXCVAR_DEFINE_INT32(texture_cache_memory_limit_render_to_texture, 24, "GPU",
                       "Texture cache memory limit for render-to-texture (MB)")
      .range(1, 256)
-@@ -305,6 +325,31 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
+@@ -305,6 +336,31 @@ void TextureCache::CompletedSubmissionUpdated(uint64_t completed_submission_inde
    }
  }
  
@@ -4401,7 +4412,7 @@ index 76f5600..def5c9a 100644
  void TextureCache::BeginSubmission(uint64_t new_submission_index) {
    assert_true(new_submission_index > current_submission_index_);
    current_submission_index_ = new_submission_index;
-@@ -316,6 +361,93 @@ void TextureCache::BeginFrame() {
+@@ -316,6 +372,93 @@ void TextureCache::BeginFrame() {
    // sure bindings are reset so a new attempt will surely be made if the texture
    // is requested again.
    ResetTextureBindings();
@@ -4495,7 +4506,7 @@ index 76f5600..def5c9a 100644
  }
  
  void TextureCache::MarkRangeAsResolved(uint32_t start_unscaled, uint32_t length_unscaled) {
-@@ -435,8 +567,56 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+@@ -435,8 +578,56 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
      }
    }
  
@@ -4552,7 +4563,7 @@ index 76f5600..def5c9a 100644
      return false;
    }
  
-@@ -444,8 +624,15 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
+@@ -444,8 +635,15 @@ bool TextureCache::CommitPreparedTextureLoad(const PendingTextureLoad& pending_l
    // resolves as well to detect when the CPU wants to reuse the memory for a
    // regular texture or a vertex buffer, and thus the scaled resolve version is
    // not up to date anymore.
@@ -4569,7 +4580,7 @@ index 76f5600..def5c9a 100644
  
    return true;
  }
-@@ -573,6 +760,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
+@@ -573,6 +771,7 @@ void TextureCache::RequestTextures(uint32_t used_texture_mask) {
      for (const PendingSharedMemoryRange& pending_range : pending_shared_memory_ranges) {
        pending_shared_memory_range_pairs.emplace_back(pending_range.start, pending_range.length);
      }
@@ -4577,7 +4588,7 @@ index 76f5600..def5c9a 100644
      batched_shared_memory_request_succeeded = shared_memory().RequestRanges(
          pending_shared_memory_range_pairs.data(), pending_shared_memory_range_pairs.size());
    }
-@@ -636,6 +824,19 @@ void TextureCache::Texture::LogAction(const char* action) const {
+@@ -636,6 +835,19 @@ void TextureCache::Texture::LogAction(const char* action) const {
  // not be destroyed immediately after creation if dropping of old textures is
  // performed somehow. The list is maintained by the Texture, not the
  // TextureCache itself (unlike the `textures_` container).
@@ -4597,7 +4608,7 @@ index 76f5600..def5c9a 100644
  TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& key, bool track_usage)
      : texture_cache_(texture_cache),
        key_(key),
-@@ -663,6 +864,12 @@ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& ke
+@@ -663,6 +875,12 @@ TextureCache::Texture::Texture(TextureCache& texture_cache, const TextureKey& ke
  }
  
  TextureCache::Texture::~Texture() {
@@ -4610,7 +4621,7 @@ index 76f5600..def5c9a 100644
    if (mips_watch_handle_) {
      texture_cache().shared_memory().UnwatchMemoryRange(mips_watch_handle_);
    }
-@@ -686,9 +893,22 @@ TextureCache::Texture::~Texture() {
+@@ -686,9 +904,22 @@ TextureCache::Texture::~Texture() {
    texture_cache_.UpdateTexturesTotalHostMemoryUsage(0, host_memory_usage_);
  }
  
@@ -4634,7 +4645,7 @@ index 76f5600..def5c9a 100644
    if (base_outdated_) {
      assert_not_zero(GetGuestBaseSize());
      base_outdated_ = false;
-@@ -703,6 +923,59 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
+@@ -703,6 +934,59 @@ void TextureCache::Texture::MakeUpToDateAndWatch(
          key().mip_page << 12, GetGuestMipsSize(), TextureCache::WatchCallback, this, nullptr, 1);
      outdated_mask_.fetch_and(~kOutdatedBitMips, std::memory_order_release);
    }
@@ -4694,7 +4705,7 @@ index 76f5600..def5c9a 100644
  }
  
  void TextureCache::Texture::MarkAsUsed() {
-@@ -753,6 +1026,11 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
+@@ -753,6 +1037,11 @@ void TextureCache::WatchCallback(const std::unique_lock<std::recursive_mutex>& g
    Texture& texture = *static_cast<Texture*>(context);
    texture.WatchCallback(global_lock, argument != 0);
    texture.texture_cache().texture_became_outdated_.store(true, std::memory_order_release);
@@ -4706,7 +4717,7 @@ index 76f5600..def5c9a 100644
  }
  
  void TextureCache::DestroyAllTextures(bool from_destructor) {
-@@ -892,6 +1170,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
+@@ -892,6 +1181,7 @@ bool TextureCache::LoadTextureData(Texture& texture) {
    for (size_t i = 0; i < pending_range_count; ++i) {
      pending_range_pairs[i] = std::make_pair(pending_ranges[i].start, pending_ranges[i].length);
    }

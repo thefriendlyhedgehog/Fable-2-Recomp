@@ -198,6 +198,8 @@ Keys work only while the game window is focused; every press is logged as
 | - | `debug_skip_resolve_dispatches` | 1: leave out the resolve copy dispatches but keep their barriers and pass ends; 2: the dump dispatches too (debug: fixed cost vs. shader work; stale textures) |
 | - | `vulkan_hoist_uploads_of_read_pages_cache` | keep a copy (16 MB) of the latest upload of pages that had nothing to compare with, so their next upload can be hoisted too (on; hot reload) |
 | - | `debug_hoist_used_page_uploads` | hoist those uploads without the check (debug: measures what they cost; can be wrong for the picture) |
+| - | `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` (environment, MoltenVK) | 0 by default on macOS (the app sets it unless exported): MoltenVK encodes Metal on its own dispatch queue instead of inside `vkQueueSubmit` on the command processor thread; export 1 to compare (restart) |
+| - | `texture_skip_unchanged_reloads` | skip a reload after a CPU write when the texture's guest data hashes the same as at its last load (on by default on macOS; hot reload) |
 | - | `vulkan_debug_dump_resolves`, `vulkan_debug_dump_dir` | at every frame report, copy the resolves to the listed addresses out of the GPU's shared memory (in the command stream, no queue drain, guest memory untouched) and write them untiled once the frame completes (the capture script sets both) |
 | - | `direct_host_resolve` | fbo: the fast 32bpp resolve of a 1x color render target reads it directly instead of dumping it to the EDRAM buffer first (on) |
 | - | `vulkan_direct_resolve_depth` | `direct_host_resolve` also for 1x depth render targets (on) |
@@ -700,7 +702,8 @@ the same way as Xenia's ROV path.
      `texture_skip_unchanged_reloads` (off by default) skips those by hash:
      59 loads per frame fewer and the same picture (sweep alternating it,
      `out/sweep_skip`, all within 1.3-2.1%), but no measurable change in
-     frame time (`fable_2_190`-`193`) or CPU time, so it stays opt-in.
+     frame time (`fable_2_190`-`193`) or CPU time, so it stays opt-in. On by default on macOS since item 52: with asynchronous
+     MoltenVK submits half of these loads end render passes.
      **What the resolve-to-texture path costs instead** (trace
      `out/profile/pre_batch2.trace`, heavy view, per command buffer, about
      two per frame): compute work 1.24 ms (52 encoders: the fbo dumps of
@@ -1473,6 +1476,67 @@ the same way as Xenia's ROV path.
      - **Story note:** during this run the street show in the square ended
        and a quest started ("0 of 5 gold pieces"). The log shows no save
        activity, but check where the save loads next time.
+  52. **Done (2026-10-18): MoltenVK encoding off the command processor
+     thread, and unchanged texture reloads skipped, both default on macOS**
+     (`docs/macos_port.md`, "CPU: MoltenVK encoding on its own thread").
+     - **Profile** (`sample`, 3245-draw view by the market wall): the
+       command processor was 46% of a core. Of its running time:
+       - ~27% MoltenVK encoding Metal inside `vkQueueSubmit`, on that
+         thread;
+       - ~13% the upload memmoves;
+       - ~13% `UpdateBindings`.
+       It also blocks on the global `recursive_mutex`: `SharedMemory::RequestRanges`
+       takes it on every draw, and the guest's `mtmsrd r13` (around its spin
+       locks) takes the same one (`REX_ENTER_GLOBAL_LOCK`). This is waiting,
+       not CPU, and `sample` inflates it (the game ran at 27 fps while
+       sampled). Not changed yet.
+     - **`MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`** (now set by the app on
+       macOS unless exported; restart). MoltenVK then encodes on its own
+       dispatch queue. Four alternating runs at the trail
+       (`fable_2_507`-`510`):
+       - command processor 5.5-6.6 -> 4.1-4.4 ms per frame (35% -> 25% of a
+         core); its "submit" time per frame 1.5-2.2 -> 0.2-0.3 ms
+         (`vulkan_submission_log`, `fable_2_513`/`514`);
+       - whole process the same (1.2 cores, 4.7 W).
+     - **Side effect:** 2 submissions per frame instead of 3. With
+       `vulkan_submit_on_primary_buffer_end` the command processor submits
+       whenever it catches up with the guest's ring buffer. Running faster,
+       it no longer does so after the first 80 draws. Textures reloaded
+       after an earlier use in the frame then counted as "used earlier in
+       the submission" and loaded inline: 4-6 -> 13-16 per frame, 4 more pass
+       ends, GPU +0.2 ms.
+     - **These reloads were all unchanged** (`texture_load_log`,
+       `fable_2_512`): ~30 per frame after a CPU write, every one with the
+       same guest data as its last load. 22 small textures share 16 KB pages
+       with data the CPU rewrites each frame (item 19's case).
+       `texture_skip_unchanged_reloads` is now on by default on macOS (hot
+       reload). With async submits, alternating within one run
+       (`fable_2_515`, three rounds, GPU quiet):
+       - GPU 7.53-7.71 -> 6.53-6.57 ms per frame;
+       - restarts 30-32 -> 23;
+       - texture-load pass ends 7-8 -> 0;
+       - texture loads ~30 -> 2 per frame (the GPU-written ones);
+       - command processor 3.85 -> 3.81 ms.
+     - **Against the old defaults** (separate runs): GPU 7.0-7.6 -> ~6.55 ms,
+       command processor 5.5-6.6 -> ~3.8 ms per frame at the trail.
+     - **Same picture** (`fable_2_516`, defaults): 16-shot bursts with the
+       skip on, off and on again. Shots on vs off differ by 0.35-0.40% of
+       pixels (6% fuzz), consecutive shots of one setting by 0.29-0.36% (the
+       snow). Channel means agree within 0.1/255. That run's GPU times are
+       not usable: RuneLite took 34% of the GPU and 62% of a core during it.
+     - Not measured yet: the square (the command processor was ~11.6 ms
+       per frame there).
+     - **Leads from the Apple Silicon review** (not done yet):
+       - the FPCR flush-mode writes the recompiled code makes when switching
+         between VMX and scalar code. That is 7,635 unconditional
+         `enable/disableFlushModeUnconditional` sites, a mode switch costs
+         ~35 cycles, and RPCS3 sets FZ once per thread; count them at run
+         time first;
+       - the `REX_PHYS_HOST_OFFSET` check on every guest access
+         (`generated/default/fable_2_pch.h:120`), which the codegen could
+         skip where the address is provably below 0xE0000000;
+       - `os_unfair_lock` for the global lock (1.6-2.6 vs 8.5 ns uncontended);
+       - MoltenVK 1.4.2.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

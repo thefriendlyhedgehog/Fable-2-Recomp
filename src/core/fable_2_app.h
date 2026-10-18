@@ -382,6 +382,13 @@ class Fable2App : public rex::ReXApp {
     // warns "Metal does not support disabling primitive restart" on every strip
     // draw, thousands of lines per second on stderr and in logs/.
     ::setenv("MVK_CONFIG_LOG_LEVEL", "1", 0);
+    // MoltenVK's own setting too: encode the Metal command buffers on
+    // MoltenVK's dispatch queue instead of inside vkQueueSubmit on the command
+    // processor thread (about a quarter of that thread's time). At the trail
+    // the command processor took 5.5-6.6 -> 4.1-4.4 ms per frame; total CPU
+    // and power stay the same. Export MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1
+    // to compare.
+    ::setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", 0);
 #endif
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();

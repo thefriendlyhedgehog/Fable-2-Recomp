@@ -665,7 +665,8 @@ ranges). At the heavy view about 100 loads per frame (fable_2_188):
   are per host page, 16 KB on Apple Silicon (4 guest pages), so a CPU
   write anywhere in it outdates every texture there.
 
-`texture_skip_unchanged_reloads` (off by default, hot reload) skips such
+`texture_skip_unchanged_reloads` (hot reload; on by default on macOS since
+"CPU: MoltenVK encoding on its own thread", off before) skips such
 a reload when the texture's guest data hashes the same as at its last
 load, and only re-arms the watch. It only applies when no page of the
 texture holds GPU-written data (`SharedMemory::IsRangeGpuWritten`), now
@@ -1466,6 +1467,65 @@ What is left:
 - register writes;
 - the guest threads, which run game code with a flat profile:
   `ProcessTreeRecursive`, hash lookups, animation interpolation, no spinning.
+
+### CPU: MoltenVK encoding on its own thread
+
+A `sample` of the command processor thread (3245 draws per frame, 60 fps)
+showed ~27% of its running time in `vkQueueSubmit`. That is MoltenVK
+turning the Vulkan command buffer into Metal encoders, synchronously on the
+thread that also parses the guest's command stream. MoltenVK can do that on
+a dispatch queue of its own: `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`. The
+app now sets it on macOS (`setenv(..., 0)` in `fable_2_app.h`, so an
+exported value wins; export 1 to compare).
+
+At the trail, four alternating runs (`fable_2_507`-`510`):
+
+| | sync (before) | async |
+|---|---|---|
+| command processor CPU | 5.5-6.6 ms/frame | 4.1-4.4 ms/frame |
+| its "submit" time (`vulkan_submission_log`) | 1.5-2.2 ms | 0.2-0.3 ms |
+| process | 1.21-1.24 cores, 4.6-4.7 W | 1.19-1.20 cores, 4.7 W |
+
+The work moves rather than shrinks. What it buys is headroom on the thread
+every frame waits for.
+
+It changed one thing in the command stream. `vulkan_submit_on_primary_buffer_end`
+submits whenever the command processor catches up with the guest's ring
+buffer, and running faster it caught up at other points: 2 submissions
+per frame instead of 3 (the one after the first 80 draws went). Textures
+reloaded after an earlier use in the frame then fell in the same submission
+as that use, so their loads couldn't be hoisted. That meant 13-16 inline loads
+per frame instead of 4-6, four more render pass ends, and ~0.2 ms more GPU
+time.
+
+`texture_load_log` showed what these loads were (`fable_2_512`): ~30 per
+frame after a CPU write, every one with the same guest data as at its last
+load. These are the small textures sharing 16 KB pages with data the CPU
+rewrites each frame ("Why textures reload every frame").
+`texture_skip_unchanged_reloads` is now on by default on macOS. With async
+submits, alternating within one run (`fable_2_515`):
+
+| | skip off | skip on |
+|---|---|---|
+| GPU time | 7.53-7.71 ms/frame | 6.53-6.57 ms/frame |
+| render pass (re)starts | 30-32 | 23 |
+| pass ends for texture loads | 7-8 | 0 |
+| texture loads | ~30/frame | 2/frame (resolved ones) |
+
+When it was tried before, it saved nothing measurable: the skipped loads
+were small and already hoisted. Now it also saves the inline ones and their
+pass ends.
+
+The picture is the same. In 16-shot bursts with the skip on, off and on
+again (`fable_2_516`), on vs off differ by 0.35-0.40% of pixels and
+consecutive shots of one setting by 0.29-0.36% (the snow). The channel
+means agree within 0.1/255.
+
+The thread also blocks on the global `recursive_mutex`. `SharedMemory::RequestRanges`
+takes it for every draw, and the recompiled `mtmsrd r13` (the guest's
+interrupt-disable around its spin locks, `REX_ENTER_GLOBAL_LOCK`) takes the
+same one. That is waiting rather than CPU; `sample` slowed the game to 27
+fps and makes it look worse than it is.
 
 ### Frame pacing: guest clock and the drawable wait
 
