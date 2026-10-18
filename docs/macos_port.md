@@ -1455,6 +1455,61 @@ next frame, every second vblank. Two host problems disturbed that:
   vkAcquireNextImageKHR, which makes MoltenVK fetch the drawable there,
   outside the lock.
 
+### Frame pacing: idle repaints and the display refresh
+
+`--vulkan_present_pacing_log=10` logs, every 10 s, two things from
+VK_GOOGLE_display_timing (MoltenVK fills it from Metal's
+`presentedTime`):
+
+- how many display refreshes each guest frame stayed on screen;
+- how far apart presents are.
+
+Only the first present of each guest frame counts as a frame: the presenter
+tags it with a present ID when the guest output mailbox slot changes.
+
+**Idle repaints.** `ReXApp::LaunchModule` creates the achievement toast
+dialog for the whole session. A registered ImGui dialog makes the
+`ImGuiDrawer` ask for a repaint after every paint, so the presenter repainted
+the same guest frame on the UI thread at about 125 Hz. At 30 fps there were
+1200 presents per 10 s for 300 guest frames.
+
+The repaints cost GPU time, and at 60 fps they delayed new frames. 13-33
+frames per 10 s stayed on screen twice as long, which shows as stutter.
+
+`AchievementToastDialog` now unregisters itself from the drawer when its
+queue is empty and registers again on `Push`. `ReXApp` forwards achievement
+events to the UI thread for that. Presents now equal guest frames, and the
+game's GPU share at 30 fps went from 24.3% to 18.5%.
+
+**Display refresh.** The guest vblank is a free-running timer at
+`video_mode_refresh_rate`. Whether that matters depends on the display:
+
+- **Variable refresh** (the 144 Hz main display here): the display shows
+  each frame when it arrives, and the timer is already even (30 fps: 300 of
+  300 frames for 33.3 ms).
+- **Fixed refresh** (60 Hz): the timer drifts against the refreshes. Per
+  10 s, up to 17 frames are shown as a short/long pair (one refresh, then
+  three).
+
+`vsync_display_link` handles fixed-refresh displays. It is used when the
+refresh rate of the window's display is a whole multiple of
+`video_mode_refresh_rate` (or the reverse):
+
+- the guest vblank follows a CVDisplayLink on that display, every Nth
+  refresh or N times per refresh;
+- each vblank fires `vsync_display_link_phase` (0.5) of a refresh after the
+  callback;
+- other rates keep the timer, so the frame rate never changes;
+- the choice is made again when the window moves to another display.
+
+The window's display comes from `rex::ui::GetPresentationDisplayId()`,
+which the SDL window sets.
+
+The phase matters. At 0, the game's flip lands on the display's deadline,
+and 34-38 frames per 10 s alternated between one and three refreshes. At
+0.5 (or 0.25), 0-2 did. At the 60 fps target on the 60 Hz display, 598-601
+of 600 frames stay on screen for exactly one refresh.
+
 ### Window resize: MoltenVK leaves the layer at 1x1
 
 After a resize (maximizing, dragging the window edge, moving the window to

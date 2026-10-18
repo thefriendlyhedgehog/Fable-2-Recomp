@@ -218,6 +218,8 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_resolve_into_texture_full` | with the above: also the resolves from the EDRAM buffer with format conversion (8/16/32/64 bpp, mip levels), not only the direct 32 bpp ones (on) |
 | - | `shared_memory_exact_gpu_write_watches` | a GPU write (resolve) invalidates only the textures it overlaps byte by byte, not all in the same 16 KB host pages (on on macOS) |
 | - | `vulkan_fix_layer_drawable_size` | macOS: after creating a swapchain, set the CAMetalLayer's drawableSize back to the swapchain size when MoltenVK left it at 1x1 (on; off = black or grey window after some resizes) |
+| - | `vsync_display_link`, `vsync_display_link_phase` | macOS: the guest vblank follows the window's display refresh (CVDisplayLink) when that rate is a whole multiple of `video_mode_refresh_rate` or the reverse, fired the phase (0.5) of a refresh after the callback; other rates keep the timer (on, restart) |
+| - | `vulkan_present_pacing_log` | every N seconds, how many display refreshes each guest frame stayed on screen and how far apart presents are (VK_GOOGLE_display_timing; 0 = off) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
 | - | `execute_unclipped_draw_vs_on_cpu` | estimate the rows of unclipped draws by running their vertex shader on the CPU (on since 2026-10-16; off made them claim the whole EDRAM) |
 | - | `vulkan_resolve_log` | every 5 s, `[resolves]` lines: resolves by copy shader, size, destination format and the render targets they read (`direct` = no dump) |
@@ -1186,6 +1188,43 @@ the same way as Xenia's ROV path.
        its usage before its process name, so the script credited each
        process with the next one's GPU time. It also counted only the first
        queue.
+  47. **Done (2026-10-18): even frame pacing** (`docs/macos_port.md`,
+     "Frame pacing: idle repaints and the display refresh").
+     - **Measuring:** `--vulkan_present_pacing_log=10` logs, from
+       VK_GOOGLE_display_timing (Metal's `presentedTime`):
+       - how many refreshes each guest frame stayed on screen;
+       - how far apart presents are.
+     - **Idle repaints (the main cause).** The achievement toast dialog was
+       registered with the ImGui drawer for the whole session, so the
+       presenter repainted the same guest frame on the UI thread about 125
+       times a second (1200 presents per 10 s at 30 fps).
+       - At 60 fps that showed 13-33 frames per 10 s for twice as long
+         (stutter).
+       - Now the dialog registers only while a toast is queued.
+       - Presents now equal guest frames:
+         - 30 fps: 300 of 300 frames on screen for exactly 33.3 ms;
+         - 60 fps: no doubled frames, about 1 ms of jitter.
+       - Game GPU share at 30 fps 24.3% -> 18.5%, cores 0.78 -> 0.72.
+     - **The main display (nominally 144 Hz) is variable refresh.** At 30 fps
+       frames stay up exactly 33.3 ms, not a 27.8/34.7 ms mix. So the
+       earlier "144 Hz judder" (item 45) was wrong: the free-running timer
+       is already even there.
+     - **Fixed-refresh displays: `vsync_display_link`** (on; restart).
+       - When the refresh of the window's display is a whole multiple of
+         `video_mode_refresh_rate` or the reverse (60 or 120 Hz displays),
+         the guest vblank follows that display's CVDisplayLink:
+         - every Nth refresh;
+         - or N per refresh (60 fps on a 60 Hz display: 2 per refresh);
+         - `vsync_display_link_phase` of a refresh after the callback
+           (0.5).
+       - Other rates keep the timer, so the frame rate never changes. A
+         display that stops refreshing falls back to the timer. The choice
+         is made again when the window moves between displays.
+       - On the 60 Hz second display, at 30 fps: timer 0-17 frames per 10 s
+         as short/long pairs; link at phase 0 34-38 (the flip lands on the
+         display's deadline); link at phase 0.5 or 0.25: 0-2.
+       - At 60 fps on that display: 598-601 of 600 frames on screen for one
+         refresh.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

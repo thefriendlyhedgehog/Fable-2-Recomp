@@ -1902,8 +1902,56 @@ index 1cb3faa..be34c10 100644
  };
  
  /// Create a default InputSystem with SDL + NOP drivers.
+diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
+index 7642601..e11fd18 100644
+--- a/include/rex/ui/overlay/achievement_toast.h
++++ b/include/rex/ui/overlay/achievement_toast.h
+@@ -32,7 +32,8 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+                          rex::Runtime* runtime);
+   ~AchievementToastDialog() override;
+ 
+-  // Thread-safe: safe to call from any thread, including guest threads.
++  // UI thread only: registers the dialog for drawing again if it was idle
++  // (ReXApp forwards achievement events to the UI thread).
+   void Push(const rex::system::AchievementEvent& event) override;
+ 
+  protected:
+@@ -50,6 +51,10 @@ class AchievementToastDialog : public AchievementNotificationDialog {
+   std::mutex mutex_;
+   std::deque<PendingToast> queue_;
+   AchievementIconCache icon_cache_;
++  // Registered with the ImGuiDrawer only while a toast is queued: a registered
++  // dialog makes the presenter repaint continuously (about 125 times a second
++  // on the UI thread), even with nothing to draw.
++  bool registered_ = true;
+ };
+ 
+ }  // namespace rex::ui
+diff --git a/include/rex/ui/presentation_display.h b/include/rex/ui/presentation_display.h
+new file mode 100644
+index 0000000..4c9ca3e
+--- /dev/null
++++ b/include/rex/ui/presentation_display.h
+@@ -0,0 +1,17 @@
++/**
++ * The display the game window is on, for code outside the UI (the guest
++ * vblank on macOS follows that display's refresh).
++ */
++
++#pragma once
++
++#include <cstdint>
++
++namespace rex::ui {
++
++// macOS: the CGDirectDisplayID of the display the main window is on; 0 if
++// unknown (no window yet, or another platform). Thread-safe.
++uint32_t GetPresentationDisplayId();
++void SetPresentationDisplayId(uint32_t display_id);
++
++}  // namespace rex::ui
 diff --git a/include/rex/ui/vulkan/device.h b/include/rex/ui/vulkan/device.h
-index 947817f..5d80954 100644
+index 947817f..fb392c9 100644
 --- a/include/rex/ui/vulkan/device.h
 +++ b/include/rex/ui/vulkan/device.h
 @@ -168,6 +168,20 @@ class VulkanDevice {
@@ -1927,13 +1975,15 @@ index 947817f..5d80954 100644
    };
  
    // Properties of the core API and enabled extensions, and enabled features.
-@@ -199,6 +213,9 @@ class VulkanDevice {
+@@ -199,6 +213,11 @@ class VulkanDevice {
      bool ext_1_3_KHR_maintenance4 = false;  // #414
      // Has optional features not implied by this being true.
      bool ext_1_3_KHR_dynamic_rendering = false;  // #55
 +    bool ext_EXT_external_memory_host = false;   // #179
 +    // MoltenVK: lets the presenter fetch the swapchain image's drawable early.
 +    bool ext_EXT_metal_objects = false;  // #312
++    // Present timing history (vulkan_present_pacing_log).
++    bool ext_GOOGLE_display_timing = false;  // #93
    };
  
    const Extensions& extensions() const { return extensions_; }
@@ -2143,6 +2193,22 @@ index 9ac8d15..2084a4c 100644
  #endif
    set_current_thread_name("");
  
+diff --git a/src/graphics/CMakeLists.txt b/src/graphics/CMakeLists.txt
+index 0d8f8af..ec86874 100644
+--- a/src/graphics/CMakeLists.txt
++++ b/src/graphics/CMakeLists.txt
+@@ -138,6 +138,11 @@ target_link_libraries(rexgpu-xenos PRIVATE
+     xxHash::xxhash
+ )
+ 
++if(APPLE)
++    # vsync_display_link: CVDisplayLink and the display's refresh rate.
++    target_link_libraries(rexgpu-xenos PRIVATE "-framework CoreVideo" "-framework CoreGraphics")
++endif()
++
+ if(REXGLUE_USE_VULKAN)
+     target_link_libraries(rexgpu-xenos PRIVATE
+         Vulkan::Headers
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
 index a744375..03ee238 100644
 --- a/src/graphics/command_processor.cpp
@@ -2714,14 +2780,29 @@ index a744375..03ee238 100644
  
  bool CommandProcessor::ExecutePacketType3_SET_CONSTANT(memory::RingBuffer* reader, uint32_t packet,
 diff --git a/src/graphics/graphics_system.cpp b/src/graphics/graphics_system.cpp
-index 8f2fcb0..d552a4b 100644
+index 8f2fcb0..03fb368 100644
 --- a/src/graphics/graphics_system.cpp
 +++ b/src/graphics/graphics_system.cpp
-@@ -31,6 +31,13 @@
+@@ -13,6 +13,7 @@
+ 
+ #include <algorithm>
+ #include <cctype>
++#include <cmath>
+ #include <cstdint>
+ #include <functional>
+ #include <memory>
+@@ -28,13 +29,39 @@
+ #include <rex/system/kernel_state.h>
+ #include <rex/system/xthread.h>
+ #include <rex/ui/graphics_provider.h>
++#include <rex/ui/presentation_display.h>
  #include <rex/ui/window.h>
  #include <rex/ui/windowed_app_context.h>
  
 +#if defined(__APPLE__)
++#include <CoreGraphics/CoreGraphics.h>
++#include <CoreVideo/CoreVideo.h>
++#include <dispatch/dispatch.h>
 +#include <mach/mach.h>
 +#include <mach/mach_time.h>
 +#include <mach/thread_policy.h>
@@ -2731,7 +2812,92 @@ index 8f2fcb0..d552a4b 100644
  REXCVAR_DEFINE_STRING(swap_post_effect, "none", "GPU", "Swap post effect: none, fxaa, fxaa_extreme")
      .allowed({"none", "fxaa", "fxaa_extreme"})
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-@@ -158,6 +165,26 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+ 
++REXCVAR_DEFINE_BOOL(vsync_display_link, true, "GPU",
++                    "macOS: when the refresh rate of the display the window is on is a whole "
++                    "multiple of video_mode_refresh_rate (or the reverse: 60 or 120 Hz displays "
++                    "for the default 60 and for 120), time the guest vblank off that display's "
++                    "refresh (CVDisplayLink) instead of a free-running timer, so every game "
++                    "frame stays on screen for the same number of refreshes. Other rates (a "
++                    "144 Hz display) keep the timer, so the frame rate never changes; so does a "
++                    "display that stops refreshing");
++
++REXCVAR_DEFINE_DOUBLE(vsync_display_link_phase, 0.5, "GPU",
++                      "With vsync_display_link: fire the guest vblank this fraction of a "
++                      "display refresh after the display link's callback. At 0 the game's "
++                      "frame flip lands on the display's deadline and frames alternate between "
++                      "one refresh too short and one too long");
++
+ REXCVAR_DEFINE_BOOL(store_shaders, true, "GPU",
+                     "Store shaders persistently and load them when loading games to avoid "
+                     "runtime spikes and freezes when playing the game not for the first time.");
+@@ -56,6 +83,65 @@ rex::graphics::CommandProcessor::SwapPostEffect ParseSwapPostEffect(
+   }
+   return rex::graphics::CommandProcessor::SwapPostEffect::kNone;
+ }
++#if defined(__APPLE__)
++// Signals a semaphore on every refresh of the display it is attached to.
++class DisplayRefreshLink {
++ public:
++  DisplayRefreshLink() : semaphore_(dispatch_semaphore_create(0)) {}
++  ~DisplayRefreshLink() {
++    if (link_) {
++      CVDisplayLinkStop(link_);
++      CVDisplayLinkRelease(link_);
++    }
++    dispatch_release(semaphore_);
++  }
++  // Attaches to the display (creating the link on first use). Returns the
++  // display's refresh rate, 0 on failure.
++  double Attach(CGDirectDisplayID display) {
++    if (!link_) {
++      if (CVDisplayLinkCreateWithCGDisplay(display, &link_) != kCVReturnSuccess) {
++        link_ = nullptr;
++        return 0.0;
++      }
++      CVDisplayLinkSetOutputCallback(link_, &DisplayRefreshLink::Callback, this);
++      CVDisplayLinkStart(link_);
++      running_ = true;
++    } else if (display != display_) {
++      CVDisplayLinkSetCurrentCGDisplay(link_, display);
++    }
++    display_ = display;
++    CVTime period = CVDisplayLinkGetNominalOutputVideoRefreshPeriod(link_);
++    if (period.flags & kCVTimeIsIndefinite || !period.timeValue) {
++      return 0.0;
++    }
++    return double(period.timeScale) / double(period.timeValue);
++  }
++  CGDirectDisplayID display() const { return display_; }
++  void SetRunning(bool running) {
++    if (link_ && running != running_) {
++      running ? CVDisplayLinkStart(link_) : CVDisplayLinkStop(link_);
++      running_ = running;
++    }
++  }
++  // Waits for the next refresh; false on timeout.
++  bool Wait(std::chrono::nanoseconds timeout) {
++    return dispatch_semaphore_wait(semaphore_,
++                                   dispatch_time(DISPATCH_TIME_NOW, timeout.count())) == 0;
++  }
++
++ private:
++  static CVReturn Callback(CVDisplayLinkRef, const CVTimeStamp*, const CVTimeStamp*, CVOptionFlags,
++                           CVOptionFlags*, void* context) {
++    dispatch_semaphore_signal(static_cast<DisplayRefreshLink*>(context)->semaphore_);
++    return kCVReturnSuccess;
++  }
++  CVDisplayLinkRef link_ = nullptr;
++  CGDirectDisplayID display_ = 0;
++  bool running_ = false;
++  dispatch_semaphore_t semaphore_;
++};
++#endif  // __APPLE__
++
+ }  // namespace
+ 
+ namespace rex::graphics {
+@@ -158,6 +244,121 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
              std::max(uint64_t(1), uint64_t(double(guest_tick_frequency) / refresh_rate_hz));
          uint64_t no_vsync_interval_ticks = std::max(uint64_t(1), guest_tick_frequency / 1000);
          uint64_t last_frame_time = chrono::Clock::QueryGuestTickCount();
@@ -2755,10 +2921,105 @@ index 8f2fcb0..d552a4b 100644
 +                            THREAD_TIME_CONSTRAINT_POLICY_COUNT);
 +        }
 +#endif
++#if defined(__APPLE__)
++        // Display-timed vblanks. Every refresh of the window's display gives
++        // `per_refresh` guest vblanks (spread over the refresh), or one every
++        // `refresh_divisor` refreshes.
++        std::unique_ptr<DisplayRefreshLink> display_link;
++        uint32_t refresh_divisor = 1, per_refresh = 1, refresh_index = 0;
++        double display_hz = 0.0;
++        bool locked = false;
++        CGDirectDisplayID checked_display = 0;
++        auto display_check_time = std::chrono::steady_clock::time_point();
++        while (vsync_worker_running_ && REXCVAR_GET(vsync) &&
++               REXCVAR_GET(vsync_display_link) && chrono::Clock::guest_time_scalar() == 1.0) {
++          auto now = std::chrono::steady_clock::now();
++          if (now >= display_check_time) {
++            display_check_time = now + std::chrono::seconds(1);
++            CGDirectDisplayID display = ui::GetPresentationDisplayId();
++            if (!display) {
++              display = CGMainDisplayID();
++            }
++            if (display != checked_display) {
++              checked_display = display;
++              if (!display_link) {
++                display_link = std::make_unique<DisplayRefreshLink>();
++              }
++              display_hz = display_link->Attach(display);
++              double ratio = display_hz > 0.0 ? display_hz / refresh_rate_hz : 0.0;
++              refresh_divisor = uint32_t(std::max(1.0, std::round(ratio)));
++              per_refresh = ratio > 0.0 ? uint32_t(std::max(1.0, std::round(1.0 / ratio))) : 1;
++              double multiple = ratio >= 1.0 ? ratio : (ratio > 0.0 ? 1.0 / ratio : 0.0);
++              locked = multiple > 0.0 && std::abs(multiple - std::round(multiple)) < 0.01 * multiple;
++              display_link->SetRunning(locked);
++              if (locked) {
++                REXGPU_INFO("vsync_display_link: display {} at {:.2f} Hz, guest vblank {} -> "
++                            "{:.2f} Hz",
++                            display, display_hz,
++                            per_refresh > 1 ? fmt::format("{} per refresh", per_refresh)
++                                            : fmt::format("every {} refresh(es)", refresh_divisor),
++                            display_hz * per_refresh / refresh_divisor);
++              } else {
++                REXGPU_INFO("vsync_display_link: display {} at {:.2f} Hz is not a multiple of "
++                            "{:.2f} Hz; the guest vblank stays on the timer",
++                            display, display_hz, refresh_rate_hz);
++              }
++            }
++          }
++          if (!locked) {
++            // The timer, as below (a sleep capped at 50 ms keeps the display
++            // check going).
++            uint64_t current_time = chrono::Clock::QueryGuestTickCount();
++            while (current_time - last_frame_time >= vsync_interval_ticks) {
++              MarkVblank();
++              last_frame_time += vsync_interval_ticks;
++            }
++            uint64_t elapsed_ticks = chrono::Clock::QueryGuestTickCount() - last_frame_time;
++            uint64_t remaining_ticks =
++                vsync_interval_ticks - std::min(vsync_interval_ticks, elapsed_ticks);
++            auto remaining = std::chrono::nanoseconds(int64_t(
++                std::min(double(remaining_ticks) * 1e9 / double(guest_tick_frequency), 50e6)));
++            constexpr auto kWakeupMargin = std::chrono::microseconds(300);
++            if (remaining > kWakeupMargin + std::chrono::microseconds(100)) {
++              rex::thread::Sleep(remaining - kWakeupMargin);
++            } else {
++              rex::thread::Sleep(std::chrono::microseconds(100));
++            }
++            continue;
++          }
++          // A display that stops refreshing (asleep, disconnected) must not
++          // stop the guest: after a few missed refreshes, one timer vblank.
++          auto refresh_period = std::chrono::nanoseconds(int64_t(1e9 / display_hz));
++          if (!display_link->Wait(refresh_period * 3)) {
++            uint64_t current_time = chrono::Clock::QueryGuestTickCount();
++            if (current_time - last_frame_time >= vsync_interval_ticks) {
++              MarkVblank();
++              last_frame_time = current_time;
++            }
++            continue;
++          }
++          if (++refresh_index < refresh_divisor) {
++            continue;
++          }
++          refresh_index = 0;
++          double phase = std::clamp(REXCVAR_GET(vsync_display_link_phase), 0.0, 0.95);
++          if (phase > 0.0) {
++            rex::thread::Sleep(std::chrono::nanoseconds(int64_t(refresh_period.count() * phase)));
++          }
++          MarkVblank();
++          for (uint32_t i = 1; i < per_refresh; ++i) {
++            rex::thread::Sleep(refresh_period / per_refresh);
++            MarkVblank();
++          }
++          last_frame_time = chrono::Clock::QueryGuestTickCount();
++        }
++        display_link.reset();
++        last_frame_time = chrono::Clock::QueryGuestTickCount();
++#endif  // __APPLE__
          while (vsync_worker_running_) {
            uint64_t current_time = chrono::Clock::QueryGuestTickCount();
            uint64_t interval_ticks =
-@@ -166,7 +193,24 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
+@@ -166,7 +367,24 @@ X_STATUS GraphicsSystem::SetupGuestGpu(runtime::FunctionDispatcher* function_dis
              MarkVblank();
              last_frame_time += interval_ticks;
            }
@@ -2784,7 +3045,7 @@ index 8f2fcb0..d552a4b 100644
          }
          return 0;
        }));
-@@ -316,9 +360,18 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
+@@ -316,9 +534,18 @@ void GraphicsSystem::DispatchInterruptCallback(uint32_t source, uint32_t cpu) {
                                           rex::countof(args));
  }
  
@@ -29529,11 +29790,90 @@ index 813bb1c..4b46c83 100644
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
+diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
+index 5bd3dc5..c4cf1fb 100644
+--- a/src/ui/CMakeLists.txt
++++ b/src/ui/CMakeLists.txt
+@@ -162,7 +162,7 @@ if(UNIX AND NOT APPLE)
+         ${WAYLAND_LIBRARIES}
+     )
+ elseif(APPLE)
+-    target_link_libraries(rexui PRIVATE "-framework CoreFoundation")
++    target_link_libraries(rexui PRIVATE "-framework CoreFoundation" "-framework CoreGraphics")
+ endif()
+ 
+ if(WIN32)
+diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
+index 53b8c0b..214eff2 100644
+--- a/src/ui/overlay/achievement_toast.cpp
++++ b/src/ui/overlay/achievement_toast.cpp
+@@ -20,13 +20,23 @@ namespace rex::ui {
+ AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer,
+                                                ImmediateDrawer* immediate_drawer,
+                                                rex::Runtime* runtime)
+-    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {}
++    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {
++  // Nothing to show yet.
++  imgui_drawer()->RemoveDialog(this);
++  registered_ = false;
++}
+ 
+ AchievementToastDialog::~AchievementToastDialog() {}
+ 
+ void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
+-  std::lock_guard<std::mutex> lock(mutex_);
+-  queue_.push_back({event, std::chrono::steady_clock::now()});
++  {
++    std::lock_guard<std::mutex> lock(mutex_);
++    queue_.push_back({event, std::chrono::steady_clock::now()});
++  }
++  if (!registered_) {
++    imgui_drawer()->AddDialog(this);
++    registered_ = true;
++  }
+ }
+ 
+ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+@@ -48,6 +58,9 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+       }
+     }
+     if (queue_.empty()) {
++      // Idle: stop the presenter's continuous repaints until the next Push.
++      imgui_drawer()->RemoveDialog(this);
++      registered_ = false;
+       return;
+     }
+     toast = queue_.front();
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index b94fe9e..8e96094 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -439,11 +439,16 @@ void ReXApp::LaunchModule() {
+     if (achievement_notification_ && achievement_notification_listener_ == 0 && runtime_ &&
+         runtime_->kernel_state()) {
+       std::weak_ptr<ui::AchievementNotificationDialog> notification = achievement_notification_;
++      ui::WindowedAppContext* ui_context = &app_context();
++      // Events come from guest threads; the dialog (re)registers for drawing
++      // on the UI thread.
+       achievement_notification_listener_ = achievements().RegisterNotificationCallback(
+-          [notification](const rex::system::AchievementEvent& event) {
+-            if (auto dialog = notification.lock()) {
+-              dialog->Push(event);
+-            }
++          [notification, ui_context](const rex::system::AchievementEvent& event) {
++            ui_context->CallInUIThreadDeferred([notification, event]() {
++              if (auto dialog = notification.lock()) {
++                dialog->Push(event);
++              }
++            });
+           });
+     }
+ 
 diff --git a/src/ui/vulkan/vulkan_device.cpp b/src/ui/vulkan/vulkan_device.cpp
-index 8197bb4..26cae81 100644
+index 8197bb4..ff85384 100644
 --- a/src/ui/vulkan/vulkan_device.cpp
 +++ b/src/ui/vulkan/vulkan_device.cpp
-@@ -236,6 +236,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -236,6 +236,17 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
        XE_UI_VULKAN_STRUCT_EXTENSION(EXT_custom_border_color)
        // Required for true null descriptors in bindless texture bindings.
        XE_UI_VULKAN_STRUCT_EXTENSION(EXT_robustness2)
@@ -29546,10 +29886,12 @@ index 8197bb4..26cae81 100644
 +      // (vulkan_fetch_drawable_before_submit).
 +      XE_UI_VULKAN_STRUCT_EXTENSION(EXT_metal_objects)
 +#endif
++      // #93. On-screen times of presented images (vulkan_present_pacing_log).
++      XE_UI_VULKAN_STRUCT_EXTENSION(GOOGLE_display_timing)
      }
      if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
        // #237.
-@@ -330,6 +339,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -330,6 +341,10 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
    VulkanFeatures<VkPhysicalDeviceCustomBorderColorFeaturesEXT,
                   VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT>
        features_EXT_custom_border_color;
@@ -29560,7 +29902,7 @@ index 8197bb4..26cae81 100644
    VkPhysicalDeviceCustomBorderColorPropertiesEXT properties_EXT_custom_border_color = {
        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT};
    VulkanFeatures<VkPhysicalDeviceRobustness2FeaturesEXT,
-@@ -376,6 +389,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -376,6 +391,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      if (device->extensions_.ext_EXT_robustness2) {
        features_EXT_robustness2.Link(supported_features_2, device_create_info);
      }
@@ -29575,7 +29917,7 @@ index 8197bb4..26cae81 100644
      ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
      ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
    }
-@@ -625,12 +646,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -625,12 +648,15 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
    XE_UI_VULKAN_LIMIT(optimalBufferCopyOffsetAlignment)
    XE_UI_VULKAN_LIMIT(optimalBufferCopyRowPitchAlignment)
    XE_UI_VULKAN_LIMIT(nonCoherentAtomSize)
@@ -29591,7 +29933,7 @@ index 8197bb4..26cae81 100644
      XE_UI_VULKAN_FEATURE(tessellationShader)
      XE_UI_VULKAN_FEATURE(sampleRateShading)
      XE_UI_VULKAN_FEATURE(depthClamp)
-@@ -731,6 +755,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
+@@ -731,6 +757,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
      }
    }
  
@@ -29612,10 +29954,19 @@ index 8197bb4..26cae81 100644
  #undef XE_UI_VULKAN_ENUM_LIMIT
  #undef XE_UI_VULKAN_FEATURE
 diff --git a/src/ui/vulkan/vulkan_presenter.cpp b/src/ui/vulkan/vulkan_presenter.cpp
-index 23645ef..92185f2 100644
+index 23645ef..9baa322 100644
 --- a/src/ui/vulkan/vulkan_presenter.cpp
 +++ b/src/ui/vulkan/vulkan_presenter.cpp
-@@ -43,6 +43,9 @@
+@@ -10,6 +10,8 @@
+  */
+ 
+ #include <algorithm>
++#include <chrono>
++#include <iterator>
+ #include <atomic>
+ #include <cstddef>
+ #include <cstdint>
+@@ -43,6 +45,9 @@
  #include <rex/ui/surface_win.h>
  #endif
  #if REX_PLATFORM_MAC
@@ -29625,7 +29976,7 @@ index 23645ef..92185f2 100644
  #include <rex/ui/surface_mac.h>
  #endif
  
-@@ -58,10 +61,26 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_mailbox, true, "UI/Vulkan",
+@@ -58,10 +63,121 @@ REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_mailbox, true, "UI/Vulkan",
  REXCVAR_DEFINE_BOOL(vulkan_allow_present_mode_fifo_relaxed, true, "UI/Vulkan",
                      "Allow FIFO relaxed present mode");
  
@@ -29636,6 +29987,11 @@ index 23645ef..92185f2 100644
 +                    "after setting the new size (a workaround for presentations that do not "
 +                    "complete), so the window shows one stretched pixel (black or grey) until "
 +                    "the next resize");
++
++REXCVAR_DEFINE_INT32(vulkan_present_pacing_log, 0, "UI/Vulkan",
++                     "Every this many seconds, log how many display refreshes each presented "
++                     "image stayed on screen (from VK_GOOGLE_display_timing, MoltenVK: Metal's "
++                     "presentedTime), and the mean frame time. 0 = off");
 +
 +REXCVAR_DEFINE_BOOL(vulkan_fetch_drawable_before_submit, true, "UI/Vulkan",
 +                    "MoltenVK: fetch the swapchain image's CAMetalDrawable right after acquiring "
@@ -29648,11 +30004,101 @@ index 23645ef..92185f2 100644
  namespace ui {
  namespace vulkan {
  
++namespace {
++// vulkan_present_pacing_log: on-screen frame durations, in display refreshes.
++void LogPresentPacing(const VulkanDevice* device, VkSwapchainKHR swapchain) {
++  static const auto get_past = PFN_vkGetPastPresentationTimingGOOGLE(
++      device->vulkan_instance()->functions().vkGetDeviceProcAddr(
++          device->device(), "vkGetPastPresentationTimingGOOGLE"));
++  static const auto get_refresh = PFN_vkGetRefreshCycleDurationGOOGLE(
++      device->vulkan_instance()->functions().vkGetDeviceProcAddr(
++          device->device(), "vkGetRefreshCycleDurationGOOGLE"));
++  if (!get_past || !get_refresh) {
++    return;
++  }
++  static uint64_t last_time = 0, sum_ns = 0, frames = 0;
++  static uint64_t histogram[8] = {};
++  static auto next_log = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++  static uint64_t refresh_ns = 0;
++  VkRefreshCycleDurationGOOGLE refresh = {};
++  if (!refresh_ns && get_refresh(device->device(), swapchain, &refresh) == VK_SUCCESS) {
++    refresh_ns = refresh.refreshDuration;
++  }
++  VkPastPresentationTimingGOOGLE timings[64];
++  uint32_t count = uint32_t(std::size(timings));
++  get_past(device->device(), swapchain, &count, timings);
++  static uint64_t presents = 0, last_any_time = 0;
++  // Intervals between consecutive presents of any kind, in 0.25 ms bins: the
++  // most common one is the compositor's real refresh (repaints run at it).
++  static uint32_t interval_bins[200] = {};
++  for (uint32_t i = 0; i < count; ++i) {
++    ++presents;
++    uint64_t any_time = timings[i].actualPresentTime;
++    if (last_any_time && any_time > last_any_time) {
++      uint64_t bin = (any_time - last_any_time) / 250000;
++      if (bin < std::size(interval_bins)) {
++        ++interval_bins[bin];
++      }
++    }
++    last_any_time = any_time;
++    if (!timings[i].presentID) {
++      continue;  // A repaint of the same guest frame.
++    }
++    uint64_t t = timings[i].actualPresentTime;
++    if (last_time && t > last_time && refresh_ns) {
++      uint64_t d = t - last_time;
++      uint64_t refreshes = (d + refresh_ns / 2) / refresh_ns;
++      ++histogram[std::min<uint64_t>(refreshes, 7)];
++      sum_ns += d;
++      ++frames;
++    }
++    last_time = t;
++  }
++  auto now = std::chrono::steady_clock::now();
++  if (now < next_log) {
++    return;
++  }
++  next_log = now + std::chrono::seconds(REXCVAR_GET(vulkan_present_pacing_log));
++  uint32_t mode_bin = 0;
++  for (uint32_t i = 1; i < std::size(interval_bins); ++i) {
++    if (interval_bins[i] > interval_bins[mode_bin]) {
++      mode_bin = i;
++    }
++  }
++  // Mean of the most common bin and its neighbours.
++  double weight = 0.0, weighted = 0.0;
++  for (uint32_t i = mode_bin ? mode_bin - 1 : 0; i <= mode_bin + 1 && i < std::size(interval_bins);
++       ++i) {
++    weight += interval_bins[i];
++    weighted += interval_bins[i] * (i + 0.5) * 0.25;
++  }
++  if (weight > 0.0) {
++    REXLOG_INFO("Present pacing: presents most often {:.2f} ms apart ({:.1f} Hz)",
++                weighted / weight, 1000.0 * weight / weighted);
++  }
++  std::fill(std::begin(interval_bins), std::end(interval_bins), 0);
++  if (frames) {
++    REXLOG_INFO(
++        "Present pacing over {} guest frames ({} presents; display refresh {:.2f} ms): on screen "
++        "for 1/2/3/4/5/6/7+ refreshes: {}/{}/{}/{}/{}/{}/{} (under half a refresh: {}); mean "
++        "frame time {:.2f} ms",
++        frames, presents, refresh_ns * 1e-6, histogram[1], histogram[2], histogram[3],
++        histogram[4], histogram[5], histogram[6], histogram[7], histogram[0],
++        sum_ns * 1e-6 / frames);
++  }
++  frames = 0;
++  presents = 0;
++  sum_ns = 0;
++  std::fill(std::begin(histogram), std::end(histogram), 0);
++  refresh_ns = 0;  // The window may be on another display by the next log.
++}
++}  // namespace
++
 +
  #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
  namespace {
  
-@@ -1036,6 +1055,32 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
+@@ -1036,6 +1152,32 @@ VulkanPresenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_su
      paint_context_.swapchain_framebuffers.emplace_back(image_view, framebuffer);
    }
  
@@ -29685,7 +30131,7 @@ index 23645ef..92185f2 100644
    is_vsync_implicit_out = paint_context_.swapchain_is_fifo;
    return SurfacePaintConnectResult::kSuccess;
  }
-@@ -1572,6 +1617,29 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1572,6 +1714,29 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
    VkResult acquire_result =
        dfn.vkAcquireNextImageKHR(device, paint_context_.swapchain, UINT64_MAX, acquire_semaphore,
                                  VK_NULL_HANDLE, &swapchain_image_index);
@@ -29715,7 +30161,25 @@ index 23645ef..92185f2 100644
    switch (acquire_result) {
      case VK_SUCCESS:
      case VK_SUBOPTIMAL_KHR:
-@@ -1840,6 +1908,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+@@ -1627,6 +1792,9 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   }
+ 
+   bool swapchain_image_pass_begun = false;
++  // The guest output mailbox slot shown by this paint: a different one than
++  // last time means a new guest frame (vulkan_present_pacing_log).
++  uint32_t paint_guest_output_mailbox_index = UINT32_MAX;
+ 
+   GuestOutputProperties guest_output_properties;
+   GuestOutputPaintConfig guest_output_paint_config;
+@@ -1635,6 +1803,7 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(ConsumeGuestOutput(
+         guest_output_mailbox_index, &guest_output_properties, &guest_output_paint_config));
++    paint_guest_output_mailbox_index = guest_output_mailbox_index;
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       assert_true(guest_output_images_[guest_output_mailbox_index].ever_successfully_refreshed);
+       guest_output_image = guest_output_images_[guest_output_mailbox_index].image;
+@@ -1840,6 +2009,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
                  swapchain_effect, paint_context_.swapchain_render_pass);
              if (swapchain_effect_pipeline.swapchain_pipeline == VK_NULL_HANDLE) {
                guest_output_flow.effect_count = 0;
@@ -29727,3 +30191,127 @@ index 23645ef..92185f2 100644
              }
            }
          }
+@@ -2230,6 +2404,22 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+   VkPresentInfoKHR present_info;
+   present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+   present_info.pNext = nullptr;
++  // vulkan_present_pacing_log: the first present of each guest frame gets an
++  // ID, repaints of the same frame 0.
++  VkPresentTimeGOOGLE present_time = {};
++  VkPresentTimesInfoGOOGLE present_times_info = {VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE};
++  if (REXCVAR_GET(vulkan_present_pacing_log) > 0 &&
++      vulkan_device_->extensions().ext_GOOGLE_display_timing) {
++    static uint32_t last_mailbox_index = UINT32_MAX, frame_id = 0;
++    if (paint_guest_output_mailbox_index != UINT32_MAX &&
++        paint_guest_output_mailbox_index != last_mailbox_index) {
++      present_time.presentID = ++frame_id ? frame_id : ++frame_id;
++    }
++    last_mailbox_index = paint_guest_output_mailbox_index;
++    present_times_info.swapchainCount = 1;
++    present_times_info.pTimes = &present_time;
++    present_info.pNext = &present_times_info;
++  }
+   present_info.waitSemaphoreCount = 1;
+   present_info.pWaitSemaphores = &present_semaphore;
+   present_info.swapchainCount = 1;
+@@ -2242,6 +2432,11 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
+         vulkan_device_->AcquireQueue(paint_context_.present_queue_family, 0);
+     present_result = dfn.vkQueuePresentKHR(queue_acquisition.queue(), &present_info);
+   }
++  if (REXCVAR_GET(vulkan_present_pacing_log) > 0 &&
++      vulkan_device_->extensions().ext_GOOGLE_display_timing &&
++      (present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR)) {
++    LogPresentPacing(vulkan_device_, paint_context_.swapchain);
++  }
+   switch (present_result) {
+     case VK_SUCCESS:
+       return PaintResult::kPresented;
+diff --git a/src/ui/window_sdl.cpp b/src/ui/window_sdl.cpp
+index 2251429..4e5fa34 100644
+--- a/src/ui/window_sdl.cpp
++++ b/src/ui/window_sdl.cpp
+@@ -14,6 +14,7 @@
+ #include <rex/ui/window_sdl.h>
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <cmath>
+ #include <cstring>
+ #include <filesystem>
+@@ -26,12 +27,14 @@
+ #include <rex/logging.h>
+ #include <rex/platform.h>
+ #include <rex/ui/flags.h>
++#include <rex/ui/presentation_display.h>
+ #include <rex/ui/sdl_virtual_key.h>
+ 
+ #if REX_PLATFORM_WIN32
+ #include <rex/ui/surface_win.h>
+ #elif REX_PLATFORM_MAC
+ #include <CoreFoundation/CoreFoundation.h>
++#include <CoreGraphics/CoreGraphics.h>
+ #include <SDL3/SDL_metal.h>
+ 
+ #include <rex/ui/surface_mac.h>
+@@ -128,6 +131,45 @@ WindowSDL::WindowSDL(WindowedAppContext& app_context, const std::string_view tit
+                      uint32_t desired_logical_width, uint32_t desired_logical_height)
+     : Window(app_context, title, desired_logical_width, desired_logical_height) {}
+ 
++namespace {
++std::atomic<uint32_t> presentation_display_id{0};
++
++// The CGDirectDisplayID of the display SDL places the window on (the one
++// containing the center of that display's bounds).
++void UpdatePresentationDisplay(SDL_Window* window) {
++#if REX_PLATFORM_MAC
++  SDL_DisplayID display = SDL_GetDisplayForWindow(window);
++  SDL_Rect bounds;
++  if (!display || !SDL_GetDisplayBounds(display, &bounds)) {
++    return;
++  }
++  CGDirectDisplayID cg_display = 0;
++  uint32_t count = 0;
++  CGPoint center = CGPointMake(bounds.x + bounds.w * 0.5, bounds.y + bounds.h * 0.5);
++  if (CGGetDisplaysWithPoint(center, 1, &cg_display, &count) == kCGErrorSuccess && count) {
++    if (presentation_display_id.exchange(cg_display) != cg_display) {
++      REXLOG_INFO("Window on display {} ({:.2f} Hz)", cg_display, [cg_display] {
++        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(cg_display);
++        double hz = mode ? CGDisplayModeGetRefreshRate(mode) : 0.0;
++        if (mode) CGDisplayModeRelease(mode);
++        return hz;
++      }());
++    }
++  }
++#else
++  (void)window;
++#endif
++}
++}  // namespace
++
++uint32_t GetPresentationDisplayId() {
++  return presentation_display_id.load(std::memory_order_relaxed);
++}
++
++void SetPresentationDisplayId(uint32_t display_id) {
++  presentation_display_id.store(display_id, std::memory_order_relaxed);
++}
++
+ WindowSDL::~WindowSDL() {
+   EnterDestructor();
+   DestroySDLWindow();
+@@ -184,6 +226,7 @@ bool WindowSDL::OpenImpl() {
+   ApplyTextInputActiveNow();
+   ApplyCursorVisibilityNow();
+   SDL_ShowWindow(sdl_window_);
++  UpdatePresentationDisplay(sdl_window_);
+ 
+   // Actualize state for the common Window code. Listener dispatch is handled
+   // by Window::Open after OpenImpl returns; these only record initial state.
+@@ -469,6 +512,7 @@ void WindowSDL::HandleWindowEvent(SDL_Event& event) {
+       break;
+     }
+     case SDL_EVENT_WINDOW_DISPLAY_CHANGED: {
++      UpdatePresentationDisplay(sdl_window_);
+       MonitorUpdateEvent e(this, true);
+       OnMonitorUpdate(e);
+       break;
