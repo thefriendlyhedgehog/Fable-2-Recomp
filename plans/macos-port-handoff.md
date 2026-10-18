@@ -206,7 +206,7 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_tfetch_implicit_lod` | pixel shader fetches with a computed LOD sample with an implicit LOD and a bias instead of explicit gradients (on on macOS; restart) |
 | - | `vulkan_tfetch_specialize_signs` | host render targets: pixel shaders built for the signedness of their first 7 textures when it is all unsigned, all signed or gamma RGB + unsigned alpha, so fetches sample one view with constant signs (on on macOS) |
 | - | `vulkan_gpu_time` | timestamps around each submission; logs "GPU time: N ms/frame, M% of the time" after every frame statistics line (on; restart) |
-| - | `vulkan_pass_gpu_time` | with `vulkan_gpu_time`: times the render passes and resolves of one frame in ten and logs "GPU passes" lines (by kind, the 12 costliest by target and pixel shader); off |
+| - | `vulkan_pass_gpu_time` | with `vulkan_gpu_time`: times the render passes and resolves of one frame in ten and logs "GPU passes" lines (by kind, the 12 costliest by target and pixel shader, and a "GPU resolves" line per resolve); off |
 | - | `vulkan_transfer_log` | every 5 s, one frame's `[transfers]` lines: each render target ownership transfer (destination, source, EDRAM tiles, and the draw that caused it: shaders, primitive, depth/stencil and color state), plus resolves and the frame's draw count |
 | - | `clear_quad_transfer_cutout` | a draw that overwrites a rectangle of its render target outright (clear quad: rectangle list, depth ALWAYS with write and stencil REPLACE, or color mask F without blending) cuts that rectangle out of the transfers it causes (on on macOS) |
 | - | `clear_quad_in_place` | with the cutout: a clear quad with one value whose tiles a same-format render target of another MSAA mode owns clears that target instead, and the draw is skipped (on on macOS); `vulkan_transfer_log` shows `in-place clear` lines |
@@ -1371,6 +1371,47 @@ the same way as Xenia's ROV path.
        - The same alternation at the autotest's default 5 fps cap
          (`fable_2_502`, clocks low): 10.6 / 9.35 / 8.9 / 8.1 ms. Run
          `AUTOTEST_FRAME_MS=0` for GPU numbers.
+     - **Each resolve timed** (2026-10-18, `fable_2_505`, trail, 60 fps
+       cap, GPU free; `vulkan_pass_gpu_time`, which now also prints a `GPU
+       resolves:` line per resolve; normal vs `debug_skip_resolve_dispatches
+       1`, two rounds of four windows each). In a timed frame the passes run
+       one after another, so these are each resolve's own cost, with no
+       overlap; the per-label means:
+
+       | Resolve (dest, fmt, path) | per frame | normal | dispatch left out |
+       | --- | --- | --- | --- |
+       | 280x184 k_2_10_10_10, direct | 7 | 115 us | 84 us |
+       | 640x360 8888, direct | 3 | 109 us | 31 us |
+       | 280x184 16_16_16_16_FLOAT, from EDRAM | 3 | 96 us | 107 us |
+       | 1120x720 16_16_16_16_FLOAT, from EDRAM | 1 | 247 us | 143 us |
+       | 1024x1024 depth, direct | 2 | 85 us | 11 us |
+       | 1280x720 8888 (frontbuffer), from EDRAM | 1 | 160 us | 64 us |
+       | 256x256 8888 from 4x MSAA, from EDRAM | 2 | 75 us | 79 us |
+       | 256x256 8888, direct | 2 | 65 us | 65 us |
+       | 1120x720 k_8, from EDRAM | 1 | 114 us | 78 us |
+       | the k_1_5_5_5 mips (from EDRAM), 280x184 fmt 36 and 1120x720 depth (direct) | 5 | 7-78 us | 8-96 us |
+       | six with no GPU work (span floor) | 6 | 7-9 us | 7-8 us |
+
+       - Sum: 2.7 ms per timed frame, 1.8 ms with the copy dispatches left
+         out, so the dispatches cost ~0.9 ms on their own, about what they
+         add to the real frame (~1.05 ms). So **the copy time is the
+         dispatches' own execution, not lost overlap**.
+       - **The small copies are fixed cost.** A 280x184 copy (~0.2 MB read,
+         twice that written) takes ~30 us, a 1024x1024 depth copy (4 MB)
+         ~75 us. Each compute dispatch costs ~20-30 us whatever its size
+         (encoder start and drain); 10 of the ~23 copies per frame are
+         280x184.
+       - The rest of a span (the dumps of the resolves from EDRAM, barriers)
+         costs 1.8 ms in isolation but only ~0.3 ms in the real frame
+         (the `=2` and skip-copies rows above), where it overlaps.
+       - The time moves between neighbouring spans (the 64x64 mip: 7 us
+         normal, 96 us with the dispatches left out, while the 32x32 and
+         128x128 mips drop from ~55 to 8 us), so compare sums, not single
+         rows.
+       - Levers left, small: direct resolves for the 64-bit float sources
+         (4 per frame; skips their dumps, part of ~0.25 ms); fewer compute
+         dispatches only by merging resolves, which the draw -> resolve ->
+         draw chain doesn't allow.
      - **The in-pass resolve doesn't work on stock MoltenVK 1.4.1** (checked
        2026-10-18 in its source, `thirdparty/rexglue-sdk-src/thirdparty/moltenvk`;
        the game runs the prebuilt 1.4.1). No code was written:
