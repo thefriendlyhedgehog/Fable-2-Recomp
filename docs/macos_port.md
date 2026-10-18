@@ -1315,6 +1315,91 @@ showed as running; with `sample <pid> 15 10` (10 ms) it agrees with the
 kernel's accounting. The frame statistics also log the command processor
 thread's CPU time per frame.
 
+### CPU: the command processor, and what didn't help
+
+At the trail, with frame reports off: 0.79 cores, 3.1 W of CPU. By thread:
+
+- GPU Commands (the command processor) 20%, 6.5 ms per frame;
+- 3D Engine 14%;
+- GameThread 13%;
+- two XThreads, 7% each.
+
+**Measuring: turn the frame reports off.** `tools/mac_capture.sh` (and
+so `tools/mac_autotest.sh`) asks for a frame report every 20 s. Each one
+logs about 2300 draw lines and dumps four resolves, which makes a 200 ms
+frame every 20 s and adds CPU time. Pass `--vulkan_frame_report_interval=0`
+for CPU and pacing measurements. `mac_autotest.sh` then no longer waits for
+a report before quitting.
+
+**Where the command processor's time went** (`sample <pid> 10 5`, running
+samples only):
+
+| Share | What |
+|---|---|
+| 66% | issuing draws |
+| 20% | `UpdateBindings`, of which `vkUpdateDescriptorSets` 14% (inside MoltenVK) |
+| 13% | MoltenVK encoding at `vkQueueSubmit` |
+| 12% | type-0 packets, plus 7% in `WriteRegister` |
+| 11% | uploads to the shared memory, mostly `memmove` |
+| ~5% | clock reads by the long-frame attribution |
+
+The clock reads only happen with `vulkan_long_frame_log`, which the user's
+`fable_2.toml` turns on. Three changes, each with a hot-reload switch, on
+by default:
+
+- `vulkan_reuse_texture_descriptor_sets`. Every draw wrote new texture and
+  sampler descriptor sets for both stages, even with the same bindings (an
+  upstream TODO). A set written earlier in the frame with the same contents
+  (stage, counts, image views, layouts, samplers) is now bound again; the
+  frame's sets stay allocated until the frame completes. If it is the set
+  already bound, the rebind is skipped too. At the trail: 1458 sets written
+  per frame -> 282 written and 1176 reused (the CPU stats line shows the
+  counts). `vkUpdateDescriptorSets` fell from 14% to 4% of the thread; the
+  rest is the constant buffers.
+- `type0_register_ranges`. Type-0 packets wrote their registers one call at
+  a time. Consecutive registers now go through `WriteRegisterRangeFromRing`,
+  as upstream Xenia does. The Vulkan backend copies shader constant ranges
+  in bulk there and invalidates their buffers once.
+- `frame_timing_fast_clock` (macOS). The long-frame attribution reads the
+  clock twice per scope, several times per draw, through `steady_clock`
+  (`clock_gettime`, `mach_continuous_time`). It now reads
+  `mach_absolute_time`, converted with the cached timebase.
+
+The command processor's CPU time, alternating within one run: 6.92 -> 6.04
+ms per frame (`fable_2_424`), and 6.47 -> 5.61 ms in a run that started with
+all three off (`fable_2_431`): about -0.9 ms, -13%. One at a time, each
+turned off with the others on: without the reuse 6.65 ms, without the
+type-0 ranges 6.75 ms, without the fast clock 6.19 ms.
+
+Separate runs vary as much as this change (5.6 to 6.5 ms for the same
+settings), so between runs it showed only -0.2 ms (`fable_2_427`-`430`).
+Same picture: sweep shots differ like off vs. off (~2%), and the flicker
+test is clean (1.4-1.7%, brightness flat, `out/ab_paths/flicker_cpu/`).
+
+Tried, no gain:
+
+- **Thread QoS classes.** All runtime threads are user-interactive, so 99-100%
+  of the instructions run on the performance cores. User initiated and
+  default (`fable_2_411`, `_412`) measured the same as user interactive
+  (0.83-0.86 cores, 3.0 W; `_407`, `_409`). Utility (`_408`) did not move the
+  work to the efficiency cores either: 96-98% of the instructions stayed on
+  the performance cores, but the GPU time doubled (16-20 ms), the
+  command processor took 44% of a core and the process 1.32 cores, 5.4 W.
+  Not kept.
+- **`-mcpu=apple-m1` instead of `-march=armv8-a`** for the recompiled game
+  code. That gives LSE atomics and Apple scheduling; a full rebuild takes
+  15 minutes at ~2.4 cores. Three alternating pairs of separate runs
+  (`fable_2_416`-`421`): 0.75-0.80 vs. 0.76 cores, 8.5 vs. 8.6 G
+  instructions/s, 3.0 W either way, same per-thread shares. Not kept.
+
+What is left:
+
+- MoltenVK's encoding at submission (~14% of the command processor);
+- the upload copies (copy-mode shared memory);
+- register writes;
+- the guest threads, which run game code with a flat profile:
+  `ProcessTreeRecursive`, hash lookups, animation interpolation, no spinning.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

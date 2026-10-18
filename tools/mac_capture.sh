@@ -20,7 +20,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-EXE=out/build/mac-arm64-release/fable_2
+EXE=${MAC_CAPTURE_EXE:-out/build/mac-arm64-release/fable_2}
 OUT=out/capture
 if [ ! -x "$EXE" ]; then
     echo "Error: $EXE not found; build first (./build.sh -release fable_2)." >&2

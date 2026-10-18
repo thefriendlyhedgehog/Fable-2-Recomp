@@ -147,12 +147,16 @@ for line in "${lines[@]}" ""; do
 done
 wants_sweep=0
 case ";$COMMANDS;" in *";sweep;"*) wants_sweep=1 ;; esac
+# A frame report is awaited (one comes every 20 s) unless they are off.
+wants_report=1
+case " $* " in *" --vulkan_frame_report_interval=0 "*) wants_report=0 ;; esac
 start=$SECONDS
 while :; do
     [ $((SECONDS - start)) -lt $TEST_TIMEOUT ] || finish "the test did not complete in time" 1
     sweeps=$(count "\[sweep\] done")
     reports=$(count "\[frame\] end")
-    if [ "$sweeps" -ge $((sweeps_before + wants_sweep)) ] && [ "$reports" -gt "$reports_before" ] &&
+    if [ "$sweeps" -ge $((sweeps_before + wants_sweep)) ] &&
+        [ "$reports" -ge $((reports_before + wants_report)) ] &&
         [ ! -e "$COMMAND_FILE" ]; then
         break
     fi

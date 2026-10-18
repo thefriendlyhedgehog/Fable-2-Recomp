@@ -210,6 +210,9 @@ Keys work only while the game window is focused; every press is logged as
 | - | `vulkan_skip_draw_barriers_after_writes` | with `vulkan_skip_disjoint_draw_barriers`: after resolves and in-stream uploads, a shared memory barrier only before a draw whose known vertex and index ranges overlap what they wrote (on on macOS) |
 | - | `vulkan_debug_skip_transfers`, `debug_skip_resolved_texture_loads` | skip all ownership transfers / the reloads of textures from resolved memory, to measure what they cost (wrong picture); `debug_skip_resolved_texture_loads_format=<n>` limits the latter to one guest format |
 | - | `vulkan_resolve_into_texture` | a resolve also writes the texture at its destination, which then isn't reloaded (on on macOS; `vulkan_resolve_log` says why not, per destination) |
+| - | `vulkan_reuse_texture_descriptor_sets` | bind a texture/sampler descriptor set written earlier in the frame with the same bindings instead of writing a new one per draw (on; counts on the `Command processor CPU` line) |
+| - | `type0_register_ranges` | type-0 packets write consecutive registers through the range path (constants in bulk) (on) |
+| - | `frame_timing_fast_clock` | `vulkan_long_frame_log` times its areas with `mach_absolute_time` instead of `steady_clock` (on on macOS) |
 | - | `vulkan_resolve_into_texture_full` | with the above: also the resolves from the EDRAM buffer with format conversion (8/16/32/64 bpp, mip levels), not only the direct 32 bpp ones (on) |
 | - | `shared_memory_exact_gpu_write_watches` | a GPU write (resolve) invalidates only the textures it overlaps byte by byte, not all in the same 16 KB host pages (on on macOS) |
 | - | `vulkan_tight_render_area` | begin each render pass with the union of its scissors instead of the whole EDRAM-tall framebuffer; bounds transfer and unclipped draw scissors (on) |
@@ -1011,6 +1014,25 @@ the same way as Xenia's ROV path.
        storage image).
      - Testing note: one flicker run moved the hero, because
        `--merge_controllers` passes on a controller used for another app.
+  40. **Done (2026-10-18): smaller command processor CPU costs**
+     (`docs/macos_port.md`, "CPU: the command processor, and what didn't
+     help"; all three switches on by default, hot reload).
+     - `vulkan_reuse_texture_descriptor_sets`: binds a texture descriptor set
+       written earlier in the frame with the same bindings again. At the
+       trail, 1458 -> 282 sets written per frame.
+     - `type0_register_ranges`: type-0 packets go through the range path, as
+       upstream does.
+     - `frame_timing_fast_clock`: the long-frame log's timer reads
+       `mach_absolute_time`.
+     - Command processor 6.47 -> 5.61 ms per frame (about -13%, alternating
+       within a run, `fable_2_424`, `_431`). Same picture.
+     - Tried and not kept: QoS classes below user interactive (nothing moved
+       to the efficiency cores; utility doubled the GPU time), and
+       `-mcpu=apple-m1` for the game code (no change).
+     - **Measuring:** pass `--vulkan_frame_report_interval=0`. The capture
+       script's 20 s frame reports cost a 200 ms frame each and CPU;
+       `mac_autotest.sh` no longer waits for one then. `MAC_CAPTURE_EXE`
+       picks another binary for `mac_capture.sh`.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
