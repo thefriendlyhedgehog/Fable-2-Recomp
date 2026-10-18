@@ -9,9 +9,14 @@
 set -euo pipefail
 secs="${1:-5}"
 snap() {
+    # One entry per AGXDeviceUserClient: its AppUsage (every queue's
+    # accumulatedGPUTime, ns) comes before its IOUserClientCreator.
     ioreg -r -c AGXDeviceUserClient -w0 -l 2>/dev/null | awk '
-        /IOUserClientCreator/ { match($0, /pid [0-9]+, [^"]*/); c = substr($0, RSTART, RLENGTH) }
-        /accumulatedGPUTime/ { match($0, /accumulatedGPUTime"=[0-9]+/); a[c] += substr($0, RSTART + 20, RLENGTH - 20) }
+        /\+-o AGXDeviceUserClient/ { t = 0 }
+        /"AppUsage"/ { line = $0
+            while (match(line, /accumulatedGPUTime"=[0-9]+/)) {
+                t += substr(line, RSTART + 20, RLENGTH - 20); line = substr(line, RSTART + RLENGTH) } }
+        /IOUserClientCreator/ { match($0, /pid [0-9]+, [^"]*/); a[substr($0, RSTART, RLENGTH)] += t; t = 0 }
         END { for (k in a) print a[k] "\t" k }'
 }
 before="$(mktemp)"; after="$(mktemp)"

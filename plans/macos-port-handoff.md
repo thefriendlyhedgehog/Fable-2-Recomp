@@ -1116,11 +1116,12 @@ the same way as Xenia's ROV path.
      | Cores | 0.75 | 1.07 |
      | GPU power, whole system (W) | 5.9 | 7.6 |
 
-     - The GPU was shared, so GPU power and GPU time are upper bounds. Other
-       GPU users, from `tools/mac_gpu_by_process.sh` every 10 s: during the
-       30 fps run WindWaker-play (~65%), Safari and the Claude app (~24%
-       each); during the 60 fps run soh-macos (~32%) and the Claude app
-       (~31%). The process CPU numbers are the game's own.
+     - The GPU was shared, so GPU power and GPU time are upper bounds (other
+       games and apps were running). The per-process shares first given here
+       came from a bug in `tools/mac_gpu_by_process.sh` (fixed in item 45),
+       which credited each process with the next one's GPU time. The same
+       applies to the `VTEncoderXPCService` share in the first try; the
+       3.3 W of idle GPU power during remote viewing was real.
      - Game busy share of the GPU: ~23% at 30 fps vs ~65% at 60 fps.
      - The first try (`fable_2_452`, 47-52 fps) ran while a remote viewing
        session's video encoder took 24-72% of the GPU.
@@ -1129,6 +1130,62 @@ the same way as Xenia's ROV path.
        - the heavy view behind the hero (26-27 fps at the 30 cap);
        - the tick-rate patches (`high_tick_rate`, `higher_hf_tick_rate`),
          which run the UI and physics faster.
+  45. **Measured (2026-10-18): game speed and smoothness at 60 fps.** All at
+     the trail, `--video_mode_refresh_rate=120`.
+     - **Speed is real time.** Holding forward for 3 s (the command file
+       times presses with the host clock) ends at the same spot at 30 fps,
+       at 60 fps, and at 60 fps with both tick-rate patches
+       (`out/ab_paths/walk`). The game's ticks follow the clock, not the
+       frame rate.
+     - **60 distinct images per second.** A 3 s screen recording while
+       walking (window on the 60 Hz second display, consecutive-frame
+       differences with ffmpeg):
+       - at 30 fps every second recorded frame is an exact repeat;
+       - at 60 fps none is, and the change per frame halves.
+       - So the renderer moves the camera and characters every frame, not
+         only at the 30 Hz physics tick.
+       - The game's own stats: 60.0 fps, longest frame 18 ms, with and
+         without the patches.
+     - **Game-only cost** (`tools/mac_gpu_by_process.sh`, `out/mac_thread_cpu`,
+       150 s each):
+
+       | | Cores | CPU power | GPU share |
+       | --- | --- | --- | --- |
+       | 30 fps | 0.78 | 3.03 W | 24% |
+       | 60 fps | 1.24 | 4.26 W | n/a (tool bug) |
+       | 60 fps + tick patches | ~1.47 | ~4.75 W | n/a (tool bug) |
+
+     - **Tick-rate patches**: LF tick 15 -> 30 Hz (menus, input), HF tick
+       30 -> 60 Hz (physics).
+       - Speed stays correct with them on.
+       - Cost: about +0.5 W of CPU at 60 fps.
+       - One patched run (`fable_2_466`) ended in an endless guest access
+         violation (read of 0x24, guest thread 0xF800002C) after the quit
+         command. A 280 s patched run with a watchdog (`fable_2_468`) did
+         not repeat it. Cause unknown; the loop itself is fixed (item 46).
+     - **Display pacing.** The main display runs at 144 Hz, so 60 fps frames
+       stay on screen for 2 or 3 refreshes alternately (and 30 fps for 4 or
+       5), which looks like judder. At 120 Hz both divide evenly.
+       - The guest vblank is a free-running timer at
+         `video_mode_refresh_rate`, not tied to the display.
+       - Next step for smoothness: drive the guest vblank from the
+         display's refresh (CADisplayLink / CVDisplayLink), so frames line
+         up with refreshes at any rate.
+  46. **Done (2026-10-18): an unhandled fault no longer loops forever.**
+     - Before: when no handler took a SIGSEGV/SIGBUS/SIGILL,
+       `src/core/exception_handler_posix.cpp` returned from the signal
+       handler. The instruction ran again, faulted again and logged again:
+       `fable_2_466` wrote 2.3 GB of "Unhandled guest access violation"
+       lines in about 90 s (rotated into 21 files) and did not quit.
+     - Now the handler logs `Unhandled signal N at pc ..., lr ...; passing it
+       on` once and puts back the handler that was installed before it (or
+       the default action). The next fault then ends the process with a
+       macOS crash report.
+     - Windows already crashed in this case (EXCEPTION_CONTINUE_SEARCH).
+     - Also fixed `tools/mac_gpu_by_process.sh`: each registry entry lists
+       its usage before its process name, so the script credited each
+       process with the next one's GPU time. It also counted only the first
+       queue.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

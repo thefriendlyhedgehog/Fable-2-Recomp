@@ -2021,7 +2021,7 @@ index ae72b7a..dd3f4a5 100644
      return last_guest_tick_count_;
    } else {
 diff --git a/src/core/exception_handler_posix.cpp b/src/core/exception_handler_posix.cpp
-index 8b1c76a..72b952c 100644
+index 8b1c76a..32400f0 100644
 --- a/src/core/exception_handler_posix.cpp
 +++ b/src/core/exception_handler_posix.cpp
 @@ -49,6 +49,8 @@ constexpr size_t kMaxHandlerCount = 8;
@@ -2046,19 +2046,40 @@ index 8b1c76a..72b952c 100644
    for (size_t i = 0; i < rex::countof(handlers_) && handlers_[i].first; ++i) {
      if (handlers_[i].first(&ex, handlers_[i].second)) {
        // Exception handled.
-@@ -419,6 +427,12 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+@@ -417,6 +425,33 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
+       return;
+     }
    }
- }
- 
++
++  // No handler took it. Returning would run the faulting instruction again,
++  // fault again and log again, forever (gigabytes of "Unhandled guest access
++  // violation" lines a minute). Hand the signal to whatever was installed
++  // before (or the default action: a crash report) when the instruction runs
++  // again.
++#if REX_ARCH_ARM64
++  // The crash report that follows symbolizes the stack.
++  REXLOG_ERROR("Unhandled signal {} at pc 0x{:X}, lr 0x{:X}; passing it on", signal_number,
++               last_fault_pc_, last_fault_lr_);
++#endif
++  const struct sigaction* original = &original_sigsegv_handler_;
++  if (signal_number == SIGILL) {
++    original = &original_sigill_handler_;
++  }
++#if REX_PLATFORM_MAC
++  if (signal_number == SIGBUS) {
++    original = &original_sigbus_handler_;
++  }
++#endif
++  sigaction(signal_number, original, nullptr);
++}
++
 +void ExceptionHandler::GetLastFaultRegisters(uint64_t& pc, uint64_t& lr, uint64_t& fp) {
 +  pc = last_fault_pc_;
 +  lr = last_fault_lr_;
 +  fp = last_fault_fp_;
-+}
-+
+ }
+ 
  void ExceptionHandler::Install(Handler fn, void* data) {
-   if (!signal_handlers_installed_) {
-     struct sigaction signal_handler;
 diff --git a/src/core/exception_handler_win.cpp b/src/core/exception_handler_win.cpp
 index 4a9b1ee..6648f00 100644
 --- a/src/core/exception_handler_win.cpp
