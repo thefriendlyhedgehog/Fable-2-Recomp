@@ -35,6 +35,29 @@ includes = ["fable2_switch_tables.toml"]
 # denormals flush to zero, unlike on the Xenon FPU (RPCS3 does the same).
 fixed_flush_mode = true
 
+# Keep guest registers in C++ locals instead of PPCContext fields, so the
+# compiler holds them in host registers rather than loading and storing ctx
+# around every instruction (plans/macos-port-handoff.md, item 55). These sat
+# below the last [[entrypoint.midasm_hook]] until 2026-10-19, which put them in
+# that hook's table, so codegen never applied them. The codegen passes a
+# register through ctx where a callee reads it without writing it first
+# (split-off fragments, SEH funclets, r12 into the save helpers), puts ctx
+# back after each such call for the hand-written overrides, and copies locals
+# into env at setjmp (docs/macos_port.md, "CPU: guest registers in C++ locals").
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true
+cr_as_local = true
+# Off: some callees hand values back in r11, r12, f0 or v32-v63 (the stack
+# probe returns r12), which a local would drop.
+non_argument_as_local = false
+non_volatile_as_local = true
+# These two change behaviour rather than where registers live: skip_lr leaves
+# mflr without a value (code that reads its own address breaks) and skip_msr
+# drops the global lock taken at mtmsrd r13. Off until tested on their own.
+skip_lr = false
+skip_msr = false
+
 # setjmp/longjmp: the recompiler redirects these to native implementations.
 # longjmp (0x82CA9260) restores the full guest state from the jmp_buf and
 # calls RtlUnwind (thunk 0x832B25BC) on the unwind path.
@@ -212,16 +235,6 @@ address = 0x8238DF3C
 name = "fable2_hook_game_msaa"
 registers = ["r9"]
 after_instruction = true
-
-# Conservative settings: no register optimizations
-skip_lr = true
-skip_msr = true
-ctr_as_local = true
-xer_as_local = true
-reserved_as_local = true
-cr_as_local = true
-non_argument_as_local = true
-non_volatile_as_local = true
 
 # Invalid instruction skips: 32-bit values (big-endian) the recompiler skips
 # over during its linear .text walk instead of analyzing them as functions.

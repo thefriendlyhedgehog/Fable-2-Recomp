@@ -1609,7 +1609,7 @@ the same way as Xenia's ROV path.
        `[[entrypoint.midasm_hook]]` table, so codegen ignores it. The
        generated `fable_2_init.cpp` has `skip_msr = false` and so on, and
        mtmsrd emits `REX_ENTER_GLOBAL_LOCK`. Moving it would change the
-       generated code broadly; it needs its own test.
+       generated code broadly; it needs its own test. (Done: item 55.)
   54. **Measured (2026-10-19): the 16 KB-page address check on guest memory
      accesses.** `REX_PHYS_HOST_OFFSET` (generated `fable_2_pch.h`, from the
      SDK's pch template) adds 0x1000 for addresses at or above 0xE0000000 on
@@ -1647,7 +1647,45 @@ the same way as Xenia's ROV path.
        prologue). The manifest's "Conservative settings" (`*_as_local`,
        `skip_lr`, `skip_msr`) that would keep registers in locals are never
        read (item 53). Moving them into `[entrypoint]` is a broad codegen
-       change and needs its own correctness and performance test.
+       change and needs its own correctness and performance test. (Done: item 55.)
+  55. **Done (2026-10-19): guest registers in C++ locals.** The manifest's
+     register options now sit in `[entrypoint]` (they were in the last
+     mid-asm hook's table, item 53). On: `ctr_as_local`, `xer_as_local`,
+     `reserved_as_local`, `cr_as_local`, `non_volatile_as_local`. Off:
+     `non_argument_as_local` (callees return values in r11/r12/f0/v32-v63,
+     e.g. a stack probe's r12; needs live-out handling), `skip_lr`,
+     `skip_msr` (behaviour changes, untested). Details and the codegen
+     changes: `docs/macos_port.md`, "CPU: guest registers in C++ locals".
+     - **Trail, 60 fps, alternating** (`fable_2_541`-`_546`, quiet machine):
+
+       | Build | instructions/s | cycles/s | GameThread | 3D Engine | CPU power |
+       | --- | --- | --- | --- | --- | --- |
+       | registers in ctx | 12.96-13.08 G | 4.05-4.33 G | 22.8-26.3% | 21.6-23.3% | 4.70-4.73 W |
+       | CR/CTR/XER/reservation locals | 12.05-12.25 G | 3.89-4.01 G | 21.6-23.9% | 19.4-20.0% | 4.44-4.50 W |
+       | + non-volatile locals | 10.83-10.84 G | 3.66-3.70 G | 19.6-19.8% | 16.7-17.2% | 4.12 W |
+
+       Process total 96-97% from 106-115%; GPU and command processor time
+       unchanged.
+     - **Checked:** boots, loads the save, two minutes of walking and
+       turning (1400-3900 draws) at 60 fps with no errors
+       (`fable_2_547`); the trail picture looks normal.
+     - **Crashes on the way, each fixed in the codegen:**
+       - a split-off epilogue fragment read its owner's r31 (zero as a
+         local): live-in registers, copied by callers and loaded on entry;
+       - an SEH `__finally` funclet read the owner's r21 through a
+         share-registers fragment: share-registers functions count their
+         `ctx.rN` reads as live-in;
+       - loading the save crashed on a null pointer in sub_8245F260: the
+         hand-written overrides keep registers in ctx across calls, and the
+         copies into ctx overwrote them. It loaded with
+         `FABLE2_HOTFUNC_OVERRIDES=OFF`; every copy is now undone after
+         the call.
+     - Misreadings to avoid: a store of a non-volatile counts as a register
+       save only as a 64-bit store to `ctx.r1 + offset` (a fragment storing
+       its caller's r19 into a struct reads r19); and share-registers
+       functions must still drop the save/restore helper calls (an owner
+       holding locals saves nothing that a split-off `b __restgprlr_N`
+       could restore).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

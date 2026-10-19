@@ -1558,6 +1558,79 @@ Same picture: in a still scene at the trail, frames with FZ kept on differ
 from normal ones by 0.33-0.39% of pixels, the same as consecutive frames
 (0.30-0.36%). Four minutes in the square looked normal.
 
+### CPU: guest registers in C++ locals
+
+By default the recompiled code keeps every guest register in the context
+struct (`ctx.r31`, `ctx.cr6`, ...). Guest stores go through a `uint8_t*`
+that may alias anything, so the compiler reloads ctx fields after every
+store and writes every result back. The codegen can keep registers in C++
+locals instead (`[entrypoint]` options in `fable_2_manifest.toml`):
+
+| Option | Registers | State |
+| --- | --- | --- |
+| `ctr_as_local`, `xer_as_local`, `reserved_as_local`, `cr_as_local` | CTR, XER, the lwarx reservation, CR0-CR7 | on |
+| `non_volatile_as_local` | r14-r31, f14-f31, v14-v31, v64-v127 | on |
+| `non_argument_as_local` | r0, r2, r11, r12, f0, v32-v63 | off |
+| `skip_lr`, `skip_msr` | no LR writes; no global lock at `mtmsrd r13` | off (change behaviour, untested) |
+
+These options were in the manifest before 2026-10-19, but below the last
+`[[entrypoint.midasm_hook]]`, so TOML put them in that hook's table and
+codegen never saw them.
+
+**Cost at the trail** (60 fps, alternating, quiet machine, `fable_2_541`
+to `_546`):
+
+| Build | instructions/s | cycles/s | GameThread | 3D Engine | process | CPU power |
+| --- | --- | --- | --- | --- | --- | --- |
+| registers in ctx | 12.96-13.08 G | 4.05-4.33 G | 22.8-26.3% | 21.6-23.3% | 106-115% | 4.70-4.73 W |
+| CR, CTR, XER, reservation locals | 12.05-12.25 G | 3.89-4.01 G | 21.6-23.9% | 19.4-20.0% | 102-105% | 4.44-4.50 W |
+| + non-volatile locals (now) | 10.83-10.84 G | 3.66-3.70 G | 19.6-19.8% | 16.7-17.2% | 96-97% | 4.12 W |
+
+GPU and command processor time are unchanged. The binary is 13% smaller
+(106 MB from 122 MB).
+
+**What the codegen does to keep that correct** (SDK patch, `src/codegen`).
+The Xbox 360 compiler doesn't keep to the calling convention everywhere,
+and a local is invisible to every other function:
+
+- **Live-in registers.** Split-off fragments read their owner's frame
+  pointer (r31) and other non-volatiles; the save helpers, SEH funclets and
+  some thunks take an address in r12. For every function the emitter finds
+  the local registers whose first use, in address order, reads them, not
+  counting register saves (64-bit stores to `ctx.r1 + offset`), mfcr, and
+  XER's SO and CA bits. Writing the whole body twice with a closure over the
+  call graph in between (two passes) gives each function's set, including
+  registers a callee needs that the function only passes through; 335
+  functions have one. Callers copy those registers into ctx before the call
+  and the function loads them on entry. Share-registers functions (SEH
+  funclet ranges), which keep non-volatiles in ctx, count their `ctx.rN`
+  reads too.
+- **ctx stays as it was.** Each copy into ctx is undone after the call. The
+  hand-written overrides in `src/core/hotfunc` keep their registers in ctx
+  and rely on recompiled callees leaving ctx's non-volatiles alone; without
+  the restore, loading the save crashed on a null pointer (it loaded with
+  `FABLE2_HOTFUNC_OVERRIDES=OFF`).
+- **Indirect jumps** (`bctr` without a switch table, 715 sites) copy every
+  local into ctx around the jump, in case the target is a fragment.
+- **setjmp.** The 21 functions that call it copy their locals into `env`
+  before `setjmp` and back on the longjmp path, as `ctx = env` does for the
+  rest.
+- **Save/restore helpers.** Generated code drops calls to `__savegprlr_N`
+  and the others (a function holding locals has nothing to save; a save
+  and its restore can sit in different functions: an owner's prologue and a
+  split-off epilogue that ends in `b __restgprlr_N`). The helper bodies stay
+  on ctx and load r12 from ctx, for the hand-written overrides that call
+  them.
+
+**Why `non_argument_as_local` stays off:** some callees hand values back in
+those registers, which a local drops. A scan of the generated code for
+these registers read right after a call, before any write, found 25 such
+callee/register pairs. The clearest is a stack probe
+(`ProcessAndProcessAndProcess878_82CA9E84`) whose 23 call sites read the r12
+it returns. It hasn't been tested on its own since the ctx restore above
+fixed the load crash. Turning it on needs live-out handling (copy back
+after the call, store on return).
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

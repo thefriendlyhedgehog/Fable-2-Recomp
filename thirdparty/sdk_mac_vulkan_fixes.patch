@@ -10,6 +10,45 @@ index 8200139..06f25c3 100644
  
    // === Analysis tuning (optional) ===
    uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
+diff --git a/include/rex/codegen/function_types.h b/include/rex/codegen/function_types.h
+index 8c6772d..c82d9fb 100644
+--- a/include/rex/codegen/function_types.h
++++ b/include/rex/codegen/function_types.h
+@@ -43,6 +43,15 @@ class FunctionNode;
+ class BinaryView;
+ struct RecompilerConfig;
+ 
++/// How one emitted function uses its local registers: the first reference of
++/// each (body offset, and whether it reads the value it finds) and its direct
++/// call sites (body offset, target base).
++struct FunctionRegisterUse {
++  std::unordered_map<std::string, std::pair<size_t, bool>> firstUse;
++  std::vector<std::pair<size_t, uint32_t>> calls;
++  bool sharesRegisters = false;
++};
++
+ /// Lightweight context passed to FunctionNode::emitCpp() and BuilderContext.
+ /// Non-owning references -- caller must ensure lifetimes.
+ struct EmitContext {
+@@ -56,6 +65,18 @@ struct EmitContext {
+   /// per-file declaration header, so a missed name is a compile error.
+   std::unordered_set<std::string>* referenced = nullptr;
+ 
++  /// Local registers each function reads before writing them (keyed by base):
++  /// values a caller hands over outside the calling convention (frame
++  /// pointers into split-off fragments, r12 into the save helpers and SEH
++  /// funclets). Callers copy them into ctx before the call and the callee
++  /// loads them from ctx on entry. Set by the writer for the final pass.
++  const std::unordered_map<uint32_t, std::vector<std::string>>* liveIns = nullptr;
++  /// Per-function register use, filled by each pass (keyed by base); the
++  /// writer closes it over the call graph into liveIns.
++  std::unordered_map<uint32_t, FunctionRegisterUse>* registerUseOut = nullptr;
++  /// Direct call sites of the function being emitted, as (body offset, target).
++  std::vector<std::pair<size_t, uint32_t>>* callSites = nullptr;
++
+   void reference(std::string_view name) const {
+     if (referenced)
+       referenced->emplace(name);
 diff --git a/include/rex/exception_handler.h b/include/rex/exception_handler.h
 index bcd00bf..13c5f8a 100644
 --- a/include/rex/exception_handler.h
@@ -2085,11 +2124,208 @@ index 68274d2..488257f 100644
  #define REX_IMAGE_BASE {{ image_base }}ull
  #define REX_IMAGE_SIZE {{ image_size }}ull
  #define REX_CODE_BASE {{ code_base }}ull
+diff --git a/src/codegen/builders/builder_context.h b/src/codegen/builders/builder_context.h
+index 33ac6d0..37d50a4 100644
+--- a/src/codegen/builders/builder_context.h
++++ b/src/codegen/builders/builder_context.h
+@@ -13,6 +13,8 @@
+ #include <cstdint>
+ #include <string>
+ #include <string_view>
++#include <utility>
++#include <vector>
+ 
+ #include <fmt/core.h>
+ 
+@@ -54,6 +56,18 @@ struct RecompilerLocalVariables {
+   bool is_mmio_base(size_t reg) const { return reg < 32 && (mmio_base_regs & (1u << reg)); }
+ };
+ 
++/// Placeholder lines emit_function_call prints around a setjmp. The function
++/// emitter replaces them, once the body and so the set of locals is complete,
++/// with copies of every local register into env and back on the longjmp path.
++inline constexpr std::string_view kSetjmpSaveLocalsMarker = "\t// @rex-setjmp-save-locals@";
++inline constexpr std::string_view kSetjmpRestoreLocalsMarker = "\t// @rex-setjmp-restore-locals@";
++/// Placeholder lines around an indirect jump (bctr without link). Its target
++/// is unknown, and may be a fragment that reads this function's registers, so
++/// the emitter replaces them with copies of every local register into ctx and,
++/// after the call, ctx's previous values put back.
++inline constexpr std::string_view kIndirectJumpCopyMarker = "\t// @rex-indirect-jump-copy@";
++inline constexpr std::string_view kIndirectJumpRestoreMarker = "\t// @rex-indirect-jump-restore@";
++
+ /**
+  * @brief CSR (Control/Status Register) flush mode state.
+  *
+@@ -163,6 +177,17 @@ struct BuilderContext {
+   /// Get expression for effective address temporary (always "ea")
+   const char* ea();
+ 
++  /// Record a direct call site, and list the locals the target reads before
++  /// writing them (EmitContext::liveIns) as (ctx field, local) pairs.
++  std::vector<std::pair<std::string, std::string>> live_in_copies(const FunctionNode& target);
++
++  /// Emit a call to `name`, copying `copies` into ctx around it and putting
++  /// ctx's previous values back afterwards; with `readBack`, the locals take
++  /// the callee's values first.
++  void emit_call_with_copies(std::string_view name,
++                             const std::vector<std::pair<std::string, std::string>>& copies,
++                             bool readBack);
++
+   //=========================================================================
+   // Output Helpers
+   //=========================================================================
 diff --git a/src/codegen/builders/context.cpp b/src/codegen/builders/context.cpp
-index f78e0d8..a184647 100644
+index f78e0d8..843fcb0 100644
 --- a/src/codegen/builders/context.cpp
 +++ b/src/codegen/builders/context.cpp
-@@ -330,6 +330,18 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
+@@ -172,6 +172,67 @@ const CallTarget* BuilderContext::findCallTarget(uint32_t site) const {
+   return nullptr;
+ }
+ 
++std::vector<std::pair<std::string, std::string>> BuilderContext::live_in_copies(
++    const FunctionNode& target) {
++  if (emitCtx.callSites)
++    emitCtx.callSites->emplace_back(out.size(), static_cast<uint32_t>(target.base()));
++  std::vector<std::pair<std::string, std::string>> copies;
++  if (!emitCtx.liveIns)
++    return copies;
++  auto it = emitCtx.liveIns->find(target.base());
++  if (it == emitCtx.liveIns->end())
++    return copies;
++  // The target reads these before writing them, so they carry a value from
++  // here. Locals are invisible to it: copy them into ctx, where it loads them.
++  for (const auto& name : it->second) {
++    std::string local;
++    size_t index = name.find_first_of("0123456789");
++    size_t n = index == std::string::npos ? 0 : std::stoul(name.substr(index));
++    if (name == "ctr")
++      local = ctr();
++    else if (name == "xer")
++      local = xer();
++    else if (name == "reserved")
++      local = reserved();
++    else if (name.rfind("cr", 0) == 0)
++      local = cr(n);
++    else if (name[0] == 'r')
++      local = r(n);
++    else if (name[0] == 'f')
++      local = f(n);
++    else if (name[0] == 'v')
++      local = v(n);
++    if (!local.empty() && local.rfind("ctx.", 0) != 0)
++      copies.emplace_back(name, std::move(local));
++  }
++  return copies;
++}
++
++void BuilderContext::emit_call_with_copies(
++    std::string_view name, const std::vector<std::pair<std::string, std::string>>& copies,
++    bool readBack) {
++  if (copies.empty()) {
++    println("	{}(ctx, base);", name);
++    return;
++  }
++  // Put back what ctx held: code that keeps its registers in ctx (the
++  // hand-written overrides) relies on recompiled callees leaving ctx's
++  // non-volatiles as they were.
++  println("	{{");
++  for (const auto& [field, local] : copies)
++    println("		const auto saved_{0} = ctx.{0};", field);
++  for (const auto& [field, local] : copies)
++    println("		ctx.{} = {};", field, local);
++  println("		{}(ctx, base);", name);
++  if (readBack) {
++    for (const auto& [field, local] : copies)
++      println("		{} = ctx.{};", local, field);
++  }
++  for (const auto& [field, local] : copies)
++    println("		ctx.{0} = saved_{0};", field);
++  println("	}}");
++}
++
+ void BuilderContext::emit_function_call(uint32_t address) {
+   const auto& cfg = config();
+ 
+@@ -184,10 +245,18 @@ void BuilderContext::emit_function_call(uint32_t address) {
+   if (address == cfg.setJmpAddress) {
+     // Save PPCContext for restoration after longjmp
+     println("\t{} = ctx;", env());
++    // Registers held in locals are not in ctx, and a local changed after setjmp
++    // is indeterminate once longjmp lands here. Copy them into env as well and
++    // back on the longjmp path. The full set of locals is known only once the
++    // body is done, so the function emitter expands these markers.
++    println("{}", kSetjmpSaveLocalsMarker);
+     // Use custom ppc_setjmp that uses guest address as key
+     println("\t{}.s64 = ppc_setjmp({}.u32);", temp(), r(3));
+     // Restore PPCContext if returning from longjmp
+-    println("\tif ({}.s64 != 0) ctx = {};", temp(), env());
++    println("\tif ({}.s64 != 0) {{", temp());
++    println("\t\tctx = {};", env());
++    println("{}", kSetjmpRestoreLocalsMarker);
++    println("\t}}");
+     println("\t{} = {};", r(3), temp());
+     return;
+   }
+@@ -199,35 +268,34 @@ void BuilderContext::emit_function_call(uint32_t address) {
+       const auto& name = targetFn->name();
+ 
+       // Handle save/restore helpers. Gated on the global setting, not this
+-      // function's: the helper bodies are emitted under it too, so once they
+-      // spill to locals they are no-ops that scribble zeros on the caller's
+-      // frame. A share_registers function still has to elide them.
++      // function's: a save and its restore can sit in different functions (an
++      // owner's prologue and a split-off epilogue fragment that ends in
++      // b __restgprlr_N), and the owner, holding locals, saves nothing. So a
++      // share_registers function still has to elide them; the bodies stay on
++      // ctx only for the hand-written overrides (phase_register.cpp).
+       if (cfg.nonVolatileRegistersAsLocalVariables &&
+           (name.find("__rest") == 0 || name.find("__save") == 0)) {
+         // print nothing - these are handled by local variable tracking
+         return;
+       }
+ 
++      auto copies = live_in_copies(*targetFn);
++
+       // An SEH funclet runs on its owner's frame and reads whatever non-volatiles
+       // the owner left live, so hand it the localized copies through ctx and take
+       // them back afterwards. Only registers already localized here can be live at
+       // this point, so that set is the whole live-in the funclet can see.
+-      if (targetFn->sharesRegisters() && localizeNonVolatiles()) {
+-        for (size_t i = 14; i < 32; ++i) {
+-          if (locals.r[i])
+-            println("\tctx.r{} = r{};", i, i);
+-        }
+-        emitCtx.reference(name);
+-        println("\t{}(ctx, base);", name);
++      const bool shared = targetFn->sharesRegisters() && localizeNonVolatiles();
++      if (shared) {
+         for (size_t i = 14; i < 32; ++i) {
+-          if (locals.r[i])
+-            println("\tr{} = ctx.r{};", i, i);
++          std::string field = fmt::format("r{}", i);
++          if (locals.r[i] && std::none_of(copies.begin(), copies.end(),
++                                          [&](const auto& c) { return c.first == field; }))
++            copies.emplace_back(field, field);
+         }
+-        return;
+       }
+-
+       emitCtx.reference(name);
+-      println("\t{}(ctx, base);", name);
++      emit_call_with_copies(name, copies, shared);
+       return;
+     }
+ 
+@@ -298,7 +366,7 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
+           auto* targetFn = callTarget->asFunction();
+           emitCtx.reference(targetFn->name());
+           println("\tif ({}{}.{}) {{", not_ ? "!" : "", cr(insn.operands[0]), cond);
+-          println("\t\t{}(ctx, base);", targetFn->name());
++          emit_call_with_copies(targetFn->name(), live_in_copies(*targetFn), false);
+           println("\t\treturn;");
+           println("\t}}");
+         } else if (callTarget->isImport()) {
+@@ -330,6 +398,18 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
  }
  
  void BuilderContext::emit_set_flush_mode(bool enable) {
@@ -2108,6 +2344,39 @@ index f78e0d8..a184647 100644
    auto newState = enable ? CSRState::VMX : CSRState::FPU;
    if (csrState != newState) {
      auto prefix = enable ? "enable" : "disable";
+diff --git a/src/codegen/builders/control_flow.cpp b/src/codegen/builders/control_flow.cpp
+index 26957fc..e604220 100644
+--- a/src/codegen/builders/control_flow.cpp
++++ b/src/codegen/builders/control_flow.cpp
+@@ -147,7 +147,7 @@ bool build_bctr(BuilderContext& ctx) {
+         case TargetKind::Import:
+           if (auto* targetFn = ctx.graph().getFunction(label)) {
+             ctx.emitCtx.reference(targetFn->name());
+-            ctx.println("\t\t{}(ctx, base);", targetFn->name());
++            ctx.emit_call_with_copies(targetFn->name(), ctx.live_in_copies(*targetFn), false);
+           } else {
+             REXCODEGEN_ERROR(
+                 "Jump target 0x{:08X} classified as function but not in graph at bctr 0x{:08X}",
+@@ -177,7 +177,9 @@ bool build_bctr(BuilderContext& ctx) {
+     // NOTE(tomc): If this is actually an unresolved switch table, the code after
+     // will be unreachable. This is caught during analysis by discover_blocks.
+     // The validation phase will report missing switch tables.
++    ctx.println("{}", kIndirectJumpCopyMarker);
+     ctx.println("\tREX_CALL_INDIRECT_FUNC({}.u32);", ctx.ctr());
++    ctx.println("{}", kIndirectJumpRestoreMarker);
+     ctx.println("\treturn;");
+   }
+   return true;
+@@ -193,7 +195,9 @@ bool build_bctrl(BuilderContext& ctx) {
+ 
+ bool build_bnectr(BuilderContext& ctx) {
+   ctx.println("\tif (!{}.eq) {{", ctx.cr(ctx.insn.operands[0]));
++  ctx.println("{}", kIndirectJumpCopyMarker);
+   ctx.println("\t\tREX_CALL_INDIRECT_FUNC({}.u32);", ctx.ctr());
++  ctx.println("{}", kIndirectJumpRestoreMarker);
+   ctx.println("\t\treturn;");
+   ctx.println("\t}}");
+   return true;
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..2e0070a 100644
 --- a/src/codegen/builders/vector.cpp
@@ -2155,10 +2424,26 @@ index cbdd7f7..2e0070a 100644
  }
  
 diff --git a/src/codegen/codegen_writer.cpp b/src/codegen/codegen_writer.cpp
-index a0484fb..15d11b8 100644
+index a0484fb..f44599f 100644
 --- a/src/codegen/codegen_writer.cpp
 +++ b/src/codegen/codegen_writer.cpp
-@@ -89,6 +89,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
+@@ -15,6 +15,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <filesystem>
++#include <set>
+ #include <string>
+ #include <unordered_map>
+ #include <unordered_set>
+@@ -22,6 +23,7 @@
+ #include <fmt/format.h>
+ #include <inja/inja.hpp>
+ 
++#include <rex/codegen/config.h>
+ #include <rex/codegen/function_graph.h>
+ #include <rex/codegen/output_partition.h>
+ #include <rex/codegen/template_registry.h>
+@@ -89,6 +91,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
        {"cr_as_local", cfg.crRegistersAsLocalVariables},
        {"non_argument_as_local", cfg.nonArgumentRegistersAsLocalVariables},
        {"non_volatile_as_local", cfg.nonVolatileRegistersAsLocalVariables},
@@ -2166,6 +2451,154 @@ index a0484fb..15d11b8 100644
    };
  
    return {
+@@ -110,6 +113,80 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
+ }  // namespace
+ 
+ namespace rex::codegen {
++namespace {
++
++// Whether a function keeps `name` in a local (BuilderContext's accessors).
++bool LocalizesRegister(const RecompilerConfig& cfg, bool sharesRegisters, std::string_view name) {
++  if (name == "ctr")
++    return cfg.ctrAsLocalVariable;
++  if (name == "xer")
++    return cfg.xerAsLocalVariable;
++  if (name == "reserved")
++    return cfg.reservedRegisterAsLocalVariable;
++  if (name.starts_with("cr"))
++    return cfg.crRegistersAsLocalVariables;
++  size_t digits = name.find_first_of("0123456789");
++  if (digits != 1)
++    return false;
++  int n = std::stoi(std::string(name.substr(1)));
++  const bool nonVolatile = cfg.nonVolatileRegistersAsLocalVariables && !sharesRegisters;
++  const bool nonArgument = cfg.nonArgumentRegistersAsLocalVariables;
++  switch (name[0]) {
++    case 'r':
++      return (nonArgument && (n == 0 || n == 2 || n == 11 || n == 12)) || (nonVolatile && n >= 14);
++    case 'f':
++      return (nonArgument && n == 0) || (nonVolatile && n >= 14);
++    case 'v':
++      return (nonArgument && n >= 32 && n <= 63) ||
++             (nonVolatile && ((n >= 14 && n <= 31) || n >= 64));
++  }
++  return false;
++}
++
++// Live-in locals of every function: those it reads before writing, plus those
++// a callee needs at a call site the function reaches before writing them.
++std::unordered_map<uint32_t, std::vector<std::string>> CloseLiveInRegisters(
++    const RecompilerConfig& cfg, const std::unordered_map<uint32_t, FunctionRegisterUse>& use) {
++  std::unordered_map<uint32_t, std::set<std::string>> live;
++  std::unordered_map<uint32_t, std::vector<std::pair<uint32_t, size_t>>> callers;
++  std::vector<std::pair<uint32_t, std::string>> work;
++  for (const auto& [base, fn] : use) {
++    for (const auto& [name, first] : fn.firstUse) {
++      if (first.second && live[base].insert(name).second)
++        work.emplace_back(base, name);
++    }
++    for (const auto& [offset, target] : fn.calls)
++      callers[target].emplace_back(base, offset);
++  }
++  while (!work.empty()) {
++    auto [callee, name] = std::move(work.back());
++    work.pop_back();
++    auto it = callers.find(callee);
++    if (it == callers.end())
++      continue;
++    for (const auto& [caller, offset] : it->second) {
++      const auto& fn = use.at(caller);
++      // A caller passes the value on from a local, or, as a share_registers
++      // function, from ctx, where its own callers must have put it.
++      if (!LocalizesRegister(cfg, fn.sharesRegisters, name) &&
++          !(fn.sharesRegisters && LocalizesRegister(cfg, false, name)))
++        continue;
++      auto first = fn.firstUse.find(name);
++      if (first != fn.firstUse.end() && first->second.first < offset && !first->second.second)
++        continue;  // written before this call
++      if (live[caller].insert(name).second)
++        work.emplace_back(caller, name);
++    }
++  }
++  std::unordered_map<uint32_t, std::vector<std::string>> result;
++  for (auto& [base, names] : live) {
++    if (!names.empty())
++      result.emplace(base, std::vector<std::string>(names.begin(), names.end()));
++  }
++  return result;
++}
++
++}  // namespace
+ 
+ bool IsGeneratedOutputName(std::string_view filename, std::string_view projectName) {
+   auto dot = filename.rfind('.');
+@@ -262,17 +339,57 @@ bool CodegenWriter::write(bool force) {
+   const size_t maxFileBytes = REXCVAR_GET(max_file_size_bytes);
+   std::unordered_set<std::string> referenced;
+   emitCtx.referenced = &referenced;
+-  for (const auto* fn : functions) {
+-    referenced.clear();
+-    std::string code = fn->emitCpp(emitCtx);
+-    if (code.size() > maxFileBytes) {
+-      REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})", fn->base(),
+-                      code.size(), maxFileBytes);
++
++  // A function's live-in locals (registers it reads before writing them) are
++  // known once its body is emitted, but its callers need them to copy those
++  // registers into ctx, which can make a caller live-in in turn. Emit once
++  // recording each function's first register uses and call sites, close the
++  // sets over the call graph, and emit again with them. The second pass's own
++  // record (copies included) must close to the same sets.
++  std::unordered_map<uint32_t, std::vector<std::string>> liveIns;
++  std::unordered_map<uint32_t, FunctionRegisterUse> registerUse;
++  std::vector<std::pair<size_t, uint32_t>> callSites;
++  emitCtx.liveIns = &liveIns;
++  emitCtx.registerUseOut = &registerUse;
++  emitCtx.callSites = &callSites;
++  const auto& cfg = config();
++  const bool anyLocals = cfg.ctrAsLocalVariable || cfg.xerAsLocalVariable ||
++                         cfg.reservedRegisterAsLocalVariable || cfg.crRegistersAsLocalVariables ||
++                         cfg.nonArgumentRegistersAsLocalVariables ||
++                         cfg.nonVolatileRegistersAsLocalVariables;
++  constexpr int kMaxLiveInPasses = 4;
++  for (int pass = 1;; ++pass) {
++    bodies.clear();
++    sizes.clear();
++    references.clear();
++    registerUse.clear();
++    for (const auto* fn : functions) {
++      referenced.clear();
++      callSites.clear();
++      std::string code = fn->emitCpp(emitCtx);
++      if (code.size() > maxFileBytes) {
++        REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})",
++                        fn->base(), code.size(), maxFileBytes);
++      }
++      sizes.push_back({static_cast<uint32_t>(fn->base()), code.size()});
++      bodies.push_back(std::move(code));
++      references.push_back(referenced);
++    }
++    if (!anyLocals)
++      break;
++    auto closed = CloseLiveInRegisters(cfg, registerUse);
++    REXCODEGEN_INFO("Recompile: pass {}: {} functions with live-in locals", pass, closed.size());
++    if (closed == liveIns)
++      break;
++    if (pass == kMaxLiveInPasses) {
++      REXCODEGEN_ERROR("Recompile: live-in locals still changing after {} passes", pass);
++      break;
+     }
+-    sizes.push_back({static_cast<uint32_t>(fn->base()), code.size()});
+-    bodies.push_back(std::move(code));
+-    references.push_back(referenced);
++    liveIns = std::move(closed);
+   }
++  emitCtx.liveIns = nullptr;
++  emitCtx.registerUseOut = nullptr;
++  emitCtx.callSites = nullptr;
+   emitCtx.referenced = nullptr;
+ 
+   auto partition = OutputPartition::Load(outputPath / kPartitionFileName);
 diff --git a/src/codegen/config.cpp b/src/codegen/config.cpp
 index 5da54a0..75f4e19 100644
 --- a/src/codegen/config.cpp
@@ -2179,6 +2612,401 @@ index 5da54a0..75f4e19 100644
    MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
              hasBool("generate_exception_handlers"), "generate_exception_handlers");
    if (hasBool("is_dll")) {
+diff --git a/src/codegen/function_graph.cpp b/src/codegen/function_graph.cpp
+index fc918bb..a2c59d5 100644
+--- a/src/codegen/function_graph.cpp
++++ b/src/codegen/function_graph.cpp
+@@ -15,7 +15,11 @@
+ 
+ #include <algorithm>
+ #include <cassert>
++#include <cctype>
++#include <string>
++#include <string_view>
+ #include <unordered_set>
++#include <vector>
+ 
+ #include <fmt/format.h>
+ 
+@@ -344,6 +348,214 @@ void emit_print(std::string& out, fmt::format_string<Args...> fmt, Args&&... arg
+   fmt::vformat_to(std::back_inserter(out), fmt.get(), fmt::make_format_args(args...));
+ }
+ 
++//-----------------------------------------------------------------------------
++// Live-in locals: registers a function reads before it writes them.
++//
++// With registers in locals, a value a caller passes outside the calling
++// convention (a frame pointer into a split-off fragment, r12 into a save
++// helper or SEH funclet) would arrive as zero. The emitted body names every
++// local explicitly, so the first reference of each one, in address order,
++// says whether the function writes it or relies on the caller. Register saves
++// (std/stfd/stvx of a non-volatile, mfcr) and XER's SO and CA bits do not
++// count: in a function that owns its registers they are not inputs.
++//-----------------------------------------------------------------------------
++
++bool IsIdentChar(char c) {
++  return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
++}
++
++// `name` as a whole token, not a field of something (ctx.r3, env.r31).
++bool ContainsRegister(std::string_view text, std::string_view name) {
++  for (size_t pos = text.find(name); pos != std::string_view::npos;
++       pos = text.find(name, pos + 1)) {
++    if (pos > 0 && (IsIdentChar(text[pos - 1]) || text[pos - 1] == '.'))
++      continue;
++    size_t end = pos + name.size();
++    if (end < text.size() && IsIdentChar(text[end]))
++      continue;
++    return true;
++  }
++  return false;
++}
++
++// Index of a register name with the given prefix ("r12" -> 12), or -1.
++int RegisterIndex(std::string_view name, std::string_view prefix) {
++  if (!name.starts_with(prefix) || name.size() == prefix.size() ||
++      name.size() > prefix.size() + 3)
++    return -1;
++  int value = 0;
++  for (char c : name.substr(prefix.size())) {
++    if (c < '0' || c > '9')
++      return -1;
++    value = value * 10 + (c - '0');
++  }
++  return value;
++}
++
++bool IsLocalRegister(const RecompilerLocalVariables& locals, std::string_view name) {
++  if (name == "ctr")
++    return locals.ctr;
++  if (name == "xer")
++    return locals.xer;
++  if (name == "reserved")
++    return locals.reserved;
++  if (int i = RegisterIndex(name, "cr"); i >= 0)
++    return i < 8 && locals.cr[i];
++  if (int i = RegisterIndex(name, "r"); i >= 0)
++    return i < 32 && locals.r[i];
++  if (int i = RegisterIndex(name, "f"); i >= 0)
++    return i < 32 && locals.f[i];
++  if (int i = RegisterIndex(name, "v"); i >= 0)
++    return i < 128 && locals.v[i];
++  return false;
++}
++
++bool IsNonVolatileRegister(std::string_view name) {
++  if (int i = RegisterIndex(name, "cr"); i >= 0)
++    return i >= 2 && i <= 4;
++  if (int i = RegisterIndex(name, "r"); i >= 0)
++    return i >= 14;
++  if (int i = RegisterIndex(name, "f"); i >= 0)
++    return i >= 14;
++  if (int i = RegisterIndex(name, "v"); i >= 0)
++    return (i >= 14 && i <= 31) || i >= 64;
++  return false;
++}
++
++enum class RegisterUse { None, Read, Write };
++
++// How the statement `s` (one emitted line, leading tabs removed) uses register
++// `bare`, spelled `x` there ("r31", or "ctx.r31" in a share_registers function).
++RegisterUse ClassifyRegisterUse(std::string_view s, std::string_view x, std::string_view bare) {
++  auto writeUnlessRead = [&](std::string_view source) {
++    return ContainsRegister(source, x) ? RegisterUse::Read : RegisterUse::Write;
++  };
++  const std::string xs(x);
++
++  if (s.starts_with("env.") || s == xs + " = env." + xs + ";")
++    return RegisterUse::None;  // setjmp's copies into env and back
++  if (x == "xer" && !s.starts_with("xer"))
++    return RegisterUse::None;
++  if (x.starts_with("cr")) {
++    for (const char* field : {".lt ? 0x", ".gt ? 0x", ".eq ? 0x", ".so ? 0x"}) {
++      if (s.find(xs + field) != std::string_view::npos)
++        return RegisterUse::None;  // mfcr
++    }
++  }
++  if (IsNonVolatileRegister(bare)) {
++    // std/stfd to the stack. A narrower store, or one elsewhere, writes the
++    // value somewhere it is used: a fragment storing its caller's r19 into a
++    // struct reads r19.
++    if (s.starts_with("REX_STORE_U64(ctx.r1.u32 + ") && s.ends_with(", " + xs + ".u64);"))
++      return RegisterUse::None;  // register save
++    if (bare[0] == 'v' && (s.starts_with("simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(ea)") ||
++                        s == "REX_STORE_U8(ea + i, " + xs + ".u8[15 - i]);"))
++      return RegisterUse::None;  // stvx save, aligned or byte by byte
++  }
++
++  // x.field = ..., x.field[i] = ..., x = ..., x.compare(...), x.setFromMask(...)
++  if (s.starts_with(x) && s.size() > x.size() && !IsIdentChar(s[x.size()])) {
++    std::string_view after = s.substr(x.size());
++    if (after.starts_with(".compare") || after.starts_with(".setFromMask(")) {
++      size_t open = s.find('(');
++      return open == std::string_view::npos ? RegisterUse::Read
++                                             : writeUnlessRead(s.substr(open + 1));
++    }
++    size_t p = x.size();
++    if (s[p] == '.') {
++      ++p;
++      while (p < s.size() && IsIdentChar(s[p]))
++        ++p;
++      if (p < s.size() && s[p] == '[') {
++        p = s.find(']', p);
++        if (p == std::string_view::npos)
++          return RegisterUse::Read;
++        ++p;
++      }
++    }
++    if (s.substr(p).starts_with(" = "))
++      return writeUnlessRead(s.substr(p + 3));
++    return RegisterUse::Read;
++  }
++
++  // simde_mm_store_*([(type*)]x.field, value)
++  if (s.starts_with("simde_mm_store")) {
++    size_t p = s.find('(');
++    if (p != std::string_view::npos) {
++      ++p;
++      if (p < s.size() && s[p] == '(') {
++        size_t close = s.find(')', p);
++        if (close == std::string_view::npos)
++          return RegisterUse::Read;
++        p = close + 1;
++      }
++      if (s.substr(p).starts_with(x) && p + x.size() < s.size() && s[p + x.size()] == '.') {
++        size_t comma = s.find(", ", p);
++        if (comma != std::string_view::npos)
++          return writeUnlessRead(s.substr(comma + 2));
++      }
++    }
++  }
++  return RegisterUse::Read;
++}
++
++// First reference of every local register in `body`, by body offset. A
++// share_registers function keeps its non-volatiles in ctx, where its callers
++// must have put them, so with `contextNonVolatiles` those count as well.
++std::unordered_map<std::string, std::pair<size_t, bool>> FindFirstRegisterUses(
++    const std::string& body, const RecompilerLocalVariables& locals, bool contextNonVolatiles) {
++  std::unordered_map<std::string, std::pair<size_t, bool>> firstUse;
++  std::string_view text(body);
++  size_t lineStart = 0;
++  while (lineStart < text.size()) {
++    size_t lineEnd = text.find('\n', lineStart);
++    if (lineEnd == std::string_view::npos)
++      lineEnd = text.size();
++    const size_t offset = lineStart;
++    std::string_view line = text.substr(lineStart, lineEnd - lineStart);
++    lineStart = lineEnd + 1;
++
++    size_t first = line.find_first_not_of(" \t");
++    if (first == std::string_view::npos)
++      continue;
++    line = line.substr(first);
++    if (line.starts_with("//"))
++      continue;
++
++    for (size_t i = 0; i < line.size();) {
++      if (!IsIdentChar(line[i]) || (i > 0 && IsIdentChar(line[i - 1]))) {
++        ++i;
++        continue;
++      }
++      // ctx.rN in a share_registers function, or a local register.
++      const bool field = i > 0 && line[i - 1] == '.';
++      const bool inContext = field && contextNonVolatiles && i >= 4 &&
++                             line.substr(i - 4, 4) == "ctx." &&
++                             (i == 4 || (!IsIdentChar(line[i - 5]) && line[i - 5] != '.'));
++      if (field && !inContext) {
++        ++i;
++        continue;
++      }
++      size_t end = i;
++      while (end < line.size() && IsIdentChar(line[end]))
++        ++end;
++      std::string_view token = line.substr(i, end - i);
++      std::string_view spelled = inContext ? line.substr(i - 4, end - i + 4) : token;
++      i = end;
++      if (inContext ? (token.starts_with("cr") || !IsNonVolatileRegister(token))
++                    : !IsLocalRegister(locals, token))
++        continue;
++      std::string name(token);
++      if (firstUse.contains(name))
++        continue;
++      RegisterUse use = ClassifyRegisterUse(line, spelled, token);
++      if (use != RegisterUse::None)
++        firstUse.emplace(std::move(name), std::make_pair(offset, use == RegisterUse::Read));
++    }
++  }
++  return firstUse;
++}
++
+ }  // namespace
+ 
+ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
+@@ -637,32 +849,110 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
+     emit_println(body, "}}\n");
+   }
+ 
++  // --- Register use, for the writer's live-in analysis (before the setjmp
++  // copies below, which are not uses) ---
++  auto firstUse = FindFirstRegisterUses(
++      body, localVariables,
++      sharesRegisters() && ctx.config.nonVolatileRegistersAsLocalVariables);
++  if (ctx.registerUseOut) {
++    auto& use = (*ctx.registerUseOut)[base()];
++    use.firstUse = firstUse;
++    if (ctx.callSites)
++      use.calls = *ctx.callSites;
++    use.sharesRegisters = sharesRegisters();
++  }
++
++  // --- Expand the markers: copy every local register into env before setjmp
++  // and back on the longjmp path (as ctx = env does for the rest), and into
++  // ctx around an indirect jump ---
++  {
++    std::vector<std::string> names;
++    if (localVariables.ctr)
++      names.emplace_back("ctr");
++    if (localVariables.xer)
++      names.emplace_back("xer");
++    if (localVariables.reserved)
++      names.emplace_back("reserved");
++    for (size_t i = 0; i < 8; i++)
++      if (localVariables.cr[i])
++        names.push_back(fmt::format("cr{}", i));
++    for (size_t i = 0; i < 32; i++)
++      if (localVariables.r[i])
++        names.push_back(fmt::format("r{}", i));
++    for (size_t i = 0; i < 32; i++)
++      if (localVariables.f[i])
++        names.push_back(fmt::format("f{}", i));
++    for (size_t i = 0; i < 128; i++)
++      if (localVariables.v[i])
++        names.push_back(fmt::format("v{}", i));
++
++    std::string save, restore, toContext, fromContext;
++    for (const auto& name : names) {
++      save += fmt::format("\tenv.{0} = {0};\n", name);
++      restore += fmt::format("\t\t{0} = env.{0};\n", name);
++    }
++    if (!names.empty()) {
++      toContext = "\t{\n";
++      for (const auto& name : names)
++        toContext += fmt::format("\t\tconst auto saved_{0} = ctx.{0};\n", name);
++      for (const auto& name : names)
++        toContext += fmt::format("\t\tctx.{0} = {0};\n", name);
++      for (const auto& name : names)
++        fromContext += fmt::format("\t\tctx.{0} = saved_{0};\n", name);
++      fromContext += "\t}\n";
++    }
++    auto expand = [&](std::string_view marker, const std::string& code) {
++      std::string line = std::string(marker) + "\n";
++      for (size_t pos = body.find(line); pos != std::string::npos;
++           pos = body.find(line, pos + code.size())) {
++        body.replace(pos, line.size(), code);
++      }
++    };
++    expand(kSetjmpSaveLocalsMarker, save);
++    expand(kSetjmpRestoreLocalsMarker, restore);
++    expand(kIndirectJumpCopyMarker, toContext);
++    expand(kIndirectJumpRestoreMarker, fromContext);
++  }
++
++  // --- Live-in locals: load them from ctx, where callers put them ---
++  const std::vector<std::string>* liveIns = nullptr;
++  if (ctx.liveIns) {
++    if (auto it = ctx.liveIns->find(base()); it != ctx.liveIns->end())
++      liveIns = &it->second;
++  }
++  auto init = [&](const std::string& name) -> std::string {
++    auto it = firstUse.find(name);
++    bool live = (it != firstUse.end() && it->second.second) ||
++                (liveIns && std::binary_search(liveIns->begin(), liveIns->end(), name));
++    return live ? " = ctx." + name : "{}";
++  };
++
+   // --- Emit local variable declarations, then body ---
+   if (localVariables.ctr)
+-    emit_println(out, "\tPPCRegister ctr{{}};");
++    emit_println(out, "\tPPCRegister ctr{};", init("ctr"));
+   if (localVariables.xer)
+-    emit_println(out, "\tPPCXERRegister xer{{}};");
++    emit_println(out, "\tPPCXERRegister xer{};", init("xer"));
+   if (localVariables.reserved)
+-    emit_println(out, "\tPPCRegister reserved{{}};");
++    emit_println(out, "\tPPCRegister reserved{};", init("reserved"));
+ 
+   for (size_t i = 0; i < 8; i++) {
+     if (localVariables.cr[i])
+-      emit_println(out, "\tPPCCRRegister cr{}{{}};", i);
++      emit_println(out, "\tPPCCRRegister cr{}{};", i, init(fmt::format("cr{}", i)));
+   }
+ 
+   for (size_t i = 0; i < 32; i++) {
+     if (localVariables.r[i])
+-      emit_println(out, "\tPPCRegister r{}{{}};", i);
++      emit_println(out, "\tPPCRegister r{}{};", i, init(fmt::format("r{}", i)));
+   }
+ 
+   for (size_t i = 0; i < 32; i++) {
+     if (localVariables.f[i])
+-      emit_println(out, "\tPPCRegister f{}{{}};", i);
++      emit_println(out, "\tPPCRegister f{}{};", i, init(fmt::format("f{}", i)));
+   }
+ 
+   for (size_t i = 0; i < 128; i++) {
+     if (localVariables.v[i])
+-      emit_println(out, "\tPPCVRegister v{}{{}};", i);
++      emit_println(out, "\tPPCVRegister v{}{};", i, init(fmt::format("v{}", i)));
+   }
+ 
+   if (localVariables.env)
+diff --git a/src/codegen/phase_register.cpp b/src/codegen/phase_register.cpp
+index 7d1fa44..5cb7f21 100644
+--- a/src/codegen/phase_register.cpp
++++ b/src/codegen/phase_register.cpp
+@@ -508,6 +508,14 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
+   }
+ 
+   // Register save/restore helpers
++  // Generated callers elide these calls when non-volatiles are locals, but the
++  // hand-written function overrides still call them to save and restore the
++  // ctx registers they use. Keep the helper bodies on ctx so those calls still
++  // save and restore instead of touching locals of their own.
++  auto keepInContext = [](FunctionNode* node) {
++    if (node)
++      node->setSharesRegisters(true);
++  };
+   auto registerHelpers = [&](uint32_t base14, const char* prefix, size_t stride, size_t endReg,
+                              size_t extraSize) {
+     if (base14 == 0)
+@@ -515,7 +523,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
+     for (size_t i = 14; i <= endReg; i++) {
+       uint32_t addr = base14 + static_cast<uint32_t>((i - 14) * stride);
+       uint32_t size = static_cast<uint32_t>((endReg + 1 - i) * stride + extraSize);
+-      graph.addFunction(addr, size, FunctionAuthority::HELPER, true);
++      keepInContext(graph.addFunction(addr, size, FunctionAuthority::HELPER, true));
+       graph.setFunctionName(addr, fmt::format("{}{}", prefix, i));
+     }
+   };
+@@ -532,7 +540,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
+     for (size_t i = 64; i < 128; i++) {
+       uint32_t addr = state.restVmx64Address + static_cast<uint32_t>((i - 64) * 8);
+       uint32_t size = static_cast<uint32_t>((128 - i) * 8 + 4);
+-      graph.addFunction(addr, size, FunctionAuthority::HELPER, true);
++      keepInContext(graph.addFunction(addr, size, FunctionAuthority::HELPER, true));
+       graph.setFunctionName(addr, fmt::format("__restvmx_{}", i));
+     }
+   }
+@@ -540,7 +548,7 @@ VoidResult registerEntryPoints(CodegenContext& ctx) {
+     for (size_t i = 64; i < 128; i++) {
+       uint32_t addr = state.saveVmx64Address + static_cast<uint32_t>((i - 64) * 8);
+       uint32_t size = static_cast<uint32_t>((128 - i) * 8 + 4);
+-      graph.addFunction(addr, size, FunctionAuthority::HELPER, true);
++      keepInContext(graph.addFunction(addr, size, FunctionAuthority::HELPER, true));
+       graph.setFunctionName(addr, fmt::format("__savevmx_{}", i));
+     }
+   }
 diff --git a/src/core/clock.cpp b/src/core/clock.cpp
 index ae72b7a..dd3f4a5 100644
 --- a/src/core/clock.cpp
