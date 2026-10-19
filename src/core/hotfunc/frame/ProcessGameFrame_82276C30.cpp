@@ -98,7 +98,6 @@
 //     if (thresholdMet) { /* indirect call via vtable */ } else YieldAndCheckThreshold();
 //   }
 #include "fable_2_pch.h"
-#include "hotfunc/hotfunc_global_lock.h"
 #include "hotfunc/hotfunc_fpscr.h"
 
 #include <chrono>
@@ -147,14 +146,6 @@ extern "C" void sub_8243A2C8(PPCContext& ctx, uint8_t* base);
 #define SV16(x, y)  (*(uint16_t*)(REX_RAW_ADDR(x)) = __builtin_bswap16(y))
 #define SV32(x, y)  (*(uint32_t*)(REX_RAW_ADDR(x)) = __builtin_bswap32(y))
 #define SV64(x, y)  (*(uint64_t*)(REX_RAW_ADDR(x)) = __builtin_bswap64(y))
-// Cached reference to the SDK's global critical region mutex: same mutex and
-// same lock/unlock order as REX_ENTER/LEAVE_GLOBAL_LOCK, without the
-// per-use DLL call to global_critical_region::mutex().
-static inline std::recursive_mutex& hotfunc_gcr_mutex() {
-  static thread_local std::recursive_mutex& cached =
-      rex::thread::global_critical_region::mutex();
-  return cached;
-}
 
 // --- Guest global addresses ---
 // The frame loop reads/writes a fixed set of globals. The recompiler builds
@@ -189,18 +180,17 @@ static inline double guest_fma(double a, double b, double c) {
 // inline. `temp`/`ea` are the per-region guest temp register + address scratch.
 
 // Atomically decrement the 32-bit guest counter at *addr (retrying lwarx/stwcx
-// CAS) via the PPC global-lock sequence mfmsr/mtmsrd/lock/lwarx/addi/stwcx/
-// unlock. `val` receives the decremented value; `msr_save` holds the saved MSR
-// (ME/RI bits); cr0.eq is left set on success.
+// CAS). On the console this runs with interrupts off (mfmsr/mtmsrd); like the
+// generated code with lock_free_atomic_sections it takes no lock, since the
+// CAS is the atomic. `val` receives the decremented value; `msr_save` gets
+// 0x8000 (interrupts on), as the generated mfmsr does; cr0.eq is left set on
+// success.
 static __attribute__((noinline)) void decrement_global_counter(PPCContext& ctx, uint8_t* base,
                                             PPCRegister* addr, PPCRegister* val,
                                             PPCRegister* msr_save) {
 	uint32_t ea{};
 	do {
-		msr_save->u64 = ppc_global_lock_count_().load(std::memory_order_acquire) ? 0 : 0x8000;
-		std::atomic_thread_fence(std::memory_order_seq_cst);
-		ctx.msr = (ctx.r13.u32 & 0x8020) | (ctx.msr & ~0x8020);
-		HOTFUNC_GLOBAL_LOCK_ENTER(0x82276C30);
+		msr_save->u64 = 0x8000;
 		ea = addr->u32;
 		ctx.reserved.u32 = *(uint32_t*)REX_RAW_ADDR(ea);
 		val->u64 = __builtin_bswap32(ctx.reserved.u32);
@@ -210,9 +200,6 @@ static __attribute__((noinline)) void decrement_global_counter(PPCContext& ctx, 
 		ctx.cr0.gt = 0;
 		ctx.cr0.eq = __sync_bool_compare_and_swap(reinterpret_cast<uint32_t*>(REX_RAW_ADDR(ea)), ctx.reserved.s32, __builtin_bswap32(val->s32));
 		ctx.cr0.so = ctx.xer.so;
-		std::atomic_thread_fence(std::memory_order_seq_cst);
-		ctx.msr = (msr_save->u32 & 0x8020) | (ctx.msr & ~0x8020);
-		HOTFUNC_GLOBAL_LOCK_LEAVE(0x82276C30);
 	} while (!ctx.cr0.eq);
 }
 

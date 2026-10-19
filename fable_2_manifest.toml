@@ -56,7 +56,11 @@ non_volatile_as_local = true
 # mflr result here is used as data (only saved and restored); the one blrl
 # (mtlr r3; blrl in 0x82CBA3E0) calls through r3 instead.
 skip_lr = true
-# skip_msr drops the global lock taken at mtmsrd r13; off until tested.
+# lock_free_atomic_sections: no global lock, mfmsr check or fences for
+# interrupts-off sections that hold only a lwarx/stwcx. (all 8,406 here);
+# the reservation pair is the atomic. skip_msr would drop every section
+# without checking, so it stays off.
+lock_free_atomic_sections = true
 skip_msr = false
 
 # setjmp/longjmp: the recompiler redirects these to native implementations.

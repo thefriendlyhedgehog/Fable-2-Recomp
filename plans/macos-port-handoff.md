@@ -1711,11 +1711,21 @@ the same way as Xenia's ROV path.
      8,406 sections is a lone `lwarx`/`stwcx.` (interlocked add or CAS) with
      interrupts off, already atomic as recompiled; about 38 ns each when
      uncontended, about 27 ms of CPU a second.
-     - **Next:** a codegen option that drops the lock, and the `mfmsr` check
-       feeding it, for exactly that shape; `ConstructRefCounted_8222CF18`'s
-       plain read-modify-write under the lock becomes an atomic add, and
-       the other three overrides drop their lock the same way. Don't use
-       `skip_msr`: it drops every section without checking.
+     - **Done (2026-10-19, timing pending): `lock_free_atomic_sections`.**
+       8,401 of the 8,406 sections take no lock, `mfmsr` check or fences;
+       the overrides take no lock, and `ConstructRefCounted_8222CF18`'s
+       counter update is a compare-and-swap loop. On the way: `sync`,
+       `lwsync` and `eieio` were emitted as nothing; they are now real fences
+       on ARM64 (`REX_SYNC`/`REX_LWSYNC`/`REX_EIEIO`). Without them the first
+       boot crashed in `Pool_AcquireNode_83230688` (`fable_2_571`): guest
+       spinlocks release with `lwsync` and a plain store.
+     - **Checked:** four boots, each loading the save and walking for two
+       minutes, with no errors (`fable_2_575`-`_577`, `_579`).
+     - **Open:** run 577 had 0.8-1.4 s frames in loading and gameplay, with
+       Dusklight running; compare walks against the previous build
+       (`fable_2.sitearg`) on a quiet machine, and the trail CPU/power A/B.
+       One walk of the previous build stayed at the title screen for four
+       minutes (`fable_2_580`).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

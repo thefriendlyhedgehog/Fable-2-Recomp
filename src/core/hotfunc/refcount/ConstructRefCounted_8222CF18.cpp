@@ -10,28 +10,21 @@
 // remains the original.
 //
 // Behavior-identical to the generated copy: same guest RAM reads/writes (same
-// addresses, same order), same global critical-region lock + lock-count
-// side effects, same callee targets and guest return addresses, same
-// r3/r1/lr/r30/r31/r12/cr6 side effects at every call site and on return.
+// addresses, same order), same callee targets and guest return addresses,
+// same r3/r1/lr/r30/r31/r12/cr6 side effects at every call site and on return.
 // Optimizations versus the generated copy (both safe, both documented below):
-//   1. The mfmsr/mtmsrd/mtmsrd MSR interrupt-lock sequence and its three
-//      std::memory_order_seq_cst fences are dropped. No code in the entire
-//      recompiled binary ever *reads* ctx.msr: every mtmsrd write uses the
-//      self-preserving pattern (REG & 0x8020) | (ctx.msr & ~0x8020), the
-//      mfmsr fast path reads the global lock count (not ctx.msr), and the
-//      0x8020 bits written here are masked away by every later mtmsrd read of
-//      the same pattern. The mfmsr result (r10) only fed the unobservable
-//      mtmsrd. The mutex lock/unlock already supplies the ordering the fences
-//      provided.
-//   2. The lwarx/stwcx retry loop around the global live-object counter is
-//      reduced to a plain read-modify-write inside the lock. The counter is
-//      written only by this function (increment) and
-//      DestructRefCounted_82214F08 (decrement), and both take the same global
-//      critical-region lock, so the CAS can never fail and the locked
-//      compare-exchange is unnecessary; the lock already serializes the RMW.
-//      (The counter is a live-object telemetry count, not a correctness
-//      refcount, so this is safe even in the unlikely case a writer skipped
-//      the lock.)
+//   1. The mfmsr/mtmsrd/mtmsrd MSR interrupt-lock sequence, its three
+//      std::memory_order_seq_cst fences and the global lock are dropped, as
+//      the generated code does with lock_free_atomic_sections. Turning
+//      interrupts off doesn't exclude other cores on the console: the
+//      lwarx/stwcx. pair is the atomic. No code in the recompiled binary ever
+//      *reads* ctx.msr (every mtmsrd write uses the self-preserving pattern
+//      (REG & 0x8020) | (ctx.msr & ~0x8020)), and the mfmsr result (r10) only
+//      fed the mtmsrd.
+//   2. The lwarx/stwcx retry around the global live-object counter is a
+//      compare-and-swap loop on the guest word. Its other writer,
+//      DestructRefCounted_82214F08 (decrement), uses a compare-and-swap too,
+//      so neither update is lost.
 // (Volatile non-argument registers r8-r11 may end up holding different
 // values than in the generated copy; under the PPC32 ABI they are
 // caller-saved, so well-formed guest code writes them before use - only r2,
@@ -45,9 +38,7 @@
 //   void ConstructRefCounted(void* obj, const char* src)
 //   {
 //     obj->ref = nullptr;                    // stw r30(0),0(r31)
-//     global_critical_region {               // mfmsr/mtmsrd + SDK global lock
-//       ++g_live_object_count;               // lwarx/addi/stwcx @ 0x83496EB8
-//     }
+//     atomic ++g_live_object_count;          // lwarx/addi/stwcx @ 0x83496EB8
 //     if (src && *src)
 //       obj->ref = AllocateString(obj, src); // bl 0x822079D8 (r30 = result)
 //     if (obj->ref)                          // lwz r11,0(r31)
@@ -57,7 +48,6 @@
 //   }
 
 #include "fable_2_pch.h"
-#include "hotfunc/hotfunc_global_lock.h"
 
 extern "C" void AllocateString_822079D8(PPCContext& ctx, uint8_t* base);
 extern "C" void Release_RefCounted_821C67D8(PPCContext& ctx, uint8_t* base);
@@ -93,19 +83,11 @@ HOTFUNC_ALWAYS_INLINE void gstore64(u32 addr, u8* base, u64 v) {
   *reinterpret_cast<u64*>(gaddr(addr, base)) = __builtin_bswap64(v);
 }
 
-// Cached reference to the SDK's global critical region mutex: same mutex and
-// same lock/unlock order as REX_ENTER/LEAVE_GLOBAL_LOCK, without the
-// per-use DLL call to global_critical_region::mutex().
-inline std::recursive_mutex& hotfunc_gcr_mutex() {
-  static thread_local std::recursive_mutex& cached =
-      rex::thread::global_critical_region::mutex();
-  return cached;
-}
 
 // Global live-object count (guest word at 0x83496EB8; lis r9,-31927 =
 // 0x83490000, addi r8,r9,28344 = 0x83496EB8). Incremented here (construct),
-// decremented by DestructRefCounted_82214F08. Both writers take the same
-// global critical-region lock. (A live-object telemetry count, not the
+// decremented by DestructRefCounted_82214F08, both with a compare-and-swap.
+// (A live-object telemetry count, not the
 // per-object refcount that Release_RefCounted manages.)
 constexpr u32 kLiveObjectCountAddr = 0x83496EB8;
 
@@ -134,15 +116,18 @@ extern "C" void ConstructRefCounted_8222CF18(PPCContext& __restrict ctx, uint8_t
   // stw r30,0(r31): clear the object's reference.
   gstore32(obj, base, 0);
 
-  // Global critical region { lwarx r11,0,r8; addi r11,r11,1; stwcx. r11,0,r8 }:
-  // increment the global live-object count. See header note 1 (MSR/fence dance
-  // dropped - unobservable) and note 2 (lwarx/stwcx retry reduced to a plain
-  // RMW, safe because construct+destruct are the only writers and both hold
-  // this same lock).
-  HOTFUNC_GLOBAL_LOCK_ENTER(0x8222CF18);
-  gstore32(kLiveObjectCountAddr, base, gload32(kLiveObjectCountAddr, base) + 1);
-  HOTFUNC_GLOBAL_LOCK_LEAVE(0x8222CF18);
-  // stwcx. success (always, under the lock): cr0 = {0, 0, 1, xer.so}.
+  // lwarx r11,0,r8; addi r11,r11,1; stwcx. r11,0,r8 (retried until the
+  // store succeeds): increment the global live-object count. See header
+  // notes 1 and 2.
+  u32* live_count = reinterpret_cast<u32*>(gaddr(kLiveObjectCountAddr, base));
+  for (;;) {
+    const u32 seen = *live_count;
+    if (__sync_bool_compare_and_swap(live_count, seen,
+                                     __builtin_bswap32(__builtin_bswap32(seen) + 1))) {
+      break;
+    }
+  }
+  // stwcx. success: cr0 = {0, 0, 1, xer.so}.
   ctx.cr0.lt = 0;
   ctx.cr0.gt = 0;
   ctx.cr0.eq = 1;

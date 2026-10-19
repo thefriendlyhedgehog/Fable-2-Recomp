@@ -1,12 +1,13 @@
 diff --git a/include/rex/codegen/config.h b/include/rex/codegen/config.h
-index 8200139..06f25c3 100644
+index 8200139..ea171ea 100644
 --- a/include/rex/codegen/config.h
 +++ b/include/rex/codegen/config.h
-@@ -97,6 +97,7 @@ struct RecompilerConfig {
+@@ -97,6 +97,8 @@ struct RecompilerConfig {
    bool nonArgumentRegistersAsLocalVariables = false;
    bool nonVolatileRegistersAsLocalVariables = false;
    bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
 +  bool fixedFlushMode = false;  ///< Keep FZ on for VMX and scalar FP instead of switching it
++  bool lockFreeAtomicSections = false;  ///< No global lock around interrupts-off lwarx/stwcx. sections
  
    // === Analysis tuning (optional) ===
    uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
@@ -2119,7 +2120,7 @@ index 947817f..fb392c9 100644
  
    const Extensions& extensions() const { return extensions_; }
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
-index 68274d2..92bfec5 100644
+index 68274d2..7f62c78 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
 @@ -16,7 +16,9 @@
@@ -2133,7 +2134,24 @@ index 68274d2..92bfec5 100644
  #define REX_IMAGE_BASE {{ image_base }}ull
  #define REX_IMAGE_SIZE {{ image_size }}ull
  #define REX_CODE_BASE {{ code_base }}ull
-@@ -315,21 +317,29 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+@@ -310,26 +312,46 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+ // Interrupt Locks
+ //=============================================================================
+ 
++// Guest memory barriers (sync, lwsync, eieio). ARM64 orders memory weakly,
++// so they are real fences there; x86 needs only a compiler barrier.
++#if defined(__aarch64__) || defined(_M_ARM64)
++#define REX_SYNC() std::atomic_thread_fence(std::memory_order_seq_cst)
++#define REX_LWSYNC() std::atomic_thread_fence(std::memory_order_acq_rel)
++#define REX_EIEIO() std::atomic_thread_fence(std::memory_order_release)
++#else
++#define REX_SYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
++#define REX_LWSYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
++#define REX_EIEIO() std::atomic_signal_fence(std::memory_order_seq_cst)
++#endif
++
+ inline std::atomic<i32>& ppc_global_lock_count_() {
+   static std::atomic<i32> count{0};
    return count;
  }
  
@@ -2167,10 +2185,27 @@ index 68274d2..92bfec5 100644
    } while (0)
 +#endif
 diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
-index 0c334f8..1e82167 100644
+index 0c334f8..275f777 100644
 --- a/resources/templates/test/ppc_config_h.inja
 +++ b/resources/templates/test/ppc_config_h.inja
-@@ -172,22 +172,30 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+@@ -167,27 +167,47 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+ // Interrupt Locks
+ //=============================================================================
+ 
++// Guest memory barriers (sync, lwsync, eieio). ARM64 orders memory weakly,
++// so they are real fences there; x86 needs only a compiler barrier.
++#if defined(__aarch64__) || defined(_M_ARM64)
++#define REX_SYNC() std::atomic_thread_fence(std::memory_order_seq_cst)
++#define REX_LWSYNC() std::atomic_thread_fence(std::memory_order_acq_rel)
++#define REX_EIEIO() std::atomic_thread_fence(std::memory_order_release)
++#else
++#define REX_SYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
++#define REX_LWSYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
++#define REX_EIEIO() std::atomic_signal_fence(std::memory_order_seq_cst)
++#endif
++
+ inline std::atomic<i32>& ppc_global_lock_count_() {
+   static std::atomic<i32> count{0};
    return count;
  }
  
@@ -2721,10 +2756,54 @@ index 26957fc..2732c6d 100644
  }
  
 diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
-index b2d70f5..f353577 100644
+index b2d70f5..dd03e8b 100644
 --- a/src/codegen/builders/system.cpp
 +++ b/src/codegen/builders/system.cpp
-@@ -242,8 +242,12 @@ bool build_mfocrf(BuilderContext& ctx) {
+@@ -12,6 +12,13 @@
+ #include "builder_context.h"
+ #include "helpers.h"
+ 
++#include <rex/codegen/binary_view.h>
++
++#include <cstring>
++#include <optional>
++#include <set>
++#include <vector>
++
+ namespace rex::codegen {
+ 
+ //=============================================================================
+@@ -30,21 +37,23 @@ bool build_attn(BuilderContext& ctx) {
+   return true;
+ }
+ 
++// Memory barriers: REX_SYNC/REX_LWSYNC/REX_EIEIO (pch) are fences on hosts
++// with weak ordering (ARM64) and compiler barriers on x86, whose ordering is
++// strong enough. Guest spinlocks release with lwsync + a plain store, so
++// without the fence an ARM64 host can make the store visible before the
++// writes it was meant to publish.
+ bool build_sync(BuilderContext& ctx) {
+-  // Memory barrier, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  ctx.println("\tREX_SYNC();");
+   return true;
+ }
+ 
+ bool build_lwsync(BuilderContext& ctx) {
+-  // Lightweight memory barrier, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  ctx.println("\tREX_LWSYNC();");
+   return true;
+ }
+ 
+ bool build_eieio(BuilderContext& ctx) {
+-  // Enforce in-order execution of I/O, x86 has strong ordering so this is a no-op
+-  (void)ctx;
++  ctx.println("\tREX_EIEIO();");
+   return true;
+ }
+ 
+@@ -242,18 +251,205 @@ bool build_mfocrf(BuilderContext& ctx) {
  }
  
  bool build_mflr(BuilderContext& ctx) {
@@ -2737,7 +2816,192 @@ index b2d70f5..f353577 100644
    return true;
  }
  
-@@ -253,7 +257,7 @@ bool build_mfmsr(BuilderContext& ctx) {
++//=============================================================================
++// Interrupts-off atomic sections (lock_free_atomic_sections)
++//=============================================================================
++//
++// The Xbox 360 compiler wraps interlocked operations in
++//   mfmsr rA ; mtmsrd r13,1 ; lwarx ; <ALU/compare/branch> ; stwcx. ; mtmsrd rA,1
++// Turning interrupts off only keeps the thread on its core between lwarx and
++// stwcx.; it doesn't exclude other cores, so the lwarx/stwcx. pair (a
++// compare-and-swap here) is what makes the operation atomic. With the option
++// on, such sections get no global lock, no mfmsr lock check and no fences.
++// A section qualifies only if every path from the mtmsrd r13 reaches an
++// mtmsrd rA within a few instructions through register-only arithmetic,
++// compares, local branches, lwarx/ldarx and stwcx./stdcx., never touches rA,
++// and nothing outside the section branches or falls into it (except back to
++// the mfmsr).
++
++namespace {
++
++constexpr uint32_t kAtomicSectionWindow = 24;  // instructions after the mtmsrd r13
++
++bool IsMfmsr(uint32_t w) { return (w & 0xFC1FFFFF) == 0x7C0000A6; }
++bool IsMtmsrd(uint32_t w) { return (w & 0xFC0007FE) == 0x7C000164; }
++uint32_t RS(uint32_t w) { return (w >> 21) & 31; }
++
++enum class SectionOp { kOther, kAlu, kReserveLoad, kConditionalStore, kBranch, kCondBranch, kLeave };
++
++SectionOp ClassifySectionOp(uint32_t w, uint32_t rA) {
++  const uint32_t op = w >> 26;
++  if (IsMtmsrd(w)) {
++    return (RS(w) == rA && ((w >> 16) & 1)) ? SectionOp::kLeave : SectionOp::kOther;
++  }
++  switch (op) {
++    case 7: case 8: case 10: case 11: case 12: case 13: case 14: case 15:
++    case 20: case 21: case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 30:
++      return SectionOp::kAlu;
++    case 16:  // bc: relative, no link
++      return (w & 3) == 0 ? SectionOp::kCondBranch : SectionOp::kOther;
++    case 18:  // b: relative, no link
++      return (w & 3) == 0 ? SectionOp::kBranch : SectionOp::kOther;
++    case 31: {
++      const uint32_t xo = (w >> 1) & 0x3FF;
++      switch (xo) {
++        case 20: case 84:  // lwarx, ldarx
++          return SectionOp::kReserveLoad;
++        case 150: case 214:  // stwcx., stdcx.
++          return (w & 1) ? SectionOp::kConditionalStore : SectionOp::kOther;
++        case 0: case 32: case 266: case 10: case 138: case 40: case 8: case 136: case 104:
++        case 28: case 60: case 444: case 412: case 316: case 124: case 284: case 476:
++        case 24: case 536: case 792: case 824: case 26: case 922: case 954: case 986:
++        case 235: case 27: case 539: case 794: case 58:
++          return SectionOp::kAlu;
++        default:
++          return SectionOp::kOther;
++      }
++    }
++    default:
++      return SectionOp::kOther;
++  }
++}
++
++// Conservative: any register field naming r (D-form has only two; the low
++// half is the immediate).
++bool UsesRegister(uint32_t w, uint32_t r) {
++  const uint32_t op = w >> 26;
++  const bool dForm = (op >= 7 && op <= 15) || (op >= 24 && op <= 29);
++  return ((w >> 21) & 31) == r || ((w >> 16) & 31) == r ||
++         (!dForm && ((w >> 11) & 31) == r);
++}
++
++int32_t BranchOffset(uint32_t w) {
++  if ((w >> 26) == 18) return int32_t(w << 6) >> 6 & ~3;
++  return int32_t((w & 0xFFFC) << 16) >> 16;
++}
++
++bool CanFallThrough(uint32_t w) {
++  const uint32_t op = w >> 26;
++  if (op == 18 && (w & 1) == 0) return false;                       // b
++  if (op == 19 && (w & 0x7FE) == 0x020 && (w & 1) == 0 &&
++      ((w >> 21) & 0x14) == 0x14) return false;                     // blr
++  if (op == 19 && (w & 0x7FE) == 0x420 && (w & 1) == 0 &&
++      ((w >> 21) & 0x14) == 0x14) return false;                     // bctr
++  return true;
++}
++
++// Finds the section starting at the mfmsr at `m`; returns false if it doesn't
++// qualify. `region` gets every address in it, `leaves` the mtmsrd rA.
++bool AnalyzeAtomicSection(const BuilderContext& ctx, uint32_t m, std::set<uint32_t>& region,
++                          std::set<uint32_t>& leaves) {
++  const FunctionNode& fn = ctx.fn;
++  auto inFn = [&](uint32_t a) { return fn.containsAddress(a); };
++  auto word = [&](uint32_t a) -> std::optional<uint32_t> {
++    if (!inFn(a)) return std::nullopt;
++    const uint8_t* p = ctx.emitCtx.binary.translate(a);
++    if (!p) return std::nullopt;
++    uint32_t w;
++    std::memcpy(&w, p, 4);
++    return __builtin_bswap32(w);
++  };
++  auto wm = word(m), we = word(m + 4);
++  if (!wm || !we || !IsMfmsr(*wm) || *we != 0x7DA10164) return false;  // mtmsrd r13,1
++  const uint32_t rA = RS(*wm);
++  if (rA == 13 || rA == 1) return false;
++  const uint32_t first = m + 8, limit = m + 8 + 4 * kAtomicSectionWindow;
++  region = {m, m + 4};
++  leaves.clear();
++  bool sawLoad = false, sawStore = false;
++  std::vector<uint32_t> work{first};
++  while (!work.empty()) {
++    uint32_t a = work.back();
++    work.pop_back();
++    if (a < first || a >= limit) return false;
++    if (!region.insert(a).second) continue;
++    auto w = word(a);
++    if (!w) return false;
++    SectionOp op = ClassifySectionOp(*w, rA);
++    if (op == SectionOp::kLeave) {
++      leaves.insert(a);
++      continue;
++    }
++    if (op == SectionOp::kOther) return false;
++    const bool branch = op == SectionOp::kBranch || op == SectionOp::kCondBranch;
++    if (!branch && UsesRegister(*w, rA)) return false;
++    if (op == SectionOp::kReserveLoad) sawLoad = true;
++    if (op == SectionOp::kConditionalStore) sawStore = true;
++    if (branch) {
++      work.push_back(a + BranchOffset(*w));
++      if (op == SectionOp::kBranch) continue;
++    }
++    work.push_back(a + 4);
++  }
++  if (!sawLoad || !sawStore || leaves.empty()) return false;
++  // Nothing outside may enter the section except at the mfmsr.
++  for (uint32_t a : region) {
++    if (a == m) continue;
++    if (!region.contains(a - 4)) {
++      auto prev = word(a - 4);
++      if (prev && CanFallThrough(*prev)) return false;
++    }
++  }
++  for (const auto& block : fn.blocks()) {
++    for (uint32_t a = block.base; a < block.end(); a += 4) {
++      if (region.contains(a)) continue;
++      auto w = word(a);
++      if (!w) continue;
++      const uint32_t op = *w >> 26;
++      if ((op == 16 || op == 18) && (*w & 2) == 0) {
++        uint32_t t = a + BranchOffset(*w);
++        if (t != m && region.contains(t)) return false;
++      }
++    }
++  }
++  for (const auto& jt : fn.jumpTables()) {
++    for (uint32_t t : jt.targets) {
++      if (t != m && region.contains(t)) return false;
++    }
++  }
++  return true;
++}
++
++// True if the mfmsr/mtmsrd at ctx.base is part of a qualifying section.
++bool InLockFreeAtomicSection(const BuilderContext& ctx) {
++  if (!ctx.config().lockFreeAtomicSections) return false;
++  std::set<uint32_t> region, leaves;
++  const uint32_t a = ctx.base;
++  // The mfmsr is at most window + 2 instructions before any member.
++  for (uint32_t back = 0; back <= kAtomicSectionWindow + 1; ++back) {
++    const uint32_t m = a - 4 * back;
++    if (m > a || !ctx.fn.containsAddress(m)) break;
++    if (AnalyzeAtomicSection(ctx, m, region, leaves) &&
++        (m == a || m + 4 == a || leaves.contains(a))) {
++      return true;
++    }
++  }
++  return false;
++}
++
++}  // namespace
++
+ bool build_mfmsr(BuilderContext& ctx) {
++  if (!ctx.config().skipMsr && InLockFreeAtomicSection(ctx)) {
++    // Interrupts-off atomic section: no lock, so report interrupts on.
++    ctx.println("\t{}.u64 = 0x8000;", ctx.r(ctx.insn.operands[0]));
++    return true;
++  }
+   if (!ctx.config().skipMsr) {
+     // Memory barrier for MSR read
      ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
      // Check global lock and return appropriate value
      // Returns 0x8000 if unlocked (interrupts enabled), 0 if locked
@@ -2746,7 +3010,17 @@ index b2d70f5..f353577 100644
    }
    return true;
  }
-@@ -327,9 +331,9 @@ bool build_mtmsrd(BuilderContext& ctx) {
+@@ -316,6 +512,9 @@ bool build_mtlr(BuilderContext& ctx) {
+ }
+ 
+ bool build_mtmsrd(BuilderContext& ctx) {
++  if (!ctx.config().skipMsr && InLockFreeAtomicSection(ctx)) {
++    return true;  // interrupts-off atomic section: the lwarx/stwcx. pair is the atomic
++  }
+   if (!ctx.config().skipMsr) {
+     // Memory barrier for MSR write
+     ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
+@@ -327,9 +526,9 @@ bool build_mtmsrd(BuilderContext& ctx) {
      // Other = leave lock (enable interrupts)
      uint32_t src_reg = ctx.insn.operands[0];
      if (src_reg == 13) {
@@ -2805,7 +3079,7 @@ index cbdd7f7..2e0070a 100644
  }
  
 diff --git a/src/codegen/codegen_writer.cpp b/src/codegen/codegen_writer.cpp
-index a0484fb..370e921 100644
+index a0484fb..1ecae6c 100644
 --- a/src/codegen/codegen_writer.cpp
 +++ b/src/codegen/codegen_writer.cpp
 @@ -15,6 +15,7 @@
@@ -2824,15 +3098,16 @@ index a0484fb..370e921 100644
  #include <rex/codegen/function_graph.h>
  #include <rex/codegen/output_partition.h>
  #include <rex/codegen/template_registry.h>
-@@ -89,6 +91,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
+@@ -89,6 +91,8 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
        {"cr_as_local", cfg.crRegistersAsLocalVariables},
        {"non_argument_as_local", cfg.nonArgumentRegistersAsLocalVariables},
        {"non_volatile_as_local", cfg.nonVolatileRegistersAsLocalVariables},
 +      {"fixed_flush_mode", cfg.fixedFlushMode},
++      {"lock_free_atomic_sections", cfg.lockFreeAtomicSections},
    };
  
    return {
-@@ -110,6 +113,136 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
+@@ -110,6 +114,136 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
  }  // namespace
  
  namespace rex::codegen {
@@ -2969,7 +3244,7 @@ index a0484fb..370e921 100644
  
  bool IsGeneratedOutputName(std::string_view filename, std::string_view projectName) {
    auto dot = filename.rfind('.');
-@@ -262,17 +395,53 @@ bool CodegenWriter::write(bool force) {
+@@ -262,17 +396,53 @@ bool CodegenWriter::write(bool force) {
    const size_t maxFileBytes = REXCVAR_GET(max_file_size_bytes);
    std::unordered_set<std::string> referenced;
    emitCtx.referenced = &referenced;
@@ -3033,15 +3308,17 @@ index a0484fb..370e921 100644
  
    auto partition = OutputPartition::Load(outputPath / kPartitionFileName);
 diff --git a/src/codegen/config.cpp b/src/codegen/config.cpp
-index 5da54a0..75f4e19 100644
+index 5da54a0..99feea5 100644
 --- a/src/codegen/config.cpp
 +++ b/src/codegen/config.cpp
-@@ -114,6 +114,8 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
+@@ -114,6 +114,10 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
              hasBool("non_argument_as_local"), "non_argument_as_local");
    MergeBool(cfg.nonVolatileRegistersAsLocalVariables, toml["non_volatile_as_local"].value_or(false),
              hasBool("non_volatile_as_local"), "non_volatile_as_local");
 +  MergeBool(cfg.fixedFlushMode, toml["fixed_flush_mode"].value_or(false),
 +            hasBool("fixed_flush_mode"), "fixed_flush_mode");
++  MergeBool(cfg.lockFreeAtomicSections, toml["lock_free_atomic_sections"].value_or(false),
++            hasBool("lock_free_atomic_sections"), "lock_free_atomic_sections");
    MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
              hasBool("generate_exception_handlers"), "generate_exception_handlers");
    if (hasBool("is_dll")) {

@@ -1711,12 +1711,50 @@ plain atomic add 4.2 ns. At 700,000 sections a second that is about 27 ms
 of CPU a second, split between GameThread and 3D Engine, plus the waits and
 wake-ups of the contended acquisitions.
 
-**What follows from this:** dropping the lock for exactly this pattern
-(lock-only sections around a single `lwarx`/`stwcx.`) keeps the console's
-semantics and removes almost all guest use of the mutex. `ConstructRefCounted`
-then needs an atomic add instead of its plain read-modify-write. The
-remaining users would be the kernel code and any sections that don't match.
-`skip_msr` would drop every section without checking the shape, so it stays off.
+**Lock-free atomic sections** (`lock_free_atomic_sections = true` in
+`[entrypoint]`, on since 2026-10-19). For an `mfmsr rA` followed by
+`mtmsrd r13,1`, the codegen (`src/codegen/builders/system.cpp`) follows every
+path from there. The section qualifies if each path reaches an `mtmsrd rA,1`
+within 24 instructions and uses only:
+
+- register-only arithmetic and compares;
+- local branches;
+- `lwarx`/`ldarx` and `stwcx.`/`stdcx.`.
+
+It must also never touch rA, and nothing outside it may branch or fall into
+it except back to the `mfmsr`. A qualifying section gets no lock, no `mfmsr`
+check (rA = 0x8000, interrupts on) and no fences. 8,401 of the 8,406
+sections qualify. Five stay locked: compare-and-swaps whose failure path is
+shared with a neighbouring section or lies outside the window, none of them
+busy. The four overrides take no lock either, and `ConstructRefCounted`'s
+counter update is now a compare-and-swap loop. The kernel's own spinlocks and
+`Interlocked*SList` already use host compare-and-swap; the kernel takes the
+global lock only for its DPC list, module loading and the XMP app.
+
+**Memory barriers, found on the way.** `sync`, `lwsync` and `eieio` were
+emitted as nothing (the original comment: x86 orders memory strongly). The
+guest's spinlocks release with `lwsync` and a plain store of 0 (for example
+the pool lock taken by `SpinLock_Acquire_822D7408`). On ARM64, without a
+fence, the writes made under the lock can become visible after that store.
+Every atomic section used to run two full fences and the mutex, which
+narrowed that window. The first boot without them crashed loading the save:
+a null free-list link in `Pool_AcquireNode_83230688` (`fable_2_571`). They
+are now `REX_SYNC()`, `REX_LWSYNC()` and `REX_EIEIO()` (pch):
+
+- on ARM64, `seq_cst`, `acq_rel` and `release` fences;
+- on x86, compiler barriers only.
+
+There are 128 `lwsync`, 19 `sync` and 16 `eieio` sites.
+
+**Checked so far:** three boots, each loading the save and walking for two
+minutes, with no errors (`fable_2_575` to `_577`), plus a fourth
+(`fable_2_579`). Runs 575 and 576 stayed at 57-60 fps in gameplay. Run 577
+had single frames of 0.8-1.4 s (counted as draws) during loading and
+gameplay, and run 579 dipped to 20-48 fps while loading. Both ran with
+Dusklight on the GPU. A comparison walk of the previous build sat at the
+title screen for four minutes without loading the save (`fable_2_580`), so
+the comparison isn't finished. **Not measured yet:** CPU and power against
+the previous build at the trail.
 
 ### Frame pacing: guest clock and the drawable wait
 

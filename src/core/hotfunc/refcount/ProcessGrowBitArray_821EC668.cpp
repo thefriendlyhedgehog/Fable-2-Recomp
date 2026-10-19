@@ -4,25 +4,23 @@
 // skip this file; re-run that script to regenerate the literal reference copy.
 //
 // Behavior-identical to the generated copy: same guest RAM reads/writes (same
-// addresses, same order), same global critical-region lock + lock-count side
-// effects, same callee targets and guest return addresses, same r1/r3/r12/
-// r30/r31/cr0/cr6 side effects at every call site and on return.
+// addresses, same order), same callee targets and guest return addresses,
+// same r1/r3/r12/r30/r31/cr0/cr6 side effects at every call site and on return.
 //
 // Optimizations versus the generated copy (both safe, both documented):
-//   1. The mfmsr/mtmsrd/mtmsrd MSR "interrupt-lock" sequence and its three
-//      std::memory_order_seq_cst fences are dropped. No code in the recompiled
-//      binary ever *reads* ctx.msr (every mtmsrd write is the self-preserving
-//      (REG & 0x8020) | (ctx.msr & ~0x8020) form, and the mfmsr fast path reads
-//      the lock count, not ctx.msr), and the mfmsr result (r9) only fed the
-//      mtmsrd. The recursive mutex lock()/unlock() already supplies the
-//      acquire/release ordering the fences provided. (Same reasoning as
-//      ConstructRefCounted_8222CF18, note 1.)
+//   1. The mfmsr/mtmsrd/mtmsrd MSR "interrupt-lock" sequence, its three
+//      std::memory_order_seq_cst fences and the global lock are dropped, as
+//      the generated code does with lock_free_atomic_sections: turning
+//      interrupts off doesn't exclude other cores on the console, the
+//      lwarx/stwcx. pair (a seq_cst compare-and-swap here) is the atomic. No
+//      code ever *reads* ctx.msr, and the mfmsr result (r9) only fed the
+//      mtmsrd. (Same reasoning as ConstructRefCounted_8222CF18, note 1.)
 //   2. The lwarx/stwcx retry is kept (structured as a do-loop rather than a
 //      goto). It is NOT reduced to a plain RMW the way ConstructRefCounted does:
 //      this increments a *per-object* refcount at [r4]+12 that is also written
 //      by Release_RefCounted_821C67D8, so the reserve/CAS is the faithful,
-//      self-synchronizing form. Under the held mutex it succeeds on the first
-//      pass, so the loop body runs exactly once in practice.
+//      self-synchronizing form; it retries only when another thread changed
+//      the count in between.
 // (Volatile non-argument registers r8-r11 may end up holding different values
 // than in the generated copy; under the PPC32 ABI they are caller-saved. r2,
 // r13-r30, r1, and the argument registers are preserved exactly. cr0 is left
@@ -42,18 +40,15 @@
 //     }
 //     if (src != dst && *src) {
 //       *dst = *src;                         // stw
-//       global_critical_region {             // mfmsr/mtmsrd + SDK global lock
-//         for (;;) {                         // lwarx/stwcx retry
-//           ++(**src + 3);                   //   r11 = *src + 12 (refcount)
-//           break if stwcx succeeded;
-//         }
+//       for (;;) {                           // lwarx/stwcx retry (interrupts
+//         ++(**src + 3);                     //   off on the console; no lock)
+//         break if stwcx succeeded;          //   r11 = *src + 12 (refcount)
 //       }
 //     }
 //     return dst;                            // mr r3,r31
 //   }
 
 #include "fable_2_pch.h"
-#include "hotfunc/hotfunc_global_lock.h"
 
 extern "C" void AtomicIncrement5_8222E840(PPCContext& ctx, uint8_t* base);
 extern "C" void GrowBitArrayForString_82B3AB48(PPCContext& ctx, uint8_t* base);
@@ -86,14 +81,6 @@ HOTFUNC_ALWAYS_INLINE void gstore64(u32 addr, u8* base, u64 v) {
   *reinterpret_cast<u64*>(gaddr(addr, base)) = __builtin_bswap64(v);
 }
 
-// Cached reference to the SDK's global critical region mutex: same mutex and
-// same lock/unlock order as REX_ENTER/LEAVE_GLOBAL_LOCK, without the
-// per-use DLL call to global_critical_region::mutex().
-inline std::recursive_mutex& hotfunc_gcr_mutex() {
-  static thread_local std::recursive_mutex& cached =
-      rex::thread::global_critical_region::mutex();
-  return cached;
-}
 
 }  // namespace
 
@@ -146,12 +133,11 @@ extern "C" void ProcessGrowBitArray_821EC668(PPCContext& __restrict ctx, uint8_t
       ctx.cr6.compare<u32>(src_ref, 0, ctx.xer); // cmplwi cr6,r11,0
       if (src_ref != 0) {
         gstore32(dst, base, src_ref);        // stw r11,0(r31)
-        // Atomically increment the copied object's refcount (*src + 12) under
-        // the global critical region. See header note 1 (MSR/fences dropped)
-        // and note 2 (retry kept as a do-loop).
+        // Atomically increment the copied object's refcount (*src + 12). See
+        // header note 1 (MSR/fences/lock dropped) and note 2 (retry kept as a
+        // do-loop).
         u32* refcount = reinterpret_cast<u32*>(gaddr(src_ref + 12, base)); // addi r11,r11,12
         do {
-          HOTFUNC_GLOBAL_LOCK_ENTER(0x821EC668);
           ctx.reserved.u32 = *refcount;      // lwarx r10,0,r11
           ctx.r10.u64 = __builtin_bswap32(ctx.reserved.u32);
           ctx.r10.s64 += 1;                  // addi r10,r10,1
@@ -160,7 +146,6 @@ extern "C" void ProcessGrowBitArray_821EC668(PPCContext& __restrict ctx, uint8_t
           ctx.cr0.eq = __sync_bool_compare_and_swap(
               refcount, ctx.reserved.s32, __builtin_bswap32(ctx.r10.s32));
           ctx.cr0.so = ctx.xer.so;
-          HOTFUNC_GLOBAL_LOCK_LEAVE(0x821EC668);
         } while (!ctx.cr0.eq);               // bne 0x821ec6e0
       }
     }
