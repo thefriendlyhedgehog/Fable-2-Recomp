@@ -1537,6 +1537,40 @@ the same way as Xenia's ROV path.
          skip where the address is provably below 0xE0000000;
        - `os_unfair_lock` for the global lock (1.6-2.6 vs 8.5 ns uncontended);
        - MoltenVK 1.4.2.
+  53. **Measured (2026-10-18): the FPCR flush-mode switches.** This used a
+     one-off measurement build: counters in an instrumented copy of the
+     prebuilt `rex/ppc/context.h` (`FPSCRRegister::enable/disableFlushMode*`)
+     and a temporary `src/core/fpcr_count.cpp` reporter, neither committed.
+     `debug_fpcr_fixed_flush` kept FZ on instead of switching. Trail, 60
+     fps, defaults (`fable_2_517`):
+     - **~2.48 M switches per second** (~41,000 per frame), steady:
+       - 0.74 M enable and 0.92 M disable where the codegen knew the mode
+         (VMX and scalar FP code alternating within a function);
+       - 0.50 M and 0.31 M after calls, where the mode was unknown.
+       Six guest contexts switch; the busiest makes ~1.5 M/s.
+     - **FZ kept on, three alternating pairs** (15 s per-thread CPU each;
+       RuneLite used 22-66% of the GPU, falling during the run, so compare
+       each "on" with the "off" around it):
+       - 3D Engine thread -2.1 to -2.9 points (~8%);
+       - GameThread -1.1 to -1.4 points (~4%);
+       - process -3 to -8 points;
+       - cycles/s 0.1-0.4 G lower at the same 13.2 G instructions/s (the
+         switches serialize the pipeline);
+       - CPU power ~-0.08 W.
+       That is ~16 ns per switch on the busiest thread, about twice the
+       microbenchmark (7.8 ns).
+     - **Same picture in a still scene** (`fable_2_518`): 16-shot bursts,
+       on vs off 0.33-0.39% of pixels, consecutive shots 0.30-0.36%,
+       channel means within 0.2/255. Not checked: gameplay over time.
+       FZ on flushes the scalar FPU's denormals too, which the PPC FPU
+       doesn't do (RPCS3 accepts this).
+     - Options:
+       1. a codegen option to emit no switches with FZ set once per thread
+          (RPCS3's way; the measured gain);
+       2. keep the semantics but track each function's exit mode, so the
+          ~0.8 M/s after-call switches mostly go (about a third of the
+          gain);
+       3. FZ off everywhere (VMX denormals no longer flushed).
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
