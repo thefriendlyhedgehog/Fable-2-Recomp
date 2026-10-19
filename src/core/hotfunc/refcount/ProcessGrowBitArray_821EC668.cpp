@@ -53,6 +53,7 @@
 //   }
 
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_global_lock.h"
 
 extern "C" void AtomicIncrement5_8222E840(PPCContext& ctx, uint8_t* base);
 extern "C" void GrowBitArrayForString_82B3AB48(PPCContext& ctx, uint8_t* base);
@@ -150,7 +151,7 @@ extern "C" void ProcessGrowBitArray_821EC668(PPCContext& __restrict ctx, uint8_t
         // and note 2 (retry kept as a do-loop).
         u32* refcount = reinterpret_cast<u32*>(gaddr(src_ref + 12, base)); // addi r11,r11,12
         do {
-          hotfunc_gcr_mutex().lock(); ppc_global_lock_count_().fetch_add(1);
+          HOTFUNC_GLOBAL_LOCK_ENTER(0x821EC668);
           ctx.reserved.u32 = *refcount;      // lwarx r10,0,r11
           ctx.r10.u64 = __builtin_bswap32(ctx.reserved.u32);
           ctx.r10.s64 += 1;                  // addi r10,r10,1
@@ -159,8 +160,7 @@ extern "C" void ProcessGrowBitArray_821EC668(PPCContext& __restrict ctx, uint8_t
           ctx.cr0.eq = __sync_bool_compare_and_swap(
               refcount, ctx.reserved.s32, __builtin_bswap32(ctx.r10.s32));
           ctx.cr0.so = ctx.xer.so;
-          { auto old_ = ppc_global_lock_count_().fetch_sub(1); assert(old_ >= 1); }
-          hotfunc_gcr_mutex().unlock();
+          HOTFUNC_GLOBAL_LOCK_LEAVE(0x821EC668);
         } while (!ctx.cr0.eq);               // bne 0x821ec6e0
       }
     }

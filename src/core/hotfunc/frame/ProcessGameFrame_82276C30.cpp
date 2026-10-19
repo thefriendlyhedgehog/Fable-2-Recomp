@@ -98,6 +98,7 @@
 //     if (thresholdMet) { /* indirect call via vtable */ } else YieldAndCheckThreshold();
 //   }
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_global_lock.h"
 #include "hotfunc/hotfunc_fpscr.h"
 
 #include <chrono>
@@ -199,7 +200,7 @@ static __attribute__((noinline)) void decrement_global_counter(PPCContext& ctx, 
 		msr_save->u64 = ppc_global_lock_count_().load(std::memory_order_acquire) ? 0 : 0x8000;
 		std::atomic_thread_fence(std::memory_order_seq_cst);
 		ctx.msr = (ctx.r13.u32 & 0x8020) | (ctx.msr & ~0x8020);
-		hotfunc_gcr_mutex().lock(); ppc_global_lock_count_().fetch_add(1);
+		HOTFUNC_GLOBAL_LOCK_ENTER(0x82276C30);
 		ea = addr->u32;
 		ctx.reserved.u32 = *(uint32_t*)REX_RAW_ADDR(ea);
 		val->u64 = __builtin_bswap32(ctx.reserved.u32);
@@ -211,8 +212,7 @@ static __attribute__((noinline)) void decrement_global_counter(PPCContext& ctx, 
 		ctx.cr0.so = ctx.xer.so;
 		std::atomic_thread_fence(std::memory_order_seq_cst);
 		ctx.msr = (msr_save->u32 & 0x8020) | (ctx.msr & ~0x8020);
-		{ auto old_ = ppc_global_lock_count_().fetch_sub(1); assert(old_ >= 1); }
-		hotfunc_gcr_mutex().unlock();
+		HOTFUNC_GLOBAL_LOCK_LEAVE(0x82276C30);
 	} while (!ctx.cr0.eq);
 }
 

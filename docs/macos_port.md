@@ -1652,6 +1652,72 @@ and a local is invisible to every other function:
   over-marks (5061 functions, mostly r11 and f0, one store per return):
   safe, and the measured gain includes that cost.
 
+### CPU: the guest global lock (mfmsr / mtmsrd r13)
+
+Recompiled code turns `mtmsrd r13` (interrupts off) into
+`REX_ENTER_GLOBAL_LOCK`, any other `mtmsrd` into `REX_LEAVE_GLOBAL_LOCK`,
+and `mfmsr` into `REX_CHECK_GLOBAL_LOCK`, which takes and drops the lock to
+read the nesting count. The lock is the SDK's global critical region, a
+`std::recursive_mutex` that the kernel code also takes. Each macro gets the
+guest address of its instruction (unused in a normal build).
+
+**Measurement build:** `-DFABLE2_GLOBAL_LOCK_STATS=ON` (best in its own
+build directory, e.g. `out/build/lockstats`, then copy the binary next to
+the normal one). It routes the three macros, and the overrides'
+`HOTFUNC_GLOBAL_LOCK_ENTER/LEAVE` (`src/core/hotfunc/hotfunc_global_lock.h`),
+through `src/diagnostics/fable2_global_lock_stats.cpp`. The log then gets a
+`GlobalLock` report every 10 s (`REX_GLOBAL_LOCK_STATS_INTERVAL`): counts,
+contended acquisitions, wait and hold time, per site and per thread. The
+counters sit inside the lock and lengthen it, so the contention figures are
+upper bounds.
+
+**At the trail** (60 fps, `fable_2_569`):
+
+| | per second |
+| --- | --- |
+| sections (`mtmsrd r13` ... `mtmsrd rX`) | 700,000 |
+| `mfmsr` checks | 680,000 |
+| contended acquisitions | 19,500, 46-49 ms waiting |
+| time held | 9.6-9.9 ms |
+
+| Thread | sections/s | checks/s | contended/s | waiting |
+| --- | --- | --- | --- | --- |
+| GameThread | 372,000 | 356,000 | 8,200 | 19.7 ms/s |
+| 3D Engine | 313,000 | 307,000 | 10,000 | 24.6 ms/s |
+| all others | under 7,000 each | | | under 1 ms/s each |
+
+The two busy threads mostly wait on each other. The busiest sites
+(0x829FF66C 116,000/s, 0x822D7418 84,000/s, 0x821FC20C and 0x821FC060
+75,000-78,000/s, 0x8221544C and 0x82215A9C 42,000/s) and **all 8,406
+`mtmsrd r13` sections in the binary** have the same shape:
+
+    mfmsr rA ; mtmsrd r13,1 ; lwarx ; addi/cmpw ; stwcx. ; mtmsrd rA,1 ; bne retry
+
+That is, an interlocked increment, decrement or compare-and-swap with
+interrupts off. No other load, store or call sits between the lock and the
+unlock. On the console, turning interrupts off only keeps the thread on its
+core between `lwarx` and `stwcx.`; it doesn't exclude the other cores, so the
+`lwarx`/`stwcx.` pair is what makes it atomic, and the recompiled pair is
+already a `__sync_bool_compare_and_swap`. The four overrides that copy the
+pattern (`Release_RefCounted` 19,000/s, `ConstructRefCounted` 4,000/s,
+`ProcessGrowBitArray`, `ProcessGameFrame`) are among these. One of them,
+`ConstructRefCounted`, replaced the retry with a plain read-modify-write that
+relies on the mutex.
+
+**Uncontended cost** (single-thread benchmark on the M4): one section,
+check plus enter plus leave with the fences, costs 38 ns; a
+`recursive_mutex` lock/unlock pair 21.5 ns; `os_unfair_lock` 6.5 ns; a
+plain atomic add 4.2 ns. At 700,000 sections a second that is about 27 ms
+of CPU a second, split between GameThread and 3D Engine, plus the waits and
+wake-ups of the contended acquisitions.
+
+**What follows from this:** dropping the lock for exactly this pattern
+(lock-only sections around a single `lwarx`/`stwcx.`) keeps the console's
+semantics and removes almost all guest use of the mutex. `ConstructRefCounted`
+then needs an atomic add instead of its plain read-modify-write. The
+remaining users would be the kernel code and any sections that don't match.
+`skip_msr` would drop every section without checking the shape, so it stays off.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

@@ -1701,6 +1701,21 @@ the same way as Xenia's ROV path.
        functions must still drop the save/restore helper calls (an owner
        holding locals saves nothing that a split-off `b __restgprlr_N`
        could restore).
+  56. **Measured (2026-10-19): the guest global lock.** Measurement build
+     `-DFABLE2_GLOBAL_LOCK_STATS=ON` (own build directory), `GlobalLock`
+     reports in the log; details in `docs/macos_port.md`, "CPU: the guest
+     global lock". At the trail: 700,000 `mtmsrd r13` sections and 680,000
+     `mfmsr` checks a second, almost all on GameThread (372,000) and 3D
+     Engine (313,000), which contend with each other (19,500 contended
+     acquisitions a second, about 20 and 25 ms/s waiting). Every one of the
+     8,406 sections is a lone `lwarx`/`stwcx.` (interlocked add or CAS) with
+     interrupts off, already atomic as recompiled; about 38 ns each when
+     uncontended, about 27 ms of CPU a second.
+     - **Next:** a codegen option that drops the lock, and the `mfmsr` check
+       feeding it, for exactly that shape; `ConstructRefCounted_8222CF18`'s
+       plain read-modify-write under the lock becomes an atomic add, and
+       the other three overrides drop their lock the same way. Don't use
+       `skip_msr`: it drops every section without checking.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

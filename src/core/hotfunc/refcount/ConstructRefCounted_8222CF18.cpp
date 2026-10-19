@@ -57,6 +57,7 @@
 //   }
 
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_global_lock.h"
 
 extern "C" void AllocateString_822079D8(PPCContext& ctx, uint8_t* base);
 extern "C" void Release_RefCounted_821C67D8(PPCContext& ctx, uint8_t* base);
@@ -138,11 +139,9 @@ extern "C" void ConstructRefCounted_8222CF18(PPCContext& __restrict ctx, uint8_t
   // dropped - unobservable) and note 2 (lwarx/stwcx retry reduced to a plain
   // RMW, safe because construct+destruct are the only writers and both hold
   // this same lock).
-  hotfunc_gcr_mutex().lock();
-  ppc_global_lock_count_().fetch_add(1);
+  HOTFUNC_GLOBAL_LOCK_ENTER(0x8222CF18);
   gstore32(kLiveObjectCountAddr, base, gload32(kLiveObjectCountAddr, base) + 1);
-  { auto old_ = ppc_global_lock_count_().fetch_sub(1); assert(old_ >= 1); }
-  hotfunc_gcr_mutex().unlock();
+  HOTFUNC_GLOBAL_LOCK_LEAVE(0x8222CF18);
   // stwcx. success (always, under the lock): cr0 = {0, 0, 1, xer.so}.
   ctx.cr0.lt = 0;
   ctx.cr0.gt = 0;

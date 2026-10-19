@@ -123,6 +123,24 @@ add_custom_command(TARGET fable_2 POST_BUILD
     COMMENT "Staging supported game profiles for the launcher"
     VERBATIM)
 
+# Measurement build of the guest's global lock (mfmsr / mtmsrd r13): counts,
+# contention, wait and hold time per guest address and thread, in the log
+# every 10 s (REX_GLOBAL_LOCK_STATS_INTERVAL). Slower; not for play.
+option(FABLE2_GLOBAL_LOCK_STATS "Count and time the guest global lock" OFF)
+# The counters are in the app (src/diagnostics/fable2_global_lock_stats.cpp),
+# since the game links the prebuilt SDK. After rexglue_setup_target, which
+# creates fable_2_recomp.
+if(FABLE2_GLOBAL_LOCK_STATS)
+    target_sources(fable_2 PRIVATE src/diagnostics/fable2_global_lock_stats.cpp)
+    foreach(t fable_2 fable_2_recomp)
+        if(TARGET ${t})
+            target_compile_definitions(${t} PRIVATE REX_GLOBAL_LOCK_STATS=1)
+            target_compile_options(${t} PRIVATE
+                -include ${CMAKE_CURRENT_SOURCE_DIR}/src/diagnostics/fable2_global_lock_stats.h)
+        endif()
+    endforeach()
+endif()
+
 # The app's probe/diagnostic headers (src/diagnostics/*.h) use the standard CRT
 # functions (fopen, getenv, strcat, strncat, ...), which the MSVC/UCRT headers
 # mark deprecated when compiled with clang (-Wdeprecated-declarations noise).

@@ -2119,7 +2119,7 @@ index 947817f..fb392c9 100644
  
    const Extensions& extensions() const { return extensions_; }
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
-index 68274d2..488257f 100644
+index 68274d2..92bfec5 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
 @@ -16,7 +16,9 @@
@@ -2133,6 +2133,77 @@ index 68274d2..488257f 100644
  #define REX_IMAGE_BASE {{ image_base }}ull
  #define REX_IMAGE_SIZE {{ image_size }}ull
  #define REX_CODE_BASE {{ code_base }}ull
+@@ -315,21 +317,29 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+   return count;
+ }
+ 
+-#define REX_CHECK_GLOBAL_LOCK()                                        \
++// site: guest address of the mfmsr/mtmsrd, used only by the measurement
++// build (REX_GLOBAL_LOCK_STATS=1, rex::thread::guest_lock_stats).
++#if defined(REX_GLOBAL_LOCK_STATS) && REX_GLOBAL_LOCK_STATS
++#define REX_CHECK_GLOBAL_LOCK(site) (rex::thread::guest_lock_stats::Check(site))
++#define REX_ENTER_GLOBAL_LOCK(site) rex::thread::guest_lock_stats::Enter(site)
++#define REX_LEAVE_GLOBAL_LOCK(site) rex::thread::guest_lock_stats::Leave(site)
++#else
++#define REX_CHECK_GLOBAL_LOCK(site)                                        \
+   ([&]() -> u64 {                                                      \
+     auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
+     return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
+   }())
+ 
+-#define REX_ENTER_GLOBAL_LOCK()                          \
++#define REX_ENTER_GLOBAL_LOCK(site)                          \
+   do {                                                   \
+     rex::thread::global_critical_region::mutex().lock(); \
+     ppc_global_lock_count_().fetch_add(1);               \
+   } while (0)
+ 
+-#define REX_LEAVE_GLOBAL_LOCK()                                                           \
++#define REX_LEAVE_GLOBAL_LOCK(site)                                                           \
+   do {                                                                                    \
+     auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
+     assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+     rex::thread::global_critical_region::mutex().unlock();                                \
+   } while (0)
++#endif
+diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
+index 0c334f8..1e82167 100644
+--- a/resources/templates/test/ppc_config_h.inja
++++ b/resources/templates/test/ppc_config_h.inja
+@@ -172,22 +172,30 @@ inline std::atomic<i32>& ppc_global_lock_count_() {
+   return count;
+ }
+ 
+-#define REX_CHECK_GLOBAL_LOCK()                                        \
++// site: guest address of the mfmsr/mtmsrd, used only by the measurement
++// build (REX_GLOBAL_LOCK_STATS=1, rex::thread::guest_lock_stats).
++#if defined(REX_GLOBAL_LOCK_STATS) && REX_GLOBAL_LOCK_STATS
++#define REX_CHECK_GLOBAL_LOCK(site) (rex::thread::guest_lock_stats::Check(site))
++#define REX_ENTER_GLOBAL_LOCK(site) rex::thread::guest_lock_stats::Enter(site)
++#define REX_LEAVE_GLOBAL_LOCK(site) rex::thread::guest_lock_stats::Leave(site)
++#else
++#define REX_CHECK_GLOBAL_LOCK(site)                                        \
+   ([&]() -> u64 {                                                      \
+     auto lock_ = rex::thread::global_critical_region::AcquireDirect(); \
+     return ppc_global_lock_count_().load() ? 0 : 0x8000;               \
+   }())
+ 
+-#define REX_ENTER_GLOBAL_LOCK()                          \
++#define REX_ENTER_GLOBAL_LOCK(site)                          \
+   do {                                                   \
+     rex::thread::global_critical_region::mutex().lock(); \
+     ppc_global_lock_count_().fetch_add(1);               \
+   } while (0)
+ 
+-#define REX_LEAVE_GLOBAL_LOCK()                                                           \
++#define REX_LEAVE_GLOBAL_LOCK(site)                                                           \
+   do {                                                                                    \
+     auto old_count_ = ppc_global_lock_count_().fetch_sub(1);                              \
+     assert(old_count_ >= 1 && "LeaveGlobalLock called without matching EnterGlobalLock"); \
+     rex::thread::global_critical_region::mutex().unlock();                                \
+   } while (0)
++#endif
+ 
 diff --git a/src/codegen/builders/builder_context.h b/src/codegen/builders/builder_context.h
 index 33ac6d0..95766f8 100644
 --- a/src/codegen/builders/builder_context.h
@@ -2650,7 +2721,7 @@ index 26957fc..2732c6d 100644
  }
  
 diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
-index b2d70f5..566f73c 100644
+index b2d70f5..f353577 100644
 --- a/src/codegen/builders/system.cpp
 +++ b/src/codegen/builders/system.cpp
 @@ -242,8 +242,12 @@ bool build_mfocrf(BuilderContext& ctx) {
@@ -2666,6 +2737,27 @@ index b2d70f5..566f73c 100644
    return true;
  }
  
+@@ -253,7 +257,7 @@ bool build_mfmsr(BuilderContext& ctx) {
+     ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
+     // Check global lock and return appropriate value
+     // Returns 0x8000 if unlocked (interrupts enabled), 0 if locked
+-    ctx.println("\t{}.u64 = REX_CHECK_GLOBAL_LOCK();", ctx.r(ctx.insn.operands[0]));
++    ctx.println("\t{}.u64 = REX_CHECK_GLOBAL_LOCK(0x{:X});", ctx.r(ctx.insn.operands[0]), ctx.base);
+   }
+   return true;
+ }
+@@ -327,9 +331,9 @@ bool build_mtmsrd(BuilderContext& ctx) {
+     // Other = leave lock (enable interrupts)
+     uint32_t src_reg = ctx.insn.operands[0];
+     if (src_reg == 13) {
+-      ctx.println("\tREX_ENTER_GLOBAL_LOCK();");
++      ctx.println("\tREX_ENTER_GLOBAL_LOCK(0x{:X});", ctx.base);
+     } else {
+-      ctx.println("\tREX_LEAVE_GLOBAL_LOCK();");
++      ctx.println("\tREX_LEAVE_GLOBAL_LOCK(0x{:X});", ctx.base);
+     }
+   }
+   return true;
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..2e0070a 100644
 --- a/src/codegen/builders/vector.cpp
