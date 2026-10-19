@@ -1610,6 +1610,44 @@ the same way as Xenia's ROV path.
        generated `fable_2_init.cpp` has `skip_msr = false` and so on, and
        mtmsrd emits `REX_ENTER_GLOBAL_LOCK`. Moving it would change the
        generated code broadly; it needs its own test.
+  54. **Measured (2026-10-19): the 16 KB-page address check on guest memory
+     accesses.** `REX_PHYS_HOST_OFFSET` (generated `fable_2_pch.h`, from the
+     SDK's pch template) adds 0x1000 for addresses at or above 0xE0000000 on
+     macOS and Windows. With 16 KB pages that range can't be mapped 4 KB
+     shifted, so the check can't be avoided in general.
+     - **Per access** (disassembly): `lsr`, `cmp`, `csel` (the 0x1000 is
+       held in a register and the offset folds into the addressing mode).
+       1.25 M access sites: 389k (31%) through r1, 49k through `ea`, the
+       rest through other registers.
+     - **Cost** (one-off build with the check done twice, the second copy
+       against a threshold the compiler can't see; separate runs at the
+       trail, 60 fps):
+
+       | Build | instructions/s | cycles/s | CPU power | 3D Engine | GameThread |
+       | --- | --- | --- | --- | --- | --- |
+       | normal (`fable_2_520`, `_521`, `_524`, `_525`) | 12.91-13.09 G | 3.99-4.61 G | 4.50-4.79 W | 21.3-24.9% | 23.0-27.3% |
+       | check twice (`fable_2_522`, `_523`) | 15.27-15.36 G | 4.47-4.51 G | 5.23-5.26 W | 25.7-25.9% | 26.4-27.8% |
+
+       The first two normal runs had RuneLite on the machine (~35% of the
+       GPU); the others ran on a quiet machine.
+     - Reading: the second copy (~4 instructions with its constant) added
+       ~2.3 G instructions/s, so ~0.6 G guest accesses per second; the
+       real check is ~1.7 G instructions/s, ~13% of all instructions. Cycles
+       rose only ~3% (within run noise), since these are independent ALU
+       ops on a wide core. The power estimate rose ~0.65 W, more than the
+       cycles suggest; it may weight instructions. Treat it as an upper
+       bound.
+     - **What dropping it could save:** only accesses the codegen can prove
+       are below 0xE0000000, mostly r1 (stack) accesses, about a third of
+       the sites. Expect ~4-5% fewer instructions, ~1% of cycles, maybe
+       0.1-0.2 W. Low priority.
+     - **Bigger lead seen in the same disassembly:** the generated code
+       reloads guest registers from the context struct before every access
+       (`ldr w9, [x19, #0x10]` = ctx.r1, then `sub`, before each store of a
+       prologue). The manifest's "Conservative settings" (`*_as_local`,
+       `skip_lr`, `skip_msr`) that would keep registers in locals are never
+       read (item 53). Moving them into `[entrypoint]` is a broad codegen
+       change and needs its own correctness and performance test.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
