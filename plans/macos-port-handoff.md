@@ -1651,10 +1651,10 @@ the same way as Xenia's ROV path.
   55. **Done (2026-10-19): guest registers in C++ locals.** The manifest's
      register options now sit in `[entrypoint]` (they were in the last
      mid-asm hook's table, item 53). On: `ctr_as_local`, `xer_as_local`,
-     `reserved_as_local`, `cr_as_local`, `non_volatile_as_local`. Off:
-     `non_argument_as_local` (callees return values in r11/r12/f0/v32-v63,
-     e.g. a stack probe's r12; needs live-out handling), `skip_lr`,
-     `skip_msr` (behaviour changes, untested). Details and the codegen
+     `reserved_as_local`, `cr_as_local`, `non_volatile_as_local`,
+     `non_argument_as_local` (callees that return values in r11/r12/f0/
+     v32-v63, e.g. a stack probe's r12, hand them back through ctx). Off:
+     `skip_lr`, `skip_msr` (behaviour changes, untested). Details and the codegen
      changes: `docs/macos_port.md`, "CPU: guest registers in C++ locals".
      - **Trail, 60 fps, alternating** (`fable_2_541`-`_546`, quiet machine):
 
@@ -1663,12 +1663,20 @@ the same way as Xenia's ROV path.
        | registers in ctx | 12.96-13.08 G | 4.05-4.33 G | 22.8-26.3% | 21.6-23.3% | 4.70-4.73 W |
        | CR/CTR/XER/reservation locals | 12.05-12.25 G | 3.89-4.01 G | 21.6-23.9% | 19.4-20.0% | 4.44-4.50 W |
        | + non-volatile locals | 10.83-10.84 G | 3.66-3.70 G | 19.6-19.8% | 16.7-17.2% | 4.12 W |
+       | + non-argument locals (`fable_2_549`, `_551`) | 10.60-10.64 G | 3.49-3.51 G | 19.7% | 15.5-15.7% | 4.01-4.06 W |
 
        Process total 96-97% from 106-115%; GPU and command processor time
        unchanged.
      - **Checked:** boots, loads the save, two minutes of walking and
        turning (1400-3900 draws) at 60 fps with no errors
-       (`fable_2_547`); the trail picture looks normal.
+       (`fable_2_547`); the trail picture looks normal. With non-argument
+       locals: three minutes of walking at 60 fps, no errors
+       (`fable_2_553`), picture normal, save loads in 19.3-19.6 s as before
+       (one load took 52 s once and not again, `fable_2_554`).
+     - **Over-marking to trim (optional):** the scan for registers handed
+       back doesn't stop at labels, so 5061 functions store r11/f0 at every
+       return. Stopping at labels found only 25 real pairs, but would miss a
+       value that reaches a read through a merge point.
      - **Crashes on the way, each fixed in the codegen:**
        - a split-off epilogue fragment read its owner's r31 (zero as a
          local): live-in registers, copied by callers and loaded on entry;

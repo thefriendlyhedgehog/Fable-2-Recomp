@@ -48,9 +48,9 @@ ctr_as_local = true
 xer_as_local = true
 reserved_as_local = true
 cr_as_local = true
-# Off: some callees hand values back in r11, r12, f0 or v32-v63 (the stack
-# probe returns r12), which a local would drop.
-non_argument_as_local = false
+# Some callees hand values back in r11, r12, f0 or v32-v63 (the stack probe
+# returns r12); the codegen passes those back through ctx as well.
+non_argument_as_local = true
 non_volatile_as_local = true
 # These two change behaviour rather than where registers live: skip_lr leaves
 # mflr without a value (code that reads its own address breaks) and skip_msr

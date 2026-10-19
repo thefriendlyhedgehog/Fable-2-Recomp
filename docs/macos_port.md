@@ -1570,7 +1570,7 @@ locals instead (`[entrypoint]` options in `fable_2_manifest.toml`):
 | --- | --- | --- |
 | `ctr_as_local`, `xer_as_local`, `reserved_as_local`, `cr_as_local` | CTR, XER, the lwarx reservation, CR0-CR7 | on |
 | `non_volatile_as_local` | r14-r31, f14-f31, v14-v31, v64-v127 | on |
-| `non_argument_as_local` | r0, r2, r11, r12, f0, v32-v63 | off |
+| `non_argument_as_local` | r0, r2, r11, r12, f0, v32-v63 | on |
 | `skip_lr`, `skip_msr` | no LR writes; no global lock at `mtmsrd r13` | off (change behaviour, untested) |
 
 These options were in the manifest before 2026-10-19, but below the last
@@ -1584,7 +1584,8 @@ to `_546`):
 | --- | --- | --- | --- | --- | --- | --- |
 | registers in ctx | 12.96-13.08 G | 4.05-4.33 G | 22.8-26.3% | 21.6-23.3% | 106-115% | 4.70-4.73 W |
 | CR, CTR, XER, reservation locals | 12.05-12.25 G | 3.89-4.01 G | 21.6-23.9% | 19.4-20.0% | 102-105% | 4.44-4.50 W |
-| + non-volatile locals (now) | 10.83-10.84 G | 3.66-3.70 G | 19.6-19.8% | 16.7-17.2% | 96-97% | 4.12 W |
+| + non-volatile locals | 10.83-10.84 G | 3.66-3.70 G | 19.6-19.8% | 16.7-17.2% | 96-97% | 4.12 W |
+| + non-argument locals (now; `fable_2_549`, `_551`) | 10.60-10.64 G | 3.49-3.51 G | 19.7% | 15.5-15.7% | 88-90% | 4.01-4.06 W |
 
 GPU and command processor time are unchanged. The binary is 13% smaller
 (106 MB from 122 MB).
@@ -1622,14 +1623,18 @@ and a local is invisible to every other function:
   on ctx and load r12 from ctx, for the hand-written overrides that call
   them.
 
-**Why `non_argument_as_local` stays off:** some callees hand values back in
-those registers, which a local drops. A scan of the generated code for
-these registers read right after a call, before any write, found 25 such
-callee/register pairs. The clearest is a stack probe
-(`ProcessAndProcessAndProcess878_82CA9E84`) whose 23 call sites read the r12
-it returns. It hasn't been tested on its own since the ctx restore above
-fixed the load crash. Turning it on needs live-out handling (copy back
-after the call, store on return).
+- **Registers handed back.** Some callees return a value in a volatile
+  register: a stack probe (`ProcessAndProcessAndProcess878_82CA9E84`) whose
+  23 call sites read the r12 it returns, and others in r11, f0, v32-v63 or
+  CR. After each call, a volatile local the caller reads before writing it
+  (up to the next call or return) marks the callee as handing it back; a
+  function that hands a register back passes that on to its tail callees
+  and to calls whose value reaches its return. Such a function loads the
+  register from ctx on entry (a value it leaves alone passes through) and
+  stores it at every return; callers copy theirs in when they hold a value
+  and reload it after the call. The scan doesn't stop at labels, so it
+  over-marks (5061 functions, mostly r11 and f0, one store per return):
+  safe, and the measured gain includes that cost.
 
 ### Frame pacing: guest clock and the drawable wait
 
