@@ -52,10 +52,11 @@ cr_as_local = true
 # returns r12); the codegen passes those back through ctx as well.
 non_argument_as_local = true
 non_volatile_as_local = true
-# These two change behaviour rather than where registers live: skip_lr leaves
-# mflr without a value (code that reads its own address breaks) and skip_msr
-# drops the global lock taken at mtmsrd r13. Off until tested on their own.
-skip_lr = false
+# skip_lr: no LR writes at calls, mflr or mtlr. Returns are native, and no
+# mflr result here is used as data (only saved and restored); the one blrl
+# (mtlr r3; blrl in 0x82CBA3E0) calls through r3 instead.
+skip_lr = true
+# skip_msr drops the global lock taken at mtmsrd r13; off until tested.
 skip_msr = false
 
 # setjmp/longjmp: the recompiler redirects these to native implementations.

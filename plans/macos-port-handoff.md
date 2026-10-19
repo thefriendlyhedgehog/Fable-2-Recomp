@@ -1653,8 +1653,9 @@ the same way as Xenia's ROV path.
      mid-asm hook's table, item 53). On: `ctr_as_local`, `xer_as_local`,
      `reserved_as_local`, `cr_as_local`, `non_volatile_as_local`,
      `non_argument_as_local` (callees that return values in r11/r12/f0/
-     v32-v63, e.g. a stack probe's r12, hand them back through ctx). Off:
-     `skip_lr`, `skip_msr` (behaviour changes, untested). Details and the codegen
+     v32-v63, e.g. a stack probe's r12, hand them back through ctx),
+     `skip_lr` (no LR writes; `mflr` gives 0, the one `blrl` calls through
+     its `mtlr` source). Off: `skip_msr` (behaviour change, untested). Details and the codegen
      changes: `docs/macos_port.md`, "CPU: guest registers in C++ locals".
      - **Trail, 60 fps, alternating** (`fable_2_541`-`_546`, quiet machine):
 
@@ -1666,13 +1667,19 @@ the same way as Xenia's ROV path.
        | + non-argument locals (`fable_2_549`, `_551`) | 10.60-10.64 G | 3.49-3.51 G | 19.7% | 15.5-15.7% | 4.01-4.06 W |
 
        Process total 96-97% from 106-115%; GPU and command processor time
-       unchanged.
+       unchanged. skip_lr on top (`fable_2_562`-`_567`, Dusklight at
+       15-28% GPU): 10.50-10.58 G instructions/s against 10.59-10.68 G,
+       about 1% fewer, power the same (3.8 W), binary 102.6 MB from
+       106.5 MB. Small; revert with `skip_lr = false` if anything needs LR
+       as data.
      - **Checked:** boots, loads the save, two minutes of walking and
        turning (1400-3900 draws) at 60 fps with no errors
        (`fable_2_547`); the trail picture looks normal. With non-argument
        locals: three minutes of walking at 60 fps, no errors
        (`fable_2_553`), picture normal, save loads in 19.3-19.6 s as before
-       (one load took 52 s once and not again, `fable_2_554`).
+       (one load took 52 s once and not again, `fable_2_554`). With
+       skip_lr: walk test at 60 fps with no errors, picture normal, six
+       trail runs without errors.
      - **Over-marking to trim (optional):** the scan for registers handed
        back doesn't stop at labels, so 5061 functions store r11/f0 at every
        return. Stopping at labels found only 25 real pairs, but would miss a

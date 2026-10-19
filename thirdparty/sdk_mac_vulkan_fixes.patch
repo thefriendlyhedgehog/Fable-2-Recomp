@@ -2503,10 +2503,10 @@ index f78e0d8..df41256 100644
        println("\tgoto loc_{:X};", midAsmHook->second.jumpAddress);
    }
 diff --git a/src/codegen/builders/control_flow.cpp b/src/codegen/builders/control_flow.cpp
-index 26957fc..9700234 100644
+index 26957fc..2732c6d 100644
 --- a/src/codegen/builders/control_flow.cpp
 +++ b/src/codegen/builders/control_flow.cpp
-@@ -92,7 +92,7 @@ bool build_bl(BuilderContext& ctx) {
+@@ -92,11 +92,24 @@ bool build_bl(BuilderContext& ctx) {
  }
  
  bool build_blr(BuilderContext& ctx) {
@@ -2515,7 +2515,24 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -147,7 +147,7 @@ bool build_bctr(BuilderContext& ctx) {
+ bool build_blrl(BuilderContext& ctx) {
++  // With skip_lr nothing writes ctx.lr, so call through the register the
++  // preceding mtlr would have put there (mtlr rS; blrl calls a pointer in rS).
++  if (ctx.config().skipLr) {
++    const bool havePrevious = ctx.base > ctx.fn.base();
++    const uint32_t previous = havePrevious ? __builtin_bswap32(*(ctx.data - 1)) : 0;
++    if (havePrevious && (previous & 0xFC1FFFFF) == 0x7C0803A6) {
++      ctx.println("\tREX_CALL_INDIRECT_FUNC({}.u32);", ctx.r((previous >> 21) & 31));
++      ctx.csrState = CSRState::Unknown;
++      return true;
++    }
++    REXCODEGEN_ERROR("blrl at 0x{:08X} without a preceding mtlr; skip_lr leaves LR unset",
++                     ctx.base);
++  }
+   // BLRL: save return address, then branch-and-link to current LR
+   ctx.println("\t{{ auto old_lr = ctx.lr;");
+   if (!ctx.config().skipLr)
+@@ -147,7 +160,7 @@ bool build_bctr(BuilderContext& ctx) {
          case TargetKind::Import:
            if (auto* targetFn = ctx.graph().getFunction(label)) {
              ctx.emitCtx.reference(targetFn->name());
@@ -2524,7 +2541,7 @@ index 26957fc..9700234 100644
            } else {
              REXCODEGEN_ERROR(
                  "Jump target 0x{:08X} classified as function but not in graph at bctr 0x{:08X}",
-@@ -177,7 +177,9 @@ bool build_bctr(BuilderContext& ctx) {
+@@ -177,7 +190,9 @@ bool build_bctr(BuilderContext& ctx) {
      // NOTE(tomc): If this is actually an unresolved switch table, the code after
      // will be unreachable. This is caught during analysis by discover_blocks.
      // The validation phase will report missing switch tables.
@@ -2534,7 +2551,7 @@ index 26957fc..9700234 100644
      ctx.println("\treturn;");
    }
    return true;
-@@ -193,7 +195,9 @@ bool build_bctrl(BuilderContext& ctx) {
+@@ -193,7 +208,9 @@ bool build_bctrl(BuilderContext& ctx) {
  
  bool build_bnectr(BuilderContext& ctx) {
    ctx.println("\tif (!{}.eq) {{", ctx.cr(ctx.insn.operands[0]));
@@ -2544,7 +2561,7 @@ index 26957fc..9700234 100644
    ctx.println("\t\treturn;");
    ctx.println("\t}}");
    return true;
-@@ -212,13 +216,13 @@ bool build_bdz(BuilderContext& ctx) {
+@@ -212,13 +229,13 @@ bool build_bdz(BuilderContext& ctx) {
  
  bool build_bdzlr(BuilderContext& ctx) {
    ctx.println("\t--{}.u64;", ctx.ctr());
@@ -2560,7 +2577,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -269,7 +273,7 @@ bool build_beq(BuilderContext& ctx) {
+@@ -269,7 +286,7 @@ bool build_beq(BuilderContext& ctx) {
  }
  
  bool build_beqlr(BuilderContext& ctx) {
@@ -2569,7 +2586,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -279,7 +283,7 @@ bool build_bne(BuilderContext& ctx) {
+@@ -279,7 +296,7 @@ bool build_bne(BuilderContext& ctx) {
  }
  
  bool build_bnelr(BuilderContext& ctx) {
@@ -2578,7 +2595,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -293,7 +297,7 @@ bool build_blt(BuilderContext& ctx) {
+@@ -293,7 +310,7 @@ bool build_blt(BuilderContext& ctx) {
  }
  
  bool build_bltlr(BuilderContext& ctx) {
@@ -2587,7 +2604,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -303,7 +307,7 @@ bool build_bge(BuilderContext& ctx) {
+@@ -303,7 +320,7 @@ bool build_bge(BuilderContext& ctx) {
  }
  
  bool build_bgelr(BuilderContext& ctx) {
@@ -2596,7 +2613,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -317,7 +321,7 @@ bool build_bgt(BuilderContext& ctx) {
+@@ -317,7 +334,7 @@ bool build_bgt(BuilderContext& ctx) {
  }
  
  bool build_bgtlr(BuilderContext& ctx) {
@@ -2605,7 +2622,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -327,7 +331,7 @@ bool build_ble(BuilderContext& ctx) {
+@@ -327,7 +344,7 @@ bool build_ble(BuilderContext& ctx) {
  }
  
  bool build_blelr(BuilderContext& ctx) {
@@ -2614,7 +2631,7 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -341,7 +345,7 @@ bool build_bso(BuilderContext& ctx) {
+@@ -341,7 +358,7 @@ bool build_bso(BuilderContext& ctx) {
  }
  
  bool build_bsolr(BuilderContext& ctx) {
@@ -2623,12 +2640,29 @@ index 26957fc..9700234 100644
    return true;
  }
  
-@@ -351,7 +355,7 @@ bool build_bns(BuilderContext& ctx) {
+@@ -351,7 +368,7 @@ bool build_bns(BuilderContext& ctx) {
  }
  
  bool build_bnslr(BuilderContext& ctx) {
 -  ctx.println("\tif (!{}.so) return;", ctx.cr(ctx.insn.operands[0]));
 +  ctx.println("\tif (!{}.so) {}", ctx.cr(ctx.insn.operands[0]), ctx.return_statement());
+   return true;
+ }
+ 
+diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
+index b2d70f5..566f73c 100644
+--- a/src/codegen/builders/system.cpp
++++ b/src/codegen/builders/system.cpp
+@@ -242,8 +242,12 @@ bool build_mfocrf(BuilderContext& ctx) {
+ }
+ 
+ bool build_mflr(BuilderContext& ctx) {
++  // With skip_lr there is no LR to read; give the register a value anyway, so
++  // the prologue's save of it doesn't read whatever the caller left there.
+   if (!ctx.config().skipLr)
+     ctx.println("\t{}.u64 = ctx.lr;", ctx.r(ctx.insn.operands[0]));
++  else
++    ctx.println("\t{}.u64 = 0;", ctx.r(ctx.insn.operands[0]));
    return true;
  }
  

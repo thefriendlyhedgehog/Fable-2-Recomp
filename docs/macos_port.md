@@ -1571,7 +1571,8 @@ locals instead (`[entrypoint]` options in `fable_2_manifest.toml`):
 | `ctr_as_local`, `xer_as_local`, `reserved_as_local`, `cr_as_local` | CTR, XER, the lwarx reservation, CR0-CR7 | on |
 | `non_volatile_as_local` | r14-r31, f14-f31, v14-v31, v64-v127 | on |
 | `non_argument_as_local` | r0, r2, r11, r12, f0, v32-v63 | on |
-| `skip_lr`, `skip_msr` | no LR writes; no global lock at `mtmsrd r13` | off (change behaviour, untested) |
+| `skip_lr` | no LR writes at calls, `mflr` or `mtlr` | on |
+| `skip_msr` | no global lock at `mtmsrd r13` | off (changes behaviour, untested) |
 
 These options were in the manifest before 2026-10-19, but below the last
 `[[entrypoint.midasm_hook]]`, so TOML put them in that hook's table and
@@ -1585,10 +1586,25 @@ to `_546`):
 | registers in ctx | 12.96-13.08 G | 4.05-4.33 G | 22.8-26.3% | 21.6-23.3% | 106-115% | 4.70-4.73 W |
 | CR, CTR, XER, reservation locals | 12.05-12.25 G | 3.89-4.01 G | 21.6-23.9% | 19.4-20.0% | 102-105% | 4.44-4.50 W |
 | + non-volatile locals | 10.83-10.84 G | 3.66-3.70 G | 19.6-19.8% | 16.7-17.2% | 96-97% | 4.12 W |
-| + non-argument locals (now; `fable_2_549`, `_551`) | 10.60-10.64 G | 3.49-3.51 G | 19.7% | 15.5-15.7% | 88-90% | 4.01-4.06 W |
+| + non-argument locals (`fable_2_549`, `_551`) | 10.60-10.64 G | 3.49-3.51 G | 19.7% | 15.5-15.7% | 88-90% | 4.01-4.06 W |
 
 GPU and command processor time are unchanged. The binary is 13% smaller
 (106 MB from 122 MB).
+
+**skip_lr** (now) measured against non-argument locals, alternating, with
+Dusklight using 15-28% GPU throughout (`fable_2_562` to `_567`): 10.50-10.58
+G instructions/s against 10.59-10.68 G (about 1% fewer), GameThread
+20.5-21.0% against 20.6-25.2%, CPU power 3.79-3.82 W against 3.80-3.87 W;
+cycles vary too much with the other load to compare. The binary is 102.6 MB
+(from 106.5 MB). Returns are native C++ returns, so LR only matters where
+code reads it as data: here every `mflr` result is only saved and
+restored (the prologue's `mflr r12` for `__savegprlr`, the hand-written
+overrides likewise), so under skip_lr `mflr` sets the register to 0 and the
+saves don't count as a read of r12 (otherwise 45,600 functions looked like
+they took r12 from their caller). The one `blrl`, `mtlr r3; blrl` in
+0x82CBA3E0, calls through the `mtlr` source register; codegen stops with an
+error on any other `blrl`. The diagnostics probes that log `ctx.lr`
+(`src/diagnostics`) show 0 under skip_lr.
 
 **What the codegen does to keep that correct** (SDK patch, `src/codegen`).
 The Xbox 360 compiler doesn't keep to the calling convention everywhere,
