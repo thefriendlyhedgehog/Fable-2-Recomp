@@ -155,9 +155,9 @@ else
     # The tree differs from the patch: an older patch (after a pull), or SDK
     # edits not yet saved with tools/sdk_patch_refresh.sh. Keep what is about
     # to be reset, so unsaved edits are never lost.
-    if ! git diff --quiet -- src include; then
+    if ! git diff --quiet -- src include resources; then
         BACKUP="$SRC/pre-reset-$(date +%Y%m%d-%H%M%S).diff"
-        git diff -- src include > "$BACKUP"
+        git diff -- src include resources > "$BACKUP"
         echo "SDK tree did not match $(basename "$PATCH"); its changes were saved to $BACKUP"
     fi
     git checkout -q -- .

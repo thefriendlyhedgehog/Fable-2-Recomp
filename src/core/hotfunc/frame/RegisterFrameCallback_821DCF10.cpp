@@ -51,6 +51,7 @@
 // generated copy performs before the lfs is kept so the guest fpscr state
 // matches.
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_fpscr.h"
 
 extern "C" void sub_82265F50(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82422090(PPCContext& ctx, uint8_t* base);
@@ -108,7 +109,7 @@ extern "C" void RegisterFrameCallback_821DCF10(PPCContext& __restrict ctx, uint8
 
 	if (!tookInlinePath) {
 		// Default path: synthesize the descriptor in place at arg1.
-		ctx.fpscr.disableFlushMode();           // lfs f0: match generated fpscr side effect
+		HOTFUNC_DISABLE_FLUSH_MODE(ctx);           // lfs f0: match generated fpscr side effect
 		const u32 mask = gload32(0x820994C0);   // splat float, all four lanes
 		for (u32 i = 0; i < 16; i += 4) {       // vspltisw v0,0 / stvx128 v0
 			gstore32(arg1 + i, 0);

@@ -1527,6 +1527,37 @@ interrupt-disable around its spin locks, `REX_ENTER_GLOBAL_LOCK`) takes the
 same one. That is waiting rather than CPU; `sample` slowed the game to 27
 fps and makes it look worse than it is.
 
+### CPU: the FPCR flush-mode switches
+
+Xenon's VMX unit flushes denormals to zero (non-Java mode); its scalar FPU
+doesn't. The recompiled code follows that by switching FPCR.FZ around every
+change between VMX and scalar FP code (`ctx.fpscr.enable/disableFlushMode`).
+A measurement build that counted them (`fable_2_517`, trail, 60 fps) saw
+~2.5 M switches per second:
+
+- two thirds where the codegen knew the mode changed within a function;
+- one third after calls, where it didn't know.
+
+An FPCR write that changes the mode serializes the pipeline. Keeping FZ on
+instead (three alternating pairs) cut the 3D Engine thread's CPU by ~8%
+and GameThread's by ~4%, with the same instructions in fewer cycles. That
+is ~16 ns per switch, about twice a microbenchmark's 7.8 ns.
+
+`fixed_flush_mode = true` (`[entrypoint]` in `fable_2_manifest.toml`, a codegen
+option from the SDK patch) now does that, as RPCS3 does on arm64:
+
+- The codegen emits no switches. The first FP operation after function
+  entry or a call emits a conditional `enableFlushMode()`, which only
+  writes the FPCR once per thread.
+- Scalar FP code therefore also flushes denormals, unlike on the console.
+- The hand-tuned overrides in `src/core/hotfunc` route their copies of the
+  switch through `HOTFUNC_DISABLE_FLUSH_MODE`, a no-op when the generated
+  `fable_2_pch.h` defines `REX_FIXED_FLUSH_MODE 1`.
+
+Same picture: in a still scene at the trail, frames with FZ kept on differ
+from normal ones by 0.33-0.39% of pixels, the same as consecutive frames
+(0.30-0.36%). Four minutes in the square looked normal.
+
 ### Frame pacing: guest clock and the drawable wait
 
 Fable II paces itself on the guest vblank: the command processor waits

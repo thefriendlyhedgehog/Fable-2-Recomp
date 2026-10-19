@@ -28,7 +28,7 @@ ReXGlue (Xenia-derived) static recompilation of Fable II. The app is in
   less GPU time than `fsi`); `--render_target_path_vulkan=fsi` to compare,
   `tools/mac_ab_paths.sh` for an fps comparison.
 - SDK changes go into `thirdparty/sdk_mac_vulkan_fixes.patch`: edit
-  `thirdparty/rexglue-sdk-src/{src,include}`, then `tools/sdk_patch_refresh.sh`,
+  `thirdparty/rexglue-sdk-src/{src,include,resources}`, then `tools/sdk_patch_refresh.sh`,
   then rebuild. Never edit the patch file by hand.
 - Offline shader translation checks: `tools/sdk_offline/README.md`.
 

@@ -24,6 +24,7 @@
 // indirect-dispatch table. This strong definition intercepts both direct bl
 // calls and bctrl dispatch. __imp__DispatchOsNotifications_82185080 remains the original.
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_fpscr.h"
 
 extern "C" void ProcessAndInitializeAndProcess2_82369EE0(PPCContext& ctx, uint8_t* base);
 extern "C" void ProcessAndProcessAndProcess1100_8221EB78(PPCContext& ctx, uint8_t* base);
@@ -151,7 +152,7 @@ extern "C" void DispatchOsNotifications_82185080(PPCContext& __restrict ctx, uin
 	const u8 gate = GV8(self + 260);              // lbz r11,260(r31)
 	ctx.cr6.compare<u32>(gate, 0, ctx.xer);       // cmplwi cr6,r11,0
 	if (!ctx.cr6.eq) {
-		ctx.fpscr.disableFlushMode();             // (lfd f13,232 / lfd f0,3376)
+		HOTFUNC_DISABLE_FLUSH_MODE(ctx);             // (lfd f13,232 / lfd f0,3376)
 		PPCRegister t;
 		t.u64 = GV64(self + 232);                 // lfd f13,232(r31)
 		const double f13 = t.f64;
@@ -161,7 +162,7 @@ extern "C" void DispatchOsNotifications_82185080(PPCContext& __restrict ctx, uin
 		if (ctx.cr6.gt) {
 			ctx.lr = 0x821851C0;                  // bl 0x8221eb78
 			ProcessAndProcessAndProcess1100_8221EB78(ctx, base);
-			ctx.fpscr.disableFlushMode();         // (lfd f0,232 / lfd f0,-40)
+			HOTFUNC_DISABLE_FLUSH_MODE(ctx);         // (lfd f0,232 / lfd f0,-40)
 			t.u64 = GV64(self + 232);             // lfd f0,232(r31)
 			const double f13b = ctx.f1.f64 - t.f64; // fsub f13,f1,f0
 			t.u64 = GV64(0x8209FFD8);             // lfd f0,-40(r11) (lis r11,-32246)
@@ -183,7 +184,7 @@ extern "C" void DispatchOsNotifications_82185080(PPCContext& __restrict ctx, uin
 					sub_8233C480(ctx, base);
 				}
 				// Reset the time field (lis r11,-32256; lfd f0,3240(r11); stfd f0,232(r31)).
-				ctx.fpscr.disableFlushMode();
+				HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 				SV64(self + 232, GV64(0x82000CA8));
 			}
 		}

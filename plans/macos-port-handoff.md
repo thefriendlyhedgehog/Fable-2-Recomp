@@ -1571,6 +1571,45 @@ the same way as Xenia's ROV path.
           ~0.8 M/s after-call switches mostly go (about a third of the
           gain);
        3. FZ off everywhere (VMX denormals no longer flushed).
+     - **Done (option 1): `fixed_flush_mode = true`** in `[entrypoint]` of
+       `fable_2_manifest.toml`, a new codegen option (SDK patch: `config.h`,
+       `config.cpp`, `codegen_writer.cpp`, `builders/context.cpp`, and the
+       pch template, which defines `REX_FIXED_FLUSH_MODE`):
+       - `emit_set_flush_mode` emits no switch. The first FP operation after
+         an unknown state (function entry, a call) emits the conditional
+         `enableFlushMode()`, a compare that writes only once per thread.
+         The generated code now has 48,398 of those and no
+         `disableFlushMode` (it had 45,538 conditional and 7,635
+         unconditional switches).
+       - The hand-tuned overrides' 24 `disableFlushMode()` calls go through
+         `HOTFUNC_DISABLE_FLUSH_MODE` (`src/core/hotfunc/hotfunc_fpscr.h`),
+         a no-op with `REX_FIXED_FLUSH_MODE`.
+       - The codegen templates are in `resources/`, so
+         `tools/sdk_patch_refresh.sh` and `build_sdk_mac.sh` now cover
+         `src`, `include` and `resources`.
+       - Build: `tools/build_sdk_mac.sh -codegen` (regenerates the code),
+         then `./build.sh -release fable_2` (~15 min).
+     - **Checked** (`fable_2_519`; RuneLite used ~40% of the GPU throughout,
+       so GPU times are inflated):
+       - trail: 3D Engine 24.6%, GameThread 27.6%, process 1.19 cores and
+         4.54 W, 13.0 G instructions/s at 4.55 G cycles/s, as in the "fixed
+         FZ on" phases above;
+       - square (crowd, 4259 draws): command processor 9.7-9.9 ms per frame
+         (11.6 ms at 4670 draws before item 52), 60 fps;
+       - four minutes in the square with camera turns: 60 fps except a
+         GPU-bound stretch at 5475 draws (32-58 fps, GPU 16-30 ms per frame
+         with RuneLite on the GPU; the command processor stayed at ~9 ms).
+         The pictures look normal.
+       - Story: the street show ended and the gold-pieces quest started
+         again. No save was written (only a failed open of
+         `Save:\Fable2PubInfo.xml`).
+     - **Unknown setting:** the manifest's "Conservative settings" block
+       (`skip_lr`, `skip_msr`, `ctr_as_local`, `xer_as_local`,
+       `reserved_as_local`, `cr_as_local`) sits under the last
+       `[[entrypoint.midasm_hook]]` table, so codegen ignores it. The
+       generated `fable_2_init.cpp` has `skip_msr = false` and so on, and
+       mtmsrd emits `REX_ENTER_GLOBAL_LOCK`. Moving it would change the
+       generated code broadly; it needs its own test.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported

@@ -98,6 +98,7 @@
 //     if (thresholdMet) { /* indirect call via vtable */ } else YieldAndCheckThreshold();
 //   }
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_fpscr.h"
 
 #include <chrono>
 #include <thread>
@@ -253,7 +254,7 @@ static __attribute__((noinline)) void probe_and_setup(PPCContext& ctx, uint8_t* 
 	// lwz r11,108(r31)
 	ctx.r11.u64 = GV32(ctx.r31.u32 + 108);
 	// lfd f1,272(r31)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f1.u64 = GV64(ctx.r31.u32 + 272);
 	// lwz r3,104(r31)
 	ctx.r3.u64 = GV32(ctx.r31.u32 + 104);
@@ -284,7 +285,7 @@ static __attribute__((noinline)) void compute_frame_timing(PPCContext& ctx, uint
 	// addi r3,r1,104
 	ctx.r3.s64 = ctx.r1.s64 + 104;
 	// lfd f13,-27368(r10)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f13.u64 = GV64(ctx.r10.u32 + -27368);
 	// lfd f0,27416(r30)
 	ctx.f0.u64 = GV64(ctx.r30.u32 + 27416);
@@ -317,7 +318,7 @@ static __attribute__((noinline)) void compute_frame_timing(PPCContext& ctx, uint
 	ctx.lr = 0x82276CD8;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f10,104(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f10.u64 = GV64(ctx.r1.u32 + 104);
 	// lis r27,-31927
 	ctx.r27.s64 = (int64_t)(int32_t)0x83490000;
@@ -339,7 +340,7 @@ static __attribute__((noinline)) void compute_frame_timing(PPCContext& ctx, uint
 	ctx.lr = 0x82276D00;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f7,112(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f7.u64 = GV64(ctx.r1.u32 + 112);
 	// lis r22,-31926
 	ctx.r22.s64 = (int64_t)(int32_t)0x834A0000;
@@ -389,7 +390,7 @@ static __attribute__((noinline)) void setup_frame(PPCContext& ctx, uint8_t* base
 	// lis r7,-32240
 	ctx.r7.s64 = (int64_t)(int32_t)0x82100000;
 	// lfs f21,0(r30)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	temp.u32 = GV32(ctx.r30.u32 + 0);
 	ctx.f21.f64 = double(temp.f32);
 	// lis r8,-32256
@@ -473,7 +474,7 @@ static __attribute__((noinline)) void compute_loop_timing(PPCContext& ctx, uint8
 	ctx.lr = 0x82276DE0;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f10,120(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f10.u64 = GV64(ctx.r1.u32 + 120);
 	// fcfid f9,f10
 	ctx.f9.f64 = double(ctx.f10.s64);
@@ -552,7 +553,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	ctx.lr = 0x82276E6C;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f12,160(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f12.u64 = GV64(ctx.r1.u32 + 160);
 	// fcfid f11,f12
 	ctx.f11.f64 = double(ctx.f12.s64);
@@ -594,7 +595,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	ctx.lr = 0x82276EB4;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f12,128(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f12.u64 = GV64(ctx.r1.u32 + 128);
 	// fcfid f11,f12
 	ctx.f11.f64 = double(ctx.f12.s64);
@@ -648,7 +649,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	// clrlwi r30,r28,24
 	ctx.r30.u64 = ctx.r28.u32 & 0xFF;
 	// lfd f1,272(r31)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f1.u64 = GV64(ctx.r31.u32 + 272);
 	// li r5,6
 	ctx.r5.s64 = 6;
@@ -790,7 +791,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	// extsw r8,r25
 	ctx.r8.s64 = ctx.r25.s32;
 	// stfs f21,26908(r21)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	temp.f32 = float(ctx.f21.f64);
 	SV32(ctx.r21.u32 + 26908, temp.u32);
 	// mullw r7,r9,r25
@@ -893,7 +894,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	ea = (ctx.r9.u32 + ctx.r19.u32) & ~0xF;
 	simde_mm_store_si128((simde__m128i*)REX_RAW_ADDR(ea), simde_mm_shuffle_epi8(simde_mm_load_si128((simde__m128i*)ctx.v12.u8), simde_mm_load_si128((simde__m128i*)VectorMaskL)));
 	// lfs f0,48(r3)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	temp.u32 = GV32(ctx.r3.u32 + 48);
 	ctx.f0.f64 = double(temp.f32);
 	// stfs f0,64(r31)
@@ -916,7 +917,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	ctx.lr = 0x8227713C;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f12,168(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f12.u64 = GV64(ctx.r1.u32 + 168);
 	// fcfid f11,f12
 	ctx.f11.f64 = double(ctx.f12.s64);
@@ -940,7 +941,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	// mr r5,r28
 	ctx.r5.u64 = ctx.r28.u64;
 	// fmr f1,f28
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f1.f64 = ctx.f28.f64;
 	// mr r3,r31
 	ctx.r3.u64 = ctx.r31.u64;
@@ -952,7 +953,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	// mr r3,r31
 	ctx.r3.u64 = ctx.r31.u64;
 	// lfd f1,272(r31)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f1.u64 = GV64(ctx.r31.u32 + 272);
 	// fmr f2,f28
 	ctx.f2.f64 = ctx.f28.f64;
@@ -1013,7 +1014,7 @@ static __attribute__((noinline)) void process_frame_work(PPCContext& ctx, uint8_
 	ctx.lr = 0x822771E0;
 	query_guest_timebase(ctx, base);  // inlined GetTimebase_8221EB58: r11=timebase (retry if 0); [r3]=r11; r3=1
 	// lfd f12,184(r1)
-	ctx.fpscr.disableFlushMode();
+	HOTFUNC_DISABLE_FLUSH_MODE(ctx);
 	ctx.f12.u64 = GV64(ctx.r1.u32 + 184);
 	// fcfid f11,f12
 	ctx.f11.f64 = double(ctx.f12.s64);

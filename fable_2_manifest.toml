@@ -28,6 +28,12 @@ game_root = "."
 file_path = "default.xex"
 out_directory_path = "generated/default"
 includes = ["fable2_switch_tables.toml"]
+# Keep FZ (flush to zero, VMX's non-Java mode) on for scalar FP too, instead
+# of switching the FPCR at every change between VMX and scalar code: ~2.5 M
+# serializing writes per second at the trail cost the 3D Engine thread ~8% and
+# GameThread ~4% of their CPU (plans/macos-port-handoff.md, item 53). Scalar
+# denormals flush to zero, unlike on the Xenon FPU (RPCS3 does the same).
+fixed_flush_mode = true
 
 # setjmp/longjmp: the recompiler redirects these to native implementations.
 # longjmp (0x82CA9260) restores the full guest state from the jmp_buf and

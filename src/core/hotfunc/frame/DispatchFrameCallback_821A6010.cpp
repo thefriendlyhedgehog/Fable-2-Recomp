@@ -44,6 +44,7 @@
 //    across the guest calls; r5/f1 are restored from them before the final vcall.)
 
 #include "fable_2_pch.h"
+#include "hotfunc/hotfunc_fpscr.h"
 
 extern "C" void __restgprlr_29(PPCContext& ctx, uint8_t* base);
 extern "C" void __savegprlr_29(PPCContext& ctx, uint8_t* base);
@@ -100,7 +101,7 @@ extern "C" void DispatchFrameCallback_821A6010(PPCContext& __restrict ctx, uint8
   ctx.r12.u64 = ctx.lr;                 // mflr r12
   ctx.lr = 0x821A6018;                  // bl 0x82ca2bec
   __savegprlr_29(ctx, base);
-  ctx.fpscr.disableFlushMode();         // stfd f31,-40(r1): protect callee-saved f31
+  HOTFUNC_DISABLE_FLUSH_MODE(ctx);         // stfd f31,-40(r1): protect callee-saved f31
   gstore64(entry_sp - 40, base, ctx.f31.u64);
   gstore32(frame_sp, base, entry_sp);   // stwu r1,-128(r1)
   ctx.r1.u32 = frame_sp;
@@ -109,7 +110,7 @@ extern "C" void DispatchFrameCallback_821A6010(PPCContext& __restrict ctx, uint8
   const u32 table = ctx.r3.u32;
   // lwz r11,128(r3); lwz r31,4(r11)
   const u32 slot = gload32(gload32(table + 128, base) + 4, base);
-  ctx.fpscr.disableFlushMode();         // fmr f31,f1: protect the delta argument
+  HOTFUNC_DISABLE_FLUSH_MODE(ctx);         // fmr f31,f1: protect the delta argument
   ctx.f31.f64 = ctx.f1.f64;
   ctx.r29.u64 = ctx.r5.u64;             // mr r29,r5: protect the frame argument
   ctx.r31.u64 = slot;                   // r31 is callee-saved; guest callees see it
@@ -156,7 +157,7 @@ extern "C" void DispatchFrameCallback_821A6010(PPCContext& __restrict ctx, uint8
     }
     const u32 target = gload32(entry + 8, base); // lwz r3,8(r10)
     ctx.r5.u64 = ctx.r29.u64;                    // mr r5,r29: restore frame argument
-    ctx.fpscr.disableFlushMode();                // fmr f1,f31: restore delta argument
+    HOTFUNC_DISABLE_FLUSH_MODE(ctx);                // fmr f1,f31: restore delta argument
     ctx.f1.f64 = ctx.f31.f64;
     vcall(ctx, base, target, 28, 0x821A60B8);    // target->vtable[7](target); ret 0x821A60B8
   }
@@ -164,7 +165,7 @@ extern "C" void DispatchFrameCallback_821A6010(PPCContext& __restrict ctx, uint8
   // --- Guest epilogue: addi r1,r1,128; lfd f31,-40(r1); b 0x82ca2c3c
   //     (restore r29-r31 + lr from the entry SP, then blr) ---
   ctx.r1.u32 = entry_sp;                 // addi r1,r1,128
-  ctx.fpscr.disableFlushMode();          // lfd f31,-40(r1)
+  HOTFUNC_DISABLE_FLUSH_MODE(ctx);          // lfd f31,-40(r1)
   ctx.f31.u64 = gload64(entry_sp - 40, base);
   __restgprlr_29(ctx, base);             // b 0x82ca2c3c
 }

@@ -1,3 +1,15 @@
+diff --git a/include/rex/codegen/config.h b/include/rex/codegen/config.h
+index 8200139..06f25c3 100644
+--- a/include/rex/codegen/config.h
++++ b/include/rex/codegen/config.h
+@@ -97,6 +97,7 @@ struct RecompilerConfig {
+   bool nonArgumentRegistersAsLocalVariables = false;
+   bool nonVolatileRegistersAsLocalVariables = false;
+   bool generateExceptionHandlers = false;  ///< Generate SEH exception handler wrappers
++  bool fixedFlushMode = false;  ///< Keep FZ on for VMX and scalar FP instead of switching it
+ 
+   // === Analysis tuning (optional) ===
+   uint32_t maxJumpExtension = 65536;  ///< Max bytes to extend function for jump table targets
 diff --git a/include/rex/exception_handler.h b/include/rex/exception_handler.h
 index bcd00bf..13c5f8a 100644
 --- a/include/rex/exception_handler.h
@@ -2058,6 +2070,44 @@ index 947817f..fb392c9 100644
    };
  
    const Extensions& extensions() const { return extensions_; }
+diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
+index 68274d2..488257f 100644
+--- a/resources/templates/codegen/pch_h.inja
++++ b/resources/templates/codegen/pch_h.inja
+@@ -16,7 +16,9 @@
+ {% endif %}{% if config_flags.cr_as_local %}#define REX_CONFIG_CR_AS_LOCAL
+ {% endif %}{% if config_flags.non_argument_as_local %}#define REX_CONFIG_NON_ARGUMENT_AS_LOCAL
+ {% endif %}{% if config_flags.non_volatile_as_local %}#define REX_CONFIG_NON_VOLATILE_AS_LOCAL
+-{% endif %}
++{% endif %}// fixed_flush_mode: the code never leaves FZ (flush to zero) once set.
++#define REX_FIXED_FLUSH_MODE {% if config_flags.fixed_flush_mode %}1{% else %}0{% endif %}
++
+ #define REX_IMAGE_BASE {{ image_base }}ull
+ #define REX_IMAGE_SIZE {{ image_size }}ull
+ #define REX_CODE_BASE {{ code_base }}ull
+diff --git a/src/codegen/builders/context.cpp b/src/codegen/builders/context.cpp
+index f78e0d8..a184647 100644
+--- a/src/codegen/builders/context.cpp
++++ b/src/codegen/builders/context.cpp
+@@ -330,6 +330,18 @@ void BuilderContext::emit_conditional_branch(bool not_, std::string_view cond) {
+ }
+ 
+ void BuilderContext::emit_set_flush_mode(bool enable) {
++  // fixed_flush_mode: FZ (VMX's non-Java mode) stays on for scalar FP too, as
++  // RPCS3 does, instead of being switched at every change between VMX and
++  // scalar code: each switch is a serializing FPCR write (~2.5 M per second
++  // at the trail in Fable II). The first FP operation after an unknown state
++  // (function entry, a call) sets it if needed, which costs a compare.
++  if (config().fixedFlushMode) {
++    if (csrState == CSRState::Unknown) {
++      println("\tctx.fpscr.enableFlushMode();");
++      csrState = CSRState::VMX;
++    }
++    return;
++  }
+   auto newState = enable ? CSRState::VMX : CSRState::FPU;
+   if (csrState != newState) {
+     auto prefix = enable ? "enable" : "disable";
 diff --git a/src/codegen/builders/vector.cpp b/src/codegen/builders/vector.cpp
 index cbdd7f7..2e0070a 100644
 --- a/src/codegen/builders/vector.cpp
@@ -2104,6 +2154,31 @@ index cbdd7f7..2e0070a 100644
    return true;
  }
  
+diff --git a/src/codegen/codegen_writer.cpp b/src/codegen/codegen_writer.cpp
+index a0484fb..15d11b8 100644
+--- a/src/codegen/codegen_writer.cpp
++++ b/src/codegen/codegen_writer.cpp
+@@ -89,6 +89,7 @@ nlohmann::json buildTemplateData(const rex::codegen::CodegenContext& ctx,
+       {"cr_as_local", cfg.crRegistersAsLocalVariables},
+       {"non_argument_as_local", cfg.nonArgumentRegistersAsLocalVariables},
+       {"non_volatile_as_local", cfg.nonVolatileRegistersAsLocalVariables},
++      {"fixed_flush_mode", cfg.fixedFlushMode},
+   };
+ 
+   return {
+diff --git a/src/codegen/config.cpp b/src/codegen/config.cpp
+index 5da54a0..75f4e19 100644
+--- a/src/codegen/config.cpp
++++ b/src/codegen/config.cpp
+@@ -114,6 +114,8 @@ void ApplyToml(const toml::table& toml, RecompilerConfig& cfg, const std::string
+             hasBool("non_argument_as_local"), "non_argument_as_local");
+   MergeBool(cfg.nonVolatileRegistersAsLocalVariables, toml["non_volatile_as_local"].value_or(false),
+             hasBool("non_volatile_as_local"), "non_volatile_as_local");
++  MergeBool(cfg.fixedFlushMode, toml["fixed_flush_mode"].value_or(false),
++            hasBool("fixed_flush_mode"), "fixed_flush_mode");
+   MergeBool(cfg.generateExceptionHandlers, toml["generate_exception_handlers"].value_or(false),
+             hasBool("generate_exception_handlers"), "generate_exception_handlers");
+   if (hasBool("is_dll")) {
 diff --git a/src/core/clock.cpp b/src/core/clock.cpp
 index ae72b7a..dd3f4a5 100644
 --- a/src/core/clock.cpp
