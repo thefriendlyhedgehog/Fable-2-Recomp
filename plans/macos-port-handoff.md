@@ -1726,6 +1726,39 @@ the same way as Xenia's ROV path.
        (`fable_2.sitearg`) on a quiet machine, and the trail CPU/power A/B.
        One walk of the previous build stayed at the title screen for four
        minutes (`fable_2_580`).
+     - **Research (2026-10-19), for the open points:**
+       - Xenia Canary does the same now. `mfmsr`/`mtmsrd` only track the
+         MSR, with no lock. Its ARM64 backend emits `dmb ish` for `sync`
+         and `eieio` (`lwsync` shares the `sync` handler), plus another
+         before `lwarx` and after `stwcx.`, and does `stwcx.` as `casal`
+         against a per-thread address and value. Our fences compile to
+         `dmb ish` and our `stwcx.` to `casal`, the same. Its x64 backend
+         instead keeps a per-block reservation bitmap.
+       - A value-based compare-and-swap is exact for our sections. The new
+         value depends only on the loaded value and registers, so ABA
+         changes nothing. Pointer pops (`lwarx; lwz next; stwcx.`) would
+         need more, but they load inside the section, so they never qualify.
+       - UnleashedRecomp ships with `skip_msr = true` and no-op barriers, and
+         builds for arm64 macOS.
+       - **`db16cyc` (14 sites, the guest spinlock wait loops, e.g. in
+         `SpinLock_Acquire_822D7408`) emits nothing.** Xenia emits `pause`
+         (or `MaybeYield` with `delay_via_maybeyield`), commenting that
+         emitting nothing in spinlocks wastes "a ton of power". Without the
+         mutex, which used to block contended threads in the kernel, a guest
+         spinlock now spins hot. On macOS a spinning high-QoS thread can
+         starve a preempted holder: that's the `OSSpinLock` deprecation
+         reason. It's the leading suspect for run 577's 0.8-1.4 s frames
+         (Dusklight was competing for cores). **Next:** emit a spin hint for
+         `db16cyc` (`isb`, as Rust/Zig/BIND use on aarch64; `yield` is
+         effectively a no-op), and try `rex::thread::MaybeYield()`
+         (`sched_yield`) as the alternative; compare long frames and power.
+       - The presets compile with `-march=armv8-a`. The backend still
+         targets `apple-m1` (LSE `casal` is used), but the source-level
+         `__ARM_FEATURE_*` macros drop to v8.0 (FRINT, JCVT, DOTPROD, RCPC,
+         FP16 ...). The busy SIMDe paths only use base NEON, so this is low
+         priority.
+       - Apple's hardware TSO mode isn't available to native macOS
+         processes (Rosetta only), so it's no way around the fences.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
