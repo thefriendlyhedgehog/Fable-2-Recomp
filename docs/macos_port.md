@@ -1748,13 +1748,44 @@ There are 128 `lwsync`, 19 `sync` and 16 `eieio` sites.
 
 **Checked so far:** three boots, each loading the save and walking for two
 minutes, with no errors (`fable_2_575` to `_577`), plus a fourth
-(`fable_2_579`). Runs 575 and 576 stayed at 57-60 fps in gameplay. Run 577
-had single frames of 0.8-1.4 s (counted as draws) during loading and
-gameplay, and run 579 dipped to 20-48 fps while loading. Both ran with
-Dusklight on the GPU. A comparison walk of the previous build sat at the
-title screen for four minutes without loading the save (`fable_2_580`), so
-the comparison isn't finished. **Not measured yet:** CPU and power against
-the previous build at the trail.
+(`fable_2_579`). Run 577, with Dusklight on the GPU, had single frames of
+0.8-1.4 s (counted as draws) in loading and gameplay.
+
+**Spin waits (`db16cyc`).** The guest's spinlock wait loops (14 sites, for
+example in `SpinLock_Acquire_822D7408`) put a `db16cyc` (Xenon's
+"wait 16 cycles") in the loop, and it was emitted as nothing. With the mutex
+gone, a contended guest spinlock spins hot instead of blocking in the
+kernel. On macOS a spinning thread can then starve a preempted lock holder
+or the GPU command thread (why `OSSpinLock` was deprecated). Xenia emits
+`pause`, or `MaybeYield` as an option. It is now `REX_SPIN_WAIT()` (pch):
+`sched_yield()` when `REX_DB16CYC_YIELD` is set (the app's CMake option
+`FABLE2_DB16CYC_YIELD`, ON by default), otherwise `isb` on ARM64 and `pause`
+on x86. Walks (load the save, walk two minutes), alternating:
+
+| hint | runs | gameplay longest frame |
+|---|---|---|
+| `isb` | 582, 584, 586, 588 | 1250, 82, 34, 51 ms |
+| `sched_yield` | 583, 585, 587, 589 | 18, 22, 18, 48 ms |
+
+The long frames were GPU command thread wall time in draws and resolves,
+consistent with spinning threads taking its core. `PRESENT:
+swap_texture_view=NULL` at startup (runs 587-589, both hints) is harmless:
+the present is skipped until the first frame exists.
+
+**CPU and power at the trail** (60 fps, 20 s per-thread sample after 30 s in
+gameplay, alternating). The first pair ran on a quiet machine with RustDesk
+streaming; the second ran during an Xcode build (clang on several cores):
+
+| build | runs | process CPU | CPU power | instr/s | cycles/s | gameplay longest |
+|---|---|---|---|---|---|---|
+| global lock (previous) | 590, 593 | 96.5%, 122% | 3.94, 3.50 W | 10.51, 10.51 G | 3.69, 4.44 G | 127, 107 ms |
+| lock-free + `isb` | 591, 594 | 84.4%, 121% | 3.76, 3.22 W | 10.09, 9.73 G | 3.24, 4.37 G | 43, 73 ms |
+| lock-free + `sched_yield` | 592, 595 | 93.3%, 121% | 3.74, 3.35 W | 10.14, 10.04 G | 3.54, 4.45 G | 45, 41 ms |
+
+Lock-free uses 0.15-0.3 W less CPU power (5-8%) and 4% fewer instructions,
+with the same 59-60 fps. The two hints cost about the same, and only
+`sched_yield` was free of second-long hitches in the walks, so it is the
+default.
 
 ### Frame pacing: guest clock and the drawable wait
 

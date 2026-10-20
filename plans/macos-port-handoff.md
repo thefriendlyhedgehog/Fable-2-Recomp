@@ -1711,7 +1711,7 @@ the same way as Xenia's ROV path.
      8,406 sections is a lone `lwarx`/`stwcx.` (interlocked add or CAS) with
      interrupts off, already atomic as recompiled; about 38 ns each when
      uncontended, about 27 ms of CPU a second.
-     - **Done (2026-10-19, timing pending): `lock_free_atomic_sections`.**
+     - **Done (2026-10-19): `lock_free_atomic_sections`.**
        8,401 of the 8,406 sections take no lock, `mfmsr` check or fences;
        the overrides take no lock, and `ConstructRefCounted_8222CF18`'s
        counter update is a compare-and-swap loop. On the way: `sync`,
@@ -1719,13 +1719,20 @@ the same way as Xenia's ROV path.
        on ARM64 (`REX_SYNC`/`REX_LWSYNC`/`REX_EIEIO`). Without them the first
        boot crashed in `Pool_AcquireNode_83230688` (`fable_2_571`): guest
        spinlocks release with `lwsync` and a plain store.
-     - **Checked:** four boots, each loading the save and walking for two
-       minutes, with no errors (`fable_2_575`-`_577`, `_579`).
-     - **Open:** run 577 had 0.8-1.4 s frames in loading and gameplay, with
-       Dusklight running; compare walks against the previous build
-       (`fable_2.sitearg`) on a quiet machine, and the trail CPU/power A/B.
-       One walk of the previous build stayed at the title screen for four
-       minutes (`fable_2_580`).
+     - **Done (2026-10-20): `db16cyc` is `REX_SPIN_WAIT()`**, which is
+       `sched_yield()` by default (`FABLE2_DB16CYC_YIELD`, ON) and `isb`
+       otherwise. In walks, `isb` had a 1.25 s gameplay frame (`fable_2_582`),
+       while `sched_yield` stayed at or under 48 ms (583-589).
+     - **Measured at the trail (`fable_2_590`-`_595`, alternating):**
+       lock-free uses 0.15-0.3 W less CPU power (3.94 -> 3.74 W on the quiet
+       pair) and 4% fewer instructions, with the same 59-60 fps; `isb` and
+       `sched_yield` cost the same. Tables in `docs/macos_port.md`, "Spin
+       waits".
+     - **Checked:** boots loading the save and walking with no errors
+       (`fable_2_575`-`_579`, `_582`-`_595`).
+     - **Open:** the five sections still locked aren't busy. The loading
+       hitches (300-800 ms on a quiet machine) are in every build,
+       the previous one included.
      - **Research (2026-10-19), for the open points:**
        - Xenia Canary does the same now. `mfmsr`/`mtmsrd` only track the
          MSR, with no lock. Its ARM64 backend emits `dmb ish` for `sync`
@@ -1748,10 +1755,7 @@ the same way as Xenia's ROV path.
          spinlock now spins hot. On macOS a spinning high-QoS thread can
          starve a preempted holder: that's the `OSSpinLock` deprecation
          reason. It's the leading suspect for run 577's 0.8-1.4 s frames
-         (Dusklight was competing for cores). **Next:** emit a spin hint for
-         `db16cyc` (`isb`, as Rust/Zig/BIND use on aarch64; `yield` is
-         effectively a no-op), and try `rex::thread::MaybeYield()`
-         (`sched_yield`) as the alternative; compare long frames and power.
+         (Dusklight was competing for cores). Done: see above.
        - The presets compile with `-march=armv8-a`. The backend still
          targets `apple-m1` (LSE `casal` is used), but the source-level
          `__ARM_FEATURE_*` macros drop to v8.0 (FRINT, JCVT, DOTPROD, RCPC,

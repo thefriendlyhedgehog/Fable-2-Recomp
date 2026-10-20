@@ -141,6 +141,19 @@ if(FABLE2_GLOBAL_LOCK_STATS)
     endforeach()
 endif()
 
+# db16cyc (the guest's spin-wait hint) yields the thread (sched_yield) instead
+# of the isb spin hint. With the lock-free atomic sections a guest spinlock
+# spins hot; isb let spinning threads starve the holder (1.2 s frames in
+# walks), yield did not, at the same CPU power (docs/macos_port.md).
+option(FABLE2_DB16CYC_YIELD "db16cyc yields the thread (sched_yield)" ON)
+if(FABLE2_DB16CYC_YIELD)
+    foreach(t fable_2 fable_2_recomp)
+        if(TARGET ${t})
+            target_compile_definitions(${t} PRIVATE REX_DB16CYC_YIELD=1)
+        endif()
+    endforeach()
+endif()
+
 # The app's probe/diagnostic headers (src/diagnostics/*.h) use the standard CRT
 # functions (fopen, getenv, strcat, strncat, ...), which the MSVC/UCRT headers
 # mark deprecated when compiled with clang (-Wdeprecated-declarations noise).

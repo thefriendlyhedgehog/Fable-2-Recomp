@@ -2120,7 +2120,7 @@ index 947817f..fb392c9 100644
  
    const Extensions& extensions() const { return extensions_; }
 diff --git a/resources/templates/codegen/pch_h.inja b/resources/templates/codegen/pch_h.inja
-index 68274d2..7f62c78 100644
+index 68274d2..f55b57e 100644
 --- a/resources/templates/codegen/pch_h.inja
 +++ b/resources/templates/codegen/pch_h.inja
 @@ -16,7 +16,9 @@
@@ -2134,7 +2134,7 @@ index 68274d2..7f62c78 100644
  #define REX_IMAGE_BASE {{ image_base }}ull
  #define REX_IMAGE_SIZE {{ image_size }}ull
  #define REX_CODE_BASE {{ code_base }}ull
-@@ -310,26 +312,46 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+@@ -310,26 +312,62 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
  // Interrupt Locks
  //=============================================================================
  
@@ -2148,6 +2148,22 @@ index 68274d2..7f62c78 100644
 +#define REX_SYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
 +#define REX_LWSYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
 +#define REX_EIEIO() std::atomic_signal_fence(std::memory_order_seq_cst)
++#endif
++
++// db16cyc (guest spin-wait delay). isb is the usual aarch64 spin hint (yield
++// is close to a no-op on Apple cores); REX_DB16CYC_YIELD=1 yields the thread.
++#if defined(REX_DB16CYC_YIELD) && REX_DB16CYC_YIELD
++#include <sched.h>
++#define REX_SPIN_WAIT() sched_yield()
++#elif defined(__aarch64__) || defined(_M_ARM64)
++#define REX_SPIN_WAIT() __builtin_arm_isb(15)
++#elif defined(__x86_64__)
++#define REX_SPIN_WAIT() __builtin_ia32_pause()
++#elif defined(_M_X64)
++#include <intrin.h>
++#define REX_SPIN_WAIT() _mm_pause()
++#else
++#define REX_SPIN_WAIT() ((void)0)
 +#endif
 +
  inline std::atomic<i32>& ppc_global_lock_count_() {
@@ -2185,10 +2201,10 @@ index 68274d2..7f62c78 100644
    } while (0)
 +#endif
 diff --git a/resources/templates/test/ppc_config_h.inja b/resources/templates/test/ppc_config_h.inja
-index 0c334f8..275f777 100644
+index 0c334f8..1d0fdb1 100644
 --- a/resources/templates/test/ppc_config_h.inja
 +++ b/resources/templates/test/ppc_config_h.inja
-@@ -167,27 +167,47 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
+@@ -167,27 +167,63 @@ inline void ppc_trap(PPCContext& ctx, u8* base, u16 trap_type) {
  // Interrupt Locks
  //=============================================================================
  
@@ -2202,6 +2218,22 @@ index 0c334f8..275f777 100644
 +#define REX_SYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
 +#define REX_LWSYNC() std::atomic_signal_fence(std::memory_order_seq_cst)
 +#define REX_EIEIO() std::atomic_signal_fence(std::memory_order_seq_cst)
++#endif
++
++// db16cyc (guest spin-wait delay). isb is the usual aarch64 spin hint (yield
++// is close to a no-op on Apple cores); REX_DB16CYC_YIELD=1 yields the thread.
++#if defined(REX_DB16CYC_YIELD) && REX_DB16CYC_YIELD
++#include <sched.h>
++#define REX_SPIN_WAIT() sched_yield()
++#elif defined(__aarch64__) || defined(_M_ARM64)
++#define REX_SPIN_WAIT() __builtin_arm_isb(15)
++#elif defined(__x86_64__)
++#define REX_SPIN_WAIT() __builtin_ia32_pause()
++#elif defined(_M_X64)
++#include <intrin.h>
++#define REX_SPIN_WAIT() _mm_pause()
++#else
++#define REX_SPIN_WAIT() ((void)0)
 +#endif
 +
  inline std::atomic<i32>& ppc_global_lock_count_() {
@@ -2756,7 +2788,7 @@ index 26957fc..2732c6d 100644
  }
  
 diff --git a/src/codegen/builders/system.cpp b/src/codegen/builders/system.cpp
-index b2d70f5..dd03e8b 100644
+index b2d70f5..05b1711 100644
 --- a/src/codegen/builders/system.cpp
 +++ b/src/codegen/builders/system.cpp
 @@ -12,6 +12,13 @@
@@ -2773,7 +2805,7 @@ index b2d70f5..dd03e8b 100644
  namespace rex::codegen {
  
  //=============================================================================
-@@ -30,21 +37,23 @@ bool build_attn(BuilderContext& ctx) {
+@@ -30,27 +37,32 @@ bool build_attn(BuilderContext& ctx) {
    return true;
  }
  
@@ -2803,7 +2835,18 @@ index b2d70f5..dd03e8b 100644
    return true;
  }
  
-@@ -242,18 +251,205 @@ bool build_mfocrf(BuilderContext& ctx) {
+ bool build_db16cyc(BuilderContext& ctx) {
+-  // Xenon-specific 16-cycle delay hint, no effect in recompiled code
+-  (void)ctx;
++  // Xenon 16-cycle delay hint, used in the guest's spinlock wait loops:
++  // REX_SPIN_WAIT() (pch) is a spin-wait hint, or a yield in builds that
++  // define REX_DB16CYC_YIELD=1. Emitting nothing leaves those loops spinning
++  // hot, which can keep a preempted lock holder off the CPU.
++  ctx.println("\tREX_SPIN_WAIT();");
+   return true;
+ }
+ 
+@@ -242,18 +254,205 @@ bool build_mfocrf(BuilderContext& ctx) {
  }
  
  bool build_mflr(BuilderContext& ctx) {
@@ -2813,9 +2856,9 @@ index b2d70f5..dd03e8b 100644
      ctx.println("\t{}.u64 = ctx.lr;", ctx.r(ctx.insn.operands[0]));
 +  else
 +    ctx.println("\t{}.u64 = 0;", ctx.r(ctx.insn.operands[0]));
-   return true;
- }
- 
++  return true;
++}
++
 +//=============================================================================
 +// Interrupts-off atomic sections (lock_free_atomic_sections)
 +//=============================================================================
@@ -2972,9 +3015,9 @@ index b2d70f5..dd03e8b 100644
 +      if (t != m && region.contains(t)) return false;
 +    }
 +  }
-+  return true;
-+}
-+
+   return true;
+ }
+ 
 +// True if the mfmsr/mtmsrd at ctx.base is part of a qualifying section.
 +bool InLockFreeAtomicSection(const BuilderContext& ctx) {
 +  if (!ctx.config().lockFreeAtomicSections) return false;
@@ -3010,7 +3053,7 @@ index b2d70f5..dd03e8b 100644
    }
    return true;
  }
-@@ -316,6 +512,9 @@ bool build_mtlr(BuilderContext& ctx) {
+@@ -316,6 +515,9 @@ bool build_mtlr(BuilderContext& ctx) {
  }
  
  bool build_mtmsrd(BuilderContext& ctx) {
@@ -3020,7 +3063,7 @@ index b2d70f5..dd03e8b 100644
    if (!ctx.config().skipMsr) {
      // Memory barrier for MSR write
      ctx.println("\tstd::atomic_thread_fence(std::memory_order_seq_cst);");
-@@ -327,9 +526,9 @@ bool build_mtmsrd(BuilderContext& ctx) {
+@@ -327,9 +529,9 @@ bool build_mtmsrd(BuilderContext& ctx) {
      // Other = leave lock (enable interrupts)
      uint32_t src_reg = ctx.insn.operands[0];
      if (src_reg == 13) {
