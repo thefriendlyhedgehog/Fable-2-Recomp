@@ -1,7 +1,7 @@
 # --- Game content (ripped disc; see README "How to extract") ---------------
 default.xex
 /data/
-/nxeart/
+/nxeart
 /$SystemUpdate/
 /Gamefiles/
 

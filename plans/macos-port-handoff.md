@@ -62,6 +62,11 @@ the game allocates or derives from between the prebuilt headers and the
 patched source, and stops the build on a mismatch (the F3 heap overflow,
 `docs/macos_port.md`, "The overlay classes keep their size").
 
+**Old captures (2026-10-21):** the Metal traces in `out/profile` (`*.trace`,
+10 GB) and the run logs the docs don't cite (except the newest 20) went to
+the drive's Trash ("Fable2 cleanup 2026-10-21"). The traces' text summaries
+(`out/profile/*.txt`) and every log the docs name stayed.
+
 **Measuring rules:** frame reports off (`--vulkan_frame_report_interval=0`),
 `AUTOTEST_FRAME_MS=0`, alternate the variants within one run, and check what
 else uses the GPU and CPU first (WindWaker, Dusklight, remote screen

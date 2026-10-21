@@ -4245,7 +4245,7 @@ index 0000000..599e706
 +
 +}  // namespace rex::perf::live
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
-index 9ac8d15..2084a4c 100644
+index 9ac8d15..6f2b8c1 100644
 --- a/src/core/threading_posix.cpp
 +++ b/src/core/threading_posix.cpp
 @@ -414,9 +414,12 @@ class PosixConditionBase {
@@ -4264,7 +4264,18 @@ index 9ac8d15..2084a4c 100644
        }
      }
    }
-@@ -1106,7 +1109,10 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
+@@ -882,7 +885,9 @@ class PosixCondition<Thread> : public PosixConditionBase {
+     int result = pthread_sigqueue(thread_, GetSystemSignal(SignalType::kThreadUserCallback), value);
+ #endif
+ #endif
+-    if (result != 0) {
++    // ESRCH: the thread has already exited (at shutdown, when every guest
++    // thread gets a callback); there is nothing left to wake.
++    if (result != 0 && result != ESRCH) {
+       REXSYS_WARN("QueueUserCallback: signal delivery failed ({})", result);
+     }
+   }
+@@ -1106,7 +1111,10 @@ std::chrono::milliseconds ComputeAlertableWaitTimeout(
    if (deadline == std::chrono::steady_clock::time_point::max()) {
      return kAlertablePollSlice;
    }
@@ -4276,7 +4287,7 @@ index 9ac8d15..2084a4c 100644
        deadline - std::chrono::steady_clock::now());
    if (remaining <= std::chrono::milliseconds::zero()) {
      return std::chrono::milliseconds::zero();
-@@ -1403,6 +1409,13 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
+@@ -1403,6 +1411,13 @@ void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
    if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr) != 0) {
      assert_always();
    }
@@ -32272,6 +32283,29 @@ index 813bb1c..4b46c83 100644
    if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
+diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp
+index c7c440d..b83bcee 100644
+--- a/src/input/sdl/sdl_input_driver.cpp
++++ b/src/input/sdl/sdl_input_driver.cpp
+@@ -99,8 +99,16 @@ void SDLInputDriver::OnWindowAvailable(rex::ui::Window* window) {
+       if (!REXCVAR_GET(hid_mappings_file).empty()) {
+         std::filesystem::path mappings_path(REXCVAR_GET(hid_mappings_file));
+         if (!std::filesystem::exists(mappings_path)) {
+-          REXLOG_WARN("SDL GameControllerDB: file '{}' does not exist.",
+-                      REXCVAR_GET(hid_mappings_file));
++          // The default file is optional (SDL's built-in mappings cover
++          // common controllers); only a file the user named is worth a
++          // warning.
++          if (rex::cvar::GetFlagSource("hid_mappings_file") == rex::cvar::Source::kDefault) {
++            REXLOG_DEBUG("SDL GameControllerDB: no '{}'; using SDL's built-in mappings.",
++                         REXCVAR_GET(hid_mappings_file));
++          } else {
++            REXLOG_WARN("SDL GameControllerDB: file '{}' does not exist.",
++                        REXCVAR_GET(hid_mappings_file));
++          }
+         } else {
+           auto mappings_result =
+               SDL_AddGamepadMappingsFromFile(REXCVAR_GET(hid_mappings_file).c_str());
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index 5bd3dc5..b371348 100644
 --- a/src/ui/CMakeLists.txt
