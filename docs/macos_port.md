@@ -2072,6 +2072,12 @@ free-list checks (2 to 3 crashes in 15 openings). The overlay state now lives
 in the `.cpp` files. The same fix applied to an older change:
 `AchievementToastDialog`'s `registered_` flag, which overflowed by a byte,
 is now a set of unregistered dialogs in `achievement_toast.cpp`.
+`tools/sdk_layout_check.sh`, which `build_sdk_mac.sh` runs before it builds,
+catches this now. It compiles `tools/sdk_layout_probe.cpp` (the size and
+alignment of the 15 SDK classes the game allocates or derives from) once
+against the prebuilt headers and once against the patched source, and stops
+the build if the two differ. With the old `registered_` member back in
+`DebugOverlayDialog` it reports 80 vs. 88 bytes.
 
 ## Renderer review: Vulkan on MoltenVK vs. a native Metal backend
 

@@ -170,6 +170,10 @@ else
     fi
 fi
 
+# 2b. The game allocates some SDK classes with the prebuilt headers' sizes;
+#     stop before building if the patched headers changed one of them.
+"$REPO/tools/sdk_layout_check.sh"
+
 # 3. Configure + build only what the game loads. The presets use Ninja
 #    Multi-Config; outputs land in out/<platform>/<Config>/.
 #    The full output goes to a log; on failure only the error lines are

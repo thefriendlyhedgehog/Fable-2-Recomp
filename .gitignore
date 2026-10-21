@@ -62,6 +62,7 @@ __pycache__/
 !tools/stage_content.sh
 !tools/mac_gpu_by_process.sh
 !tools/build_sdk_mac.sh
+!tools/sdk_layout_check.sh
 !tools/build_texture_load_image_shaders.sh
 !tools/summarize_sample.py
 !tools/summarize_gputrace.py

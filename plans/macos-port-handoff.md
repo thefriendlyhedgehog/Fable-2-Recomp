@@ -36,12 +36,22 @@ single lever left at the cap; performance work is parked.
    come closest to the budget (items 48, 49).
 2. Resolves inside the producing render pass, which needs a patched
    MoltenVK: at most about 1 ms of GPU per frame (item 50).
-3. Watch for the pool allocator crash (`Pool_AcquireNode_83230688` reading
-   guest address 0, seen once in `fable_2_495`). The first boot without
-   memory fences crashed in the same function (item 56), so the fences may
-   have fixed it.
-4. Small CPU items (item 57): sampler parameters cached per fetch
+3. Small CPU items (item 57): sampler parameters cached per fetch
    constant, fewer descriptor writes.
+
+**Closed (2026-10-21): the pool allocator crash** (`Pool_AcquireNode_83230688`
+reading guest address 0; `fable_2_495` on 10-18, and `fable_2_571`, the
+first boot without memory fences, item 56). Guest spinlocks release with
+`lwsync` and a plain store, and `lwsync` used to be emitted as nothing. Since
+the fences became real (10-19 16:08), 42 runs (`fable_2_572`-`613`, about
+two hours) have had no crash there, and no macOS crash report names it.
+Reopen it if it comes back.
+
+**SDK class layout check:** `tools/sdk_layout_check.sh` (run by
+`build_sdk_mac.sh` before it builds) compares the sizes of the SDK classes
+the game allocates or derives from between the prebuilt headers and the
+patched source, and stops the build on a mismatch (the F3 heap overflow,
+`docs/macos_port.md`, "The overlay classes keep their size").
 
 **Measuring rules:** frame reports off (`--vulkan_frame_report_interval=0`),
 `AUTOTEST_FRAME_MS=0`, alternate the variants within one run, and check what
@@ -97,9 +107,13 @@ working-tree changes; gitignored). The patch is
 3. `tools/build_sdk_mac.sh && ./build.sh -release fable_2`.
 
 The game compiles against the SDK's prebuilt headers, so do not change the
-layout of SDK classes the app uses (append members only, or add
-namespace-scope things); classes only the SDK uses (the Vulkan command
-processor, texture cache, translator) are free to change.
+layout of SDK classes the app uses. A class the game allocates (the overlay
+dialogs, `ImGuiDrawer`, `Runtime`, ...) or derives from must keep its exact
+size: put new state in the `.cpp`. Classes only the SDK uses (the Vulkan
+command processor, texture cache, translator) are free to change.
+`build_sdk_mac.sh` runs `tools/sdk_layout_check.sh`, which stops the build
+when one of the game's classes changed size; add a class to
+`tools/sdk_layout_probe.cpp` when the game starts allocating it.
 
 ### Talking to the user
 

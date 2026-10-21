@@ -43,7 +43,9 @@ ReXGlue (Xenia-derived) static recompilation of Fable II. The app is in
   overlay dialogs, the achievement toast, `FrameStats`, ...) must keep its
   exact size: put new state in the `.cpp`. Appending members is safe only for
   classes the SDK alone allocates; appending to an overlay dialog overflowed
-  the heap (2026-10-21).
+  the heap (2026-10-21). `build_sdk_mac.sh` runs `tools/sdk_layout_check.sh`,
+  which stops the build on a size change; list new app-allocated classes in
+  `tools/sdk_layout_probe.cpp`.
 - `.gitignore` ignores `*.sh`, `*.py` and `*.png` by default; new tools need
   a `!tools/<name>` line.
 - Commit messages: what changed and why; no model names or IDs.
