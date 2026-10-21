@@ -111,8 +111,8 @@ game recreates it with defaults on launch if it is ever missing. Loaded in
   `keyboard_gamepad_map`, `mouse_look`, `mouse_look_scale`) are seeded into
   the cvar at startup — but only when no higher-priority
   source set it: `fable_2.toml` (cvar config), `REX_*` env vars, and the
-  command line (e.g. `--keyboard_gamepad_map`) still win, and the F3 console
-  can still change the value live.
+  command line (e.g. `--keyboard_gamepad_map`) still win, and the settings
+  overlay (F4) or the console (Backtick) can still change the value live.
 - The `[patches]` section holds runtime toggles for the recomp-level
   (mid-asm hook) patches, consulted by the hook bodies on every call
   (`src/core/fable2_hooks.cpp`) — flip one and relaunch to A/B a patch with no
@@ -132,7 +132,7 @@ top of (OR-merged with) whatever a real gamepad reports. The physical pad
 keeps working; the keyboard just adds buttons. It is wired up in
 `Fable2App::OnPreSetup` via `config.input_factory`.
 
-The mapping is the `keyboard_gamepad_map` cvar, format `Key:Button,Key:Button,...`. Its default is no longer hardcoded in the binary: it comes from `[input] keyboard_gamepad_map` in `fable2_config.toml` (see User config above), which you can edit to remap permanently. The command line and the F3 console still override it per-launch / live.
+The mapping is the `keyboard_gamepad_map` cvar, format `Key:Button,Key:Button,...`. Its default is no longer hardcoded in the binary: it comes from `[input] keyboard_gamepad_map` in `fable2_config.toml` (see User config above), which you can edit to remap permanently. The command line and the settings overlay (F4) still override it per-launch / live.
 
 - **Key** — a host key name understood by `rex::ui::ParseVirtualKey`
   (`E`, `Space`, `LeftShift`, `F1`, ...), or a mouse button: `LMB` (left),
@@ -183,7 +183,17 @@ line overrides per launch, and both cvars are hot-reloadable from the in-game
 console, so you can dial in the sensitivity live. Example: `fable_2.exe
 --mouse_look_scale 512` for a more sensitive camera.
 
-All cvars above are hot-reloadable, so they can also be changed from the in-game console.
+All cvars above are hot-reloadable, so they can also be changed in the settings overlay (F4) or the console (Backtick).
+
+### While an overlay is open
+
+The SDK's overlays (F3 debug, F4 settings, Backtick console, F7 achievements;
+the keys are the `bind_*` settings) take the keyboard and mouse while one is
+open: the keyboard map, the mouse buttons, mouse look and the debug hotkeys
+send nothing to the game, and the cursor is free, so typing in a search field
+doesn't move the hero. A gamepad keeps working (the SDK pauses it only while
+the mouse is over an overlay window). The overlay keys never act as gamepad
+buttons, even if `keyboard_gamepad_map` lists them.
 
 ## F5 — run an external Lua script
 

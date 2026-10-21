@@ -29,6 +29,11 @@ single lever left at the cap; performance work is parked.
 - F4: settings, the player's settings only; "Show developer options" lists
   every cvar. D3D12 and codegen settings are never shown on the Mac.
 - Backtick: the console.
+- While any overlay (also F7, achievements) is open, the keyboard, mouse
+  buttons, mouse look and debug hotkeys reach only the overlay and the
+  cursor is free; a gamepad keeps working. Mouse buttons in the key map work
+  on the Mac since 2026-10-21 (`docs/macos_port.md`, "Keyboard and mouse
+  while an overlay is open").
 
 **Next, when this is picked up again:**
 
@@ -155,16 +160,19 @@ GPU power needs `sudo powermetrics`.)
 
 ## Debug switches (SDK/app cvars; hot-reloadable unless marked restart)
 
-Keys work only while the game window is focused; every press is logged as
-`[input] ...` and listed at the top of the analyzer summary.
+Keys work only while the game window is focused and no overlay (F3, F4,
+Backtick, F7) is open; every press is logged as `[input] ...` and listed at
+the top of the analyzer summary. While an overlay is open the keyboard and
+mouse reach only the overlay, and the cursor is free.
 
 | Key | cvar | What it does |
 |---|---|---|
-| F3 | `bind_debug_overlay` | debug overlay: frame, GPU and CPU statistics and the debug switches; frees the cursor while open |
-| F4 | `bind_settings`, `mouse_unlock_key` | settings overlay (player settings; "Show developer options" for all); frees the cursor while open |
+| F3 | `bind_debug_overlay` | debug overlay: frame, GPU and CPU statistics and the debug switches |
+| F4 | `bind_settings` | settings overlay (player settings; "Show developer options" for all) |
 | Backtick | `bind_console` | console overlay |
+| F7 | `bind_achievements` | achievements overlay |
 | 6 / fn+F6 | `vulkan_debug_fsi_whole_quads` | FSI pixel shaders run for every 2x2 quad (no early quad skip) |
-| 7 / fn+F7 | `vulkan_debug_force_mip` | cycles the mip level all textures are sampled at: off, 0..6, off (`vulkan_debug_base_mip_only` = level 0); the mip data proved fine |
+| 7 | `vulkan_debug_force_mip` | cycles the mip level all textures are sampled at: off, 0..6, off (`vulkan_debug_base_mip_only` = level 0); the mip data proved fine |
 | 8 / fn+F8 | `vulkan_debug_skip_ps_group` | cycles the `;`-separated groups of `vulkan_debug_skip_ps` (guest pixel shader hashes), skipping one group's draws at a time |
 | 9 / fn+F9 | `vulkan_frame_report` | logs every draw and resolve of the next frame (`[frame]` lines) |
 | 0 / fn+F10 | (app) | debug sweep: `debug_sweep_steps`, `debug_sweep_dir`, `debug_sweep_settle_ms` |

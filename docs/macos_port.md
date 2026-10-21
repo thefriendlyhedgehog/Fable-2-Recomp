@@ -327,7 +327,7 @@ still (each press logs `[input] F6: <cvar> = true/false`):
 | Key (fn+) | cvar | Effect |
 |---|---|---|
 | F6 | `vulkan_debug_fsi_whole_quads` | Runs FSI pixel shaders for every 2x2 quad, also those where no pixel passed the early depth / stencil test. The skip now uses subgroup quad operations (`vulkan_fsi_quad_skip_quad_ops`); with the old derivative check, this switch removed the edge lines and wrong mips, which is how that bug was found. |
-| F7 | `vulkan_debug_force_mip` | Cycles the mip level every texture is sampled at: off, 0, 1, ... 6, off (`vulkan_debug_base_mip_only` is level 0 only). Forcing each level showed the mip data is fine; the wrong levels came from the quad skip's derivatives (see "FSI early quad skip with quad operations"). |
+| 7 (only the digit: F7 opens the achievements overlay) | `vulkan_debug_force_mip` | Cycles the mip level every texture is sampled at: off, 0, 1, ... 6, off (`vulkan_debug_base_mip_only` is level 0 only). Forcing each level showed the mip data is fine; the wrong levels came from the quad skip's derivatives (see "FSI early quad skip with quad operations"). |
 | F8 | `vulkan_debug_skip_ps_group` | Cycles through the groups of `vulkan_debug_skip_ps` (guest pixel shader hashes, comma-separated, groups separated by `;`), skipping the draws of one group at a time, then none. Each press logs the group. |
 
 **Debug sweep (key 0 or fn+F10).** Judging a setting live is hard, so the
@@ -2039,8 +2039,8 @@ is generated.
   `tools/mac_thread_cpu.c` does), only while it is open.
 - "Debug switches" (collapsed) lists every measurement and debug cvar by
   category, with a search field and a frame report button.
-- The app frees the cursor while it is open, as it does for F4
-  (`src/input/keyboard_gamepad.h`, reading the `bind_debug_overlay` key).
+- While any overlay is open, the keyboard and mouse reach only the overlay
+  (see "Keyboard and mouse while an overlay is open" below).
 
 **F4, the settings overlay** (`src/ui/overlay/settings_overlay.cpp`) shows
 the player's settings:
@@ -2078,6 +2078,39 @@ alignment of the 15 SDK classes the game allocates or derives from) once
 against the prebuilt headers and once against the patched source, and stops
 the build if the two differ. With the old `registered_` member back in
 `DebugOverlayDialog` it reports 80 vs. 88 bytes.
+
+**Keyboard and mouse while an overlay is open** (`src/input/keyboard_gamepad.h`,
+2026-10-21). The keyboard gamepad is the first input listener of the window
+and reads every key, and ImGui never marks a key handled, so until then the
+overlays and the game both got the keys. Typing in F4's search field or the
+console moved the hero (W/A/S/D) and pressed buttons, the console left the
+mouse locked, and the number-key debug hotkeys fired. A map that put the
+d-pad on F1-F4 also pressed d-pad Left with F3. Now:
+
+- The driver follows which overlays are open. Each key down of an overlay
+  key (`bind_debug_overlay`, `bind_console`, `bind_settings`,
+  `bind_achievements`) toggles a bit on the UI thread, before the key is
+  recorded as held. Every key down reaches the SDK's binds after this
+  listener, so the bits match what the SDK shows (checked with screenshots).
+  The command file's `key` command toggles them the same way.
+- While a bit is set, the guest gets no mapped keys, mouse buttons, mouse
+  look or debug hotkeys, and the cursor is free. The SDL gamepad is not
+  touched (the SDK itself pauses it while the mouse is over an overlay).
+- The overlay keys never act as gamepad buttons.
+- `mouse_unlock_key` (a separate "F4" that didn't follow a rebound
+  `bind_settings`) is gone. The mip hotkey is only the digit 7, since F7 is
+  the achievements overlay.
+- Mouse buttons in `keyboard_gamepad_map` (`LMB`, `RMB`, `MMB`, `XMB1`,
+  `XMB2`) work on the Mac: the driver records the window's mouse button
+  events as held keys. Before, only Windows read them (`GetAsyncKeyState`).
+
+Test commands (command file, for `tools/mac_autotest.sh`): `keydown <key>`
+/ `keyup <key>` and `mousedown <LMB|RMB|MMB>` / `mouseup ...` send events
+through the window's listeners as the platform window does; `state` logs what
+the keyboard pad sends the guest at its next poll; `focus` makes the pad act
+as focused without taking the focus from whoever uses the Mac. `fable_2_616`:
+W gives the left stick 32767 and LMB gives X with no overlay open, and both
+give nothing with F3, the console or F4 open.
 
 ## Renderer review: Vulkan on MoltenVK vs. a native Metal backend
 

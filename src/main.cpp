@@ -94,18 +94,6 @@ REXCVAR_DEFINE_BOOL(merge_controllers, false, "Input",
                     "then also drives player 1. Read when the input system starts. "
                     "Default comes from fable2_config.toml [input] merge_controllers.");
 
-// Key that toggles the debug menu (F4). While the menu is open the mouse lock
-// is released (free cursor); closing it re-locks. This key is excluded from
-// the gamepad map so it doesn't double as a button. Set empty to always lock
-// while focused (no menu-based unlock).
-REXCVAR_DEFINE_STRING(
-    mouse_unlock_key,
-    "F4",
-    "Input",
-    "Key that toggles the debug menu; while the menu is open the mouse lock is "
-    "released (free cursor) and re-engaged when it closes. Empty = always lock "
-    "while focused. This key is excluded from the gamepad map.");
-
 // The allocator table monitor in Fable2App::OnPostSetup: a thread that samples
 // the guest allocator table every 2 ms and logs when its head goes null (the
 // table-zeroing / init-ordering bug). Off by default.

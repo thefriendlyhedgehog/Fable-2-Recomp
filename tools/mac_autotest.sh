@@ -8,7 +8,11 @@
 #   <commands>: debug_command_file lines separated by ";", run once gameplay
 #   renders, e.g. "wait 5000;report;sweep" (report, sweep, dump N, set <cvar>
 #   <value>, press <button> [ms], wait <ms>, key <key> (runs that key's
-#   overlay bind: F3 debug, F4 settings, Backtick console); press also takes stick
+#   overlay bind: F3 debug, F4 settings, Backtick console, F7 achievements);
+#   keydown/keyup <key> and mousedown/mouseup <LMB|RMB|MMB> (events through
+#   the window's input listeners, as a real key), state (logs what the
+#   keyboard pad sends the game), focus (the pad acts as focused without
+#   taking the focus from the desktop); press also takes stick
 #   directions LU/LD/LL/LR (left stick, LU = forward) and RU/RD/RL/RR (right
 #   stick, camera), combined with '+', e.g. "press LU+RL 2000"). "sleep <seconds>" pauses the
 #   script itself between batches (press and wait are timed in the game, the

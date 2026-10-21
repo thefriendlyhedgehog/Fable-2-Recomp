@@ -17,8 +17,9 @@
 // name understood by rex::ui::ParseVirtualKey ("E", "Space", "LeftShift", ...)
 // or a mouse-button name ("LMB"/"RMB"/"MMB", plus "XMB1"/"XMB2" for the side
 // buttons; mouse names are also accepted case-insensitively, see
-// input_detail::ParseKey). Mouse-button state is polled with
-// GetAsyncKeyState, the same path as keyboard keys. Button is a guest gamepad
+// input_detail::ParseKey). Mouse buttons are held keys like any other: polled
+// with GetAsyncKeyState on Windows, from the window's mouse button events
+// elsewhere. Button is a guest gamepad
 // button name (A/B/X/Y/LB/RB/LT/RT/Up/Down/Left/Right/Start/Back/L3/R3/
 // StickUp/StickDown/StickLeft/StickRight).
 // The cvar's default is seeded from fable2_config.toml [input] at startup
@@ -36,10 +37,18 @@
 // to the SDK window's key, mouse and focus events and uses SDL relative mouse
 // mode for mouse look, falling back to recentering the cursor when the pointer
 // cannot be locked; the mapping, cvars and guest-side behavior are the same.
+//
+// The SDK's overlays (F3 debug, F4 settings, Backtick console, F7
+// achievements; their keys are the bind_* cvars) take the keyboard and mouse
+// while one is open: the driver then sends the guest no keys, mouse buttons,
+// debug hotkeys or mouse look, and frees the cursor. A real gamepad keeps
+// working (the SDK pauses it only while the mouse is over an overlay). The
+// overlay keys never act as gamepad buttons, even when the map lists them.
 
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdint>
@@ -85,7 +94,6 @@ REXCVAR_DECLARE(std::string, debug_command_file);
 REXCVAR_DECLARE(bool, mouse_look);
 REXCVAR_DECLARE(int32_t, mouse_look_scale);
 REXCVAR_DECLARE(bool, merge_controllers);
-REXCVAR_DECLARE(std::string, mouse_unlock_key);
 
 namespace fable2 {
 
@@ -243,6 +251,61 @@ inline std::vector<Mapping> ParseMap(std::string_view text) {
   return out;
 }
 
+// The SDK's overlay key binds, in the order rex_app.cpp registers them:
+// rex::ui::ProcessKeyEvent runs the first bind whose key matches, so this
+// order says which overlay a shared key toggles.
+inline constexpr const char* kOverlayBinds[] = {
+    "bind_debug_overlay",  // F3
+    "bind_console",        // Backtick
+    "bind_settings",       // F4
+    "bind_achievements",   // F7
+};
+constexpr size_t kOverlayCount = std::size(kOverlayBinds);
+
+// The overlay a key toggles (its index in kOverlayBinds), or -1.
+inline int OverlayForKey(uint16_t vk) {
+  if (vk == 0) return -1;
+  for (size_t i = 0; i < kOverlayCount; ++i) {
+    if (static_cast<uint16_t>(rex::ui::ParseVirtualKey(
+            rex::cvar::Query<std::string>(kOverlayBinds[i]))) == vk) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+#ifndef _WIN32
+// The command file's keydown/keyup/mousedown/mouseup send events the way the
+// platform window does, through every input listener in order (this driver,
+// ImGui, the SDK's binds). Window keeps its dispatchers protected; this is the
+// accessor idiom of fable_2_app.h's WindowPresenterAccessor (never
+// instantiated, only adds access). UI thread only.
+class WindowEventInjector : public rex::ui::Window {
+ public:
+  static void Key(rex::ui::Window* window, rex::ui::VirtualKey vk, bool down) {
+    auto* self = static_cast<WindowEventInjector*>(window);
+    rex::ui::KeyEvent e(window, vk, 1, !down, false, false, false, false);
+    WindowDestructionReceiver receiver(window);
+    if (down) {
+      self->OnKeyDown(e, receiver);
+    } else {
+      self->OnKeyUp(e, receiver);
+    }
+  }
+  static void Mouse(rex::ui::Window* window, rex::ui::MouseEvent::Button button, bool down) {
+    auto* self = static_cast<WindowEventInjector*>(window);
+    rex::ui::MouseEvent e(window, button, int32_t(window->GetActualPhysicalWidth() / 2),
+                          int32_t(window->GetActualPhysicalHeight() / 2));
+    WindowDestructionReceiver receiver(window);
+    if (down) {
+      self->OnMouseDown(e, receiver);
+    } else {
+      self->OnMouseUp(e, receiver);
+    }
+  }
+};
+#endif
+
 }  // namespace input_detail
 
 /// Synthetic device that exposes held host keys as guest gamepad buttons.
@@ -280,9 +343,19 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   }
 
   // WindowInputListener (called on the UI thread). Events are never marked
-  // handled, so the SDK's own overlays/keybinds still see every key.
-  void OnKeyDown(rex::ui::KeyEvent& e) override { SetKey(e.virtual_key(), true); }
+  // handled, so the SDK's own overlays/keybinds still see every key. ImGui
+  // doesn't mark keys handled either, so every key down reaches the SDK's
+  // binds after this listener: counting the overlay keys here follows which
+  // overlays are open.
+  void OnKeyDown(rex::ui::KeyEvent& e) override {
+    // Overlay first: the guest poll must never see an overlay key held with
+    // its overlay still closed.
+    ToggleOverlayForKey(*ui_, e.virtual_key());
+    SetKey(e.virtual_key(), true);
+  }
   void OnKeyUp(rex::ui::KeyEvent& e) override { SetKey(e.virtual_key(), false); }
+  void OnMouseDown(rex::ui::MouseEvent& e) override { SetMouseButton(e.button(), true); }
+  void OnMouseUp(rex::ui::MouseEvent& e) override { SetMouseButton(e.button(), false); }
   void OnMouseMove(rex::ui::MouseEvent& e) override {
     UiState& ui = *ui_;
     int32_t x = e.x();
@@ -352,32 +425,25 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
 
     // F5 (host) -> run the external Lua file (fable2_f5_lua.h). Poll per frame;
     // the actual run happens on the guest main thread via the RunScript binding
-    // probe, so this just latches a flag. Runs even while the console (F4) is
-    // open (F5 is a host-level developer command, not gamepad input).
+    // probe, so this just latches a flag. Runs even while an overlay is open
+    // (F5 is a host-level developer command, not gamepad input).
     fable2::f5lua::poll_f5();
 
-    // Debug-console toggle key (default F4). Pressing it opens/closes the menu;
-    // while the menu is open we release the mouse lock (free cursor for the
-    // menu) and re-engage it when the menu closes. It's excluded from the
-    // gamepad map so it doesn't also act as a button (F4 was the d-pad Right).
-    uint16_t unlock_vk = static_cast<uint16_t>(
-        rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
-    bool has_unlock_key = unlock_vk != 0;
+    // The overlay keys (F3, Backtick, F4, F7 unless rebound) open and close
+    // the SDK's overlays; follow them from their key-down edges.
+    const auto& overlay_keys = OverlayKeys();
     if (focused) {
-      bool unlock_down = has_unlock_key && (GetAsyncKeyState(unlock_vk) & 0x8000);
-      if (unlock_down && !unlock_down_prev_) console_open_ = !console_open_;
-      unlock_down_prev_ = unlock_down;
-      // The debug overlay's key (bind_debug_overlay, default F3) also frees
-      // the cursor while the overlay is open, for its switches.
-      uint16_t overlay_vk = DebugOverlayKey();
-      bool overlay_down = overlay_vk && (GetAsyncKeyState(overlay_vk) & 0x8000);
-      if (overlay_down && !overlay_down_prev_) debug_overlay_open_ = !debug_overlay_open_;
-      overlay_down_prev_ = overlay_down;
+      for (size_t i = 0; i < input_detail::kOverlayCount; ++i) {
+        bool down = overlay_keys[i] && (GetAsyncKeyState(overlay_keys[i]) & 0x8000);
+        if (down && !overlay_down_prev_[i]) overlays_open_ ^= uint8_t(1u << i);
+        overlay_down_prev_[i] = down;
+      }
     }
+    bool overlay_open = overlays_open_ != 0;
 
-    if (focused) {
+    if (focused && !overlay_open) {
       for (const auto& m : bindings_) {
-        if (has_unlock_key && m.vk == unlock_vk) continue;  // not gamepad input
+        if (IsOverlayKey(m.vk)) continue;  // not gamepad input
         if ((GetAsyncKeyState(m.vk) & 0x8000) == 0) continue;  // not held
         if (m.button != 0) {
           buttons |= m.button;
@@ -400,11 +466,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // the cursor is pinned to the window center each poll (that frame's
     // movement is consumed, so the camera rotates continuously and never hits
     // the screen edge). We gate on the game window being focused (so alt-tabbing
-    // away releases the lock) and on the debug menu being closed (F4) so the
-    // cursor is free while the menu is open. Fable 2 inverts Y, so mouse-up
-    // (dy<0) maps to +ry (look up).
-    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_ &&
-                   !debug_overlay_open_;
+    // away releases the lock) and on no overlay being open, so the cursor is
+    // free while one is. Fable 2 inverts Y, so mouse-up (dy<0) maps to +ry
+    // (look up).
+    bool looking = focused && REXCVAR_GET(mouse_look) && !overlay_open;
 
     // Hide/restore the cursor via the SDK Window. This is a thread-safe
     // "desired state" that the UI thread applies, so it actually takes effect
@@ -446,6 +511,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     bool focused = attached_window_.load(std::memory_order_acquire) != nullptr &&
                    has_focus_.load(std::memory_order_relaxed);
     if (!focused) ClearKeys();
+    // An overlay open (F3, F4, the console, achievements) takes the keyboard
+    // and mouse: no keys, debug hotkeys or mouse look reach the game.
+    bool overlay_open = ui_->overlays_open.load(std::memory_order_relaxed) != 0;
+    bool hotkeys = focused && !overlay_open;
 
     // F5 (host) -> run the external Lua file (fable2_f5_lua.h).
     fable2::f5lua::poll_f5(focused && KeyDown(0x74 /* F5 */));
@@ -455,7 +524,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // The number keys 6-9 do the same as F6-F9: on a Mac keyboard the F keys
     // are media and system keys unless fn is held, and macOS never passes
     // those to the game.
-    bool frame_report_down = focused && (KeyDown(0x78 /* F9 */) || KeyDown(0x39 /* 9 */));
+    bool frame_report_down = hotkeys && (KeyDown(0x78 /* F9 */) || KeyDown(0x39 /* 9 */));
     if (frame_report_down && !frame_report_down_prev_) {
       if (rex::cvar::SetFlagByName("vulkan_frame_report",
                                    std::to_string(++frame_report_requests_))) {
@@ -466,9 +535,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
 
     // F6 (host) -> flip a GPU debug switch of the macOS SDK patch, to compare
     // the picture with and without it while standing still: fragment shader
-    // interlock shaders run for whole 2x2 quads (no early quad skip). F7
+    // interlock shaders run for whole 2x2 quads (no early quad skip). 7
     // cycles the mip level every texture is sampled at (off, 0, 1, ... 6,
-    // off), to see which levels are loaded wrong. F8 cycles through the
+    // off), to see which levels are loaded wrong (only the digit: F7 opens
+    // the SDK's achievements overlay). F8 cycles through the
     // groups of pixel shaders in vulkan_debug_skip_ps (';'-separated),
     // skipping the draws of one group at a time, then none.
     static constexpr struct {
@@ -481,7 +551,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     };
     for (size_t i = 0; i < std::size(kDebugToggles); ++i) {
       bool down =
-          focused && (KeyDown(kDebugToggles[i].vk) || KeyDown(kDebugToggles[i].digit_vk));
+          hotkeys && (KeyDown(kDebugToggles[i].vk) || KeyDown(kDebugToggles[i].digit_vk));
       if (down && !debug_toggle_down_prev_[i]) {
         bool on = !rex::cvar::Query<bool>(kDebugToggles[i].cvar);
         if (rex::cvar::SetFlagByName(kDebugToggles[i].cvar, on ? "true" : "false")) {
@@ -493,22 +563,22 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       }
       debug_toggle_down_prev_[i] = down;
     }
-    bool force_mip_down = focused && (KeyDown(0x76 /* F7 */) || KeyDown(0x37 /* 7 */));
+    bool force_mip_down = hotkeys && KeyDown(0x37 /* 7 */);
     if (force_mip_down && !debug_toggle_down_prev_[1]) {
       int32_t level = rex::cvar::Query<int32_t>("vulkan_debug_force_mip") + 1;
       if (level > 6) level = -1;
       if (rex::cvar::SetFlagByName("vulkan_debug_force_mip", std::to_string(level))) {
         if (level < 0) {
-          REXSYS_INFO("[input] F7: textures use all mip levels again");
+          REXSYS_INFO("[input] 7: textures use all mip levels again");
         } else {
-          REXSYS_INFO("[input] F7: textures sampled only at mip level {}", level);
+          REXSYS_INFO("[input] 7: textures sampled only at mip level {}", level);
         }
       } else {
-        REXSYS_WARN("[input] F7: vulkan_debug_force_mip is not available in this SDK build");
+        REXSYS_WARN("[input] 7: vulkan_debug_force_mip is not available in this SDK build");
       }
     }
     debug_toggle_down_prev_[1] = force_mip_down;
-    bool skip_group_down = focused && (KeyDown(0x77 /* F8 */) || KeyDown(0x38 /* 8 */));
+    bool skip_group_down = hotkeys && (KeyDown(0x77 /* F8 */) || KeyDown(0x38 /* 8 */));
     if (skip_group_down && !debug_toggle_down_prev_[2]) {
       std::string groups = rex::cvar::Query<std::string>("vulkan_debug_skip_ps");
       int32_t group_count =
@@ -534,7 +604,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
 
     // 0 / fn+F10 (host) -> debug sweep: step through debug_sweep_steps and
     // save a screenshot of each (src/diagnostics/fable2_debug_sweep.h).
-    bool sweep_down = focused && (KeyDown(0x79 /* F10 */) || KeyDown(0x30 /* 0 */));
+    bool sweep_down = hotkeys && (KeyDown(0x79 /* F10 */) || KeyDown(0x30 /* 0 */));
     if (sweep_down && !debug_toggle_down_prev_[3]) {
       REXSYS_INFO("[input] 0: debug sweep");
       fable2::debugsweep::Instance().Start();
@@ -547,24 +617,9 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     lx += command_press_sticks_[0] * input_detail::kStickMax;
     ly += command_press_sticks_[1] * input_detail::kStickMax;
 
-    // Debug-console toggle key (default F4); see the Windows path above.
-    uint16_t unlock_vk = static_cast<uint16_t>(
-        rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)));
-    bool has_unlock_key = unlock_vk != 0;
-    if (focused) {
-      bool unlock_down = has_unlock_key && KeyDown(unlock_vk);
-      if (unlock_down && !unlock_down_prev_) console_open_ = !console_open_;
-      unlock_down_prev_ = unlock_down;
-      // The debug overlay's key (default F3); see the Windows path above.
-      uint16_t overlay_vk = DebugOverlayKey();
-      bool overlay_down = overlay_vk && KeyDown(overlay_vk);
-      if (overlay_down && !overlay_down_prev_) debug_overlay_open_ = !debug_overlay_open_;
-      overlay_down_prev_ = overlay_down;
-    }
-
-    if (focused) {
+    if (hotkeys) {
       for (const auto& m : bindings_) {
-        if (has_unlock_key && m.vk == unlock_vk) continue;  // not gamepad input
+        if (IsOverlayKey(m.vk)) continue;  // not gamepad input
         if (!KeyDown(m.vk)) continue;  // not held
         if (m.button != 0) {
           buttons |= m.button;
@@ -586,8 +641,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // and locks the pointer with SDL relative mouse mode (or, if that is
     // refused, recenters the cursor), and motion events accumulate deltas
     // between polls (OnMouseMove).
-    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_ &&
-                   !debug_overlay_open_;
+    bool looking = focused && REXCVAR_GET(mouse_look) && !overlay_open;
     RequestMouseCapture(looking);
 
     // Consume whole pixels and keep the fraction for the next poll: macOS
@@ -613,6 +667,15 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     ry = input_detail::ClampStick(ry + command_press_sticks_[3] * input_detail::kStickMax);
 #endif
 
+#ifndef _WIN32
+    if (log_state_) {
+      log_state_ = false;
+      REXSYS_INFO("[input] state: focused {}, overlays {:#x}, buttons {:#06x}, triggers {} {}, "
+                  "left stick {} {}, right stick {} {}",
+                  focused, ui_->overlays_open.load(std::memory_order_relaxed), buttons, left_trigger,
+                  right_trigger, lx, ly, rx, ry);
+    }
+#endif
     out_state->packet_number.set(packet_number_++);
     out_state->gamepad.buttons.set(buttons);
     out_state->gamepad.left_trigger = left_trigger;
@@ -668,24 +731,30 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   uint32_t packet_number_ = 0;
   [[maybe_unused]] bool mouse_centered_ = false;  // Windows: set once the cursor is first pinned
   [[maybe_unused]] bool cursor_hidden_ = false;  // Windows: SDK window cursor hidden
-  bool console_open_ = false;    // debug menu open -> mouse lock released
-  bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
-  bool debug_overlay_open_ = false;  // F3 overlay open -> mouse lock released
-  bool overlay_down_prev_ = false;   // prev-poll state of the overlay key
+  // Windows: the overlays open (bit i: input_detail::kOverlayBinds[i]), from
+  // the overlay keys' key-down edges. (Elsewhere UiState::overlays_open.)
+  [[maybe_unused]] uint8_t overlays_open_ = 0;
+  [[maybe_unused]] bool overlay_down_prev_[input_detail::kOverlayCount] = {};
 
-  // The key of the SDK's debug overlay bind (bind_debug_overlay, "F3" unless
-  // rebound), looked up again every second so a rebind takes effect.
-  uint16_t DebugOverlayKey() {
+  // The overlay keys (input_detail::kOverlayBinds), looked up again every
+  // second so a rebind takes effect. Guest input poll thread only.
+  const std::array<uint16_t, input_detail::kOverlayCount>& OverlayKeys() {
     auto now = std::chrono::steady_clock::now();
-    if (now - debug_overlay_key_checked_ >= std::chrono::seconds(1)) {
-      debug_overlay_key_checked_ = now;
-      debug_overlay_vk_ = static_cast<uint16_t>(rex::ui::ParseVirtualKey(
-          rex::cvar::Query<std::string>("bind_debug_overlay")));
+    if (now - overlay_keys_checked_ >= std::chrono::seconds(1)) {
+      overlay_keys_checked_ = now;
+      for (size_t i = 0; i < input_detail::kOverlayCount; ++i) {
+        overlay_keys_[i] = static_cast<uint16_t>(rex::ui::ParseVirtualKey(
+            rex::cvar::Query<std::string>(input_detail::kOverlayBinds[i])));
+      }
     }
-    return debug_overlay_vk_;
+    return overlay_keys_;
   }
-  std::chrono::steady_clock::time_point debug_overlay_key_checked_;
-  uint16_t debug_overlay_vk_ = 0;
+  bool IsOverlayKey(uint16_t vk) {
+    const auto& keys = OverlayKeys();
+    return vk != 0 && std::find(keys.begin(), keys.end(), vk) != keys.end();
+  }
+  std::chrono::steady_clock::time_point overlay_keys_checked_;
+  std::array<uint16_t, input_detail::kOverlayCount> overlay_keys_{};
   [[maybe_unused]] bool frame_report_down_prev_ = false;  // F9 state (non-Windows)
   [[maybe_unused]] int32_t frame_report_requests_ = 0;  // F9 presses (vulkan_frame_report)
   [[maybe_unused]] bool debug_toggle_down_prev_[4] = {};  // F6-F8, F10 state (non-Windows)
@@ -705,6 +774,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   std::array<int8_t, 4> command_press_sticks_{};
   std::chrono::steady_clock::time_point command_press_end_{};
   std::chrono::steady_clock::time_point next_command_poll_{};
+  bool log_state_ = false;  // "state": log the next poll's result
 
   void PollCommandFile(uint16_t* buttons) {
     auto now = std::chrono::steady_clock::now();
@@ -807,10 +877,52 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       int32_t ms = 0;
       words >> ms;
       command_presses_.push_back({0, std::max(ms, 0)});
+    } else if (command == "keydown" || command == "keyup" || command == "mousedown" ||
+               command == "mouseup") {
+      // "keydown W", "mouseup LMB": a key or mouse button event, sent through
+      // the window's input listeners as the platform window would (tests the
+      // overlays' hold on the keyboard and mouse; see WindowEventInjector).
+      std::string name;
+      words >> name;
+      bool down = command == "keydown" || command == "mousedown";
+      bool mouse = command == "mousedown" || command == "mouseup";
+      using B = rex::ui::MouseEvent::Button;
+      B button = B::kNone;
+      rex::ui::VirtualKey vk = rex::ui::VirtualKey::kNone;
+      if (mouse) {
+        std::string u = input_detail::ToUpper(name);
+        button = u == "LMB" ? B::kLeft : u == "RMB" ? B::kRight : u == "MMB" ? B::kMiddle
+                                                                              : B::kNone;
+      } else {
+        vk = rex::ui::ParseVirtualKey(name);
+      }
+      if (button == B::kNone && vk == rex::ui::VirtualKey::kNone) {
+        REXSYS_WARN("[input] command file: unknown {} '{}'", mouse ? "button" : "key", name);
+        return;
+      }
+      rex::ui::WindowedAppContext* ctx = ui_context_.load(std::memory_order_acquire);
+      std::shared_ptr<UiState> ui = ui_;
+      if (ctx) {
+        ctx->CallInUIThreadDeferred([ui, vk, button, down, mouse] {
+          if (!ui->ui_window) return;
+          if (mouse) {
+            input_detail::WindowEventInjector::Mouse(ui->ui_window, button, down);
+          } else {
+            input_detail::WindowEventInjector::Key(ui->ui_window, vk, down);
+          }
+        });
+      }
+    } else if (command == "focus") {
+      // Treat the window as focused until its next focus event, so a test
+      // can drive keys without taking the focus from whoever uses the Mac.
+      has_focus_.store(true, std::memory_order_relaxed);
+    } else if (command == "state") {
+      // Log what this pad sends the guest at its next poll.
+      log_state_ = true;
     } else if (command == "key") {
       // "key F3": the SDK key bind of that key (the overlays: F3 debug, F4
-      // settings, Backtick console), run on the UI thread as a key press
-      // would, and the cursor state that follows the F3 and F4 overlays.
+      // settings, Backtick console, F7 achievements), run on the UI thread as
+      // a key press would, with the overlay state that follows it.
       std::string name;
       words >> name;
       rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(name);
@@ -818,18 +930,11 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
         REXSYS_WARN("[input] command file: unknown key '{}'", name);
         return;
       }
-      uint16_t vk_code = static_cast<uint16_t>(vk);
-      if (vk_code == static_cast<uint16_t>(
-                         rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)))) {
-        console_open_ = !console_open_;
-      }
-      if (vk_code == DebugOverlayKey()) {
-        debug_overlay_open_ = !debug_overlay_open_;
-      }
       rex::ui::WindowedAppContext* ctx = ui_context_.load(std::memory_order_acquire);
       std::shared_ptr<UiState> ui = ui_;
       if (ctx) {
         ctx->CallInUIThreadDeferred([ui, vk] {
+          ToggleOverlayForKey(*ui, vk);
           rex::ui::KeyEvent e(ui->ui_window, vk, 1, false, false, false, false, false);
           rex::ui::ProcessKeyEvent(e);
         });
@@ -870,6 +975,10 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     std::mutex mouse_mutex;  // guards the deltas
     float mouse_dx = 0.0f;
     float mouse_dy = 0.0f;
+    // The overlays open (bit i: input_detail::kOverlayBinds[i]). Toggled on
+    // the UI thread with each key down of an overlay key, as the SDK's binds
+    // toggle the overlays; read by the guest input poll.
+    std::atomic<uint8_t> overlays_open{0};
   };
   std::shared_ptr<UiState> ui_ = std::make_shared<UiState>();
 
@@ -882,6 +991,25 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   }
   void ClearKeys() {
     for (auto& k : keys_) k.store(false, std::memory_order_relaxed);
+  }
+  void SetMouseButton(rex::ui::MouseEvent::Button button, bool down) {
+    using B = rex::ui::MouseEvent::Button;
+    using V = rex::ui::VirtualKey;
+    switch (button) {
+      case B::kLeft: SetKey(V::kLButton, down); break;
+      case B::kRight: SetKey(V::kRButton, down); break;
+      case B::kMiddle: SetKey(V::kMButton, down); break;
+      case B::kX1: SetKey(V::kXButton1, down); break;
+      case B::kX2: SetKey(V::kXButton2, down); break;
+      default: break;
+    }
+  }
+  // UI thread: a key down of an overlay key opens or closes that overlay.
+  static void ToggleOverlayForKey(UiState& ui, rex::ui::VirtualKey vk) {
+    int overlay = input_detail::OverlayForKey(static_cast<uint16_t>(vk));
+    if (overlay >= 0) {
+      ui.overlays_open.fetch_xor(uint8_t(1u << overlay), std::memory_order_relaxed);
+    }
   }
 
   // Listener registration touches the window's listener lists, which the UI
