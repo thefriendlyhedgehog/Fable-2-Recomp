@@ -32406,10 +32406,10 @@ index d70c1a1..acd2a84 100644
      AddLocal(spdlog::level::warn, "[console] unknown cvar: " + name);
 diff --git a/src/ui/overlay/cvar_groups.cpp b/src/ui/overlay/cvar_groups.cpp
 new file mode 100644
-index 0000000..f1fd181
+index 0000000..ff76045
 --- /dev/null
 +++ b/src/ui/overlay/cvar_groups.cpp
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,223 @@
 +/**
 + * @file        ui/overlay/cvar_groups.cpp
 + *
@@ -32497,7 +32497,8 @@ index 0000000..f1fd181
 +  // Internals in the player's categories.
 +  static constexpr std::string_view kInternals[] = {
 +      "host_present_from_non_ui_thread", "present_render_pass_clear", "audio_maxqframes",
-+      "video_driver", "input_backend",
++      "video_driver", "input_backend", "hid_mappings_file", "guide_button", "f5_lua_path",
++      "skipHash",
 +  };
 +  if (std::find(std::begin(kInternals), std::end(kInternals), std::string_view(entry.name)) !=
 +      std::end(kInternals)) {

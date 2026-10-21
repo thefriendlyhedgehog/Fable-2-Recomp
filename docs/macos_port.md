@@ -2131,8 +2131,9 @@ and code values left out, a user string with quotes and a backslash round
 trips, a reset flag removed).
 
 **F4 hides the SDK's keyboard/mouse emulation** (`mnk_mode`, `mnk_mouse`,
-`mnk_sensitivity`, the `Input/Keybinds/Controller` keys) and `input_backend`
-from the player view: Fable II uses its own `keyboard_gamepad_map`, and with
+`mnk_sensitivity`, the `Input/Keybinds/Controller` keys) and the developer
+settings `input_backend`, `hid_mappings_file`, `guide_button`, `f5_lua_path`
+and `skipHash` from the player view: Fable II uses its own `keyboard_gamepad_map`, and with
 `mnk_mode` on both would drive the pad. "Show developer options" lists them.
 
 Test commands (command file, for `tools/mac_autotest.sh`): `keydown <key>`
