@@ -239,12 +239,6 @@ class Fable2App : public rex::ReXApp {
     }
 #endif
 
-    // Feed the F3 debug overlay with guest FPS (below). The GPU plugin
-    // records per-guest-swap frame timing into the shared perf registry
-    // (rex::perf, state lives in rexruntime.dll and is shared with the
-    // plugin); read the last snapshot and expose it as FrameStats so the
-    // overlay's "Guest: X FPS (Y ms)" line works on every runtime build.
-
     // Background monitor for the table-zeroing / init-ordering bug. Runs on a
     // SEPARATE OS thread with hardcoded stable addresses (no recompiled probe
     // dependency), so it does not perturb the recompiled hot path that the
@@ -252,78 +246,87 @@ class Fable2App : public rex::ReXApp {
     // and distinguishes:
     //   (A) table valid then zeroed  -> "HEAD WENT NULL" after "FIRST VALID"
     //   (B) never valid (consumer first) -> only "null" ever, no "FIRST VALID"
-    std::thread([]() {
-      using namespace fable2::allocwatch;
-      // The arena base is 0 until the runtime's memory is up; wait for it
-      // rather than sample a guessed address.
-      uintptr_t base = 0;
-      while ((base = fable2::guestmem::GuestBase()) == 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      }
-      auto t0 = std::chrono::steady_clock::now();
-      auto ms = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
-      // The guest arena is commit-on-fault; a page may be uncommitted when we
-      // sample early. Use VirtualQuery to only read committed pages, so an
-      // early sample is skipped instead of faulting the monitor thread.
-      // (Elsewhere: a kernel-checked read, see guest_memory.h; PROT_NONE
-      // arena pages just fail the read.)
-      auto committed = [](const volatile void* p) {
-#ifdef _WIN32
-        MEMORY_BASIC_INFORMATION mbi{};
-        if (::VirtualQuery(const_cast<void*>(const_cast<const void*>(p)), &mbi, sizeof(mbi)) == 0) return false;
-        return mbi.State == MEM_COMMIT &&
-               (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0;
-#else
-        return fable2::guestmem::Readable(const_cast<const void*>(p));
-#endif
-      };
-      auto safe_sample = [&](uint32_t& tbl, uint32_t& flag, uint32_t& head) -> bool {
-        tbl = flag = head = 0;
-        if (!committed(GuestPtr(base, kTablePtrGuest))) return false;
-        tbl = *GuestPtr(base, kTablePtrGuest);
-        flag = *GuestByte(base, kFlagGuestAddr);
-        if (tbl != 0) {
-          if (!committed(GuestPtr(base, tbl + 12))) return false;
-          head = *GuestPtr(base, tbl + 12);
-        }
-        return true;
-      };
-      bool first_valid = false;
-      bool ever_valid = false;
-      int null_samples = 0;
-      while (true) {
-        uint32_t tbl, flag, head;
-        if (!safe_sample(tbl, flag, head)) {
+    // Off unless --debug_alloc_watch (main.cpp): it wakes every 2 ms for the
+    // whole session.
+    if (rex::cvar::Query<bool>("debug_alloc_watch")) {
+      std::thread([]() {
+        using namespace fable2::allocwatch;
+        // The arena base is 0 until the runtime's memory is up; wait for it
+        // rather than sample a guessed address.
+        uintptr_t base = 0;
+        while ((base = fable2::guestmem::GuestBase()) == 0) {
           std::this_thread::sleep_for(std::chrono::milliseconds(5));
-          continue;  // page not committed yet
         }
-        if (tbl != 0 && head != 0 && !first_valid) {
-          first_valid = true; ever_valid = true;
-          REXSYS_ERROR("[alloc-watch] FIRST VALID head: t={}ms tbl@83496BD4=0x{:08X} head=0x{:08X} flag=0x{:02X}",
-                       ms(), tbl, head, flag);
-        }
-        if (tbl != 0 && head != 0) ever_valid = true;
-        // Log the transition valid->null (the zeroing) with full context.
-        static uint32_t s_prev_head = 0;
-        static bool s_have_prev = false;
-        if (tbl != 0) {
-          if (s_have_prev && s_prev_head != 0 && head == 0) {
-            uint32_t ev = null_samples++;
-            if (ev < 6) {
-              REXSYS_ERROR("[alloc-watch] HEAD WENT NULL: t={}ms tbl=0x{:08X} prevHead=0x{:08X} flag=0x{:02X} ever_valid={} ; dump:",
-                           ms(), tbl, s_prev_head, flag, ever_valid);
-              for (int o = 0; o < 20; o += 4)
-                REXSYS_ERROR("[alloc-watch]   table+{:2d}=0x{:08X}", o, *GuestPtr(base, tbl + o));
-              for (uint32_t a = 0x83496BC0; a < 0x83496BF0; a += 4)
-                REXSYS_ERROR("[alloc-watch]   0x{:08X}=0x{:08X}", a, *GuestPtr(base, a));
-            }
+        auto t0 = std::chrono::steady_clock::now();
+        auto ms = [&] { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count(); };
+        // The guest arena is commit-on-fault; a page may be uncommitted when we
+        // sample early. Use VirtualQuery to only read committed pages, so an
+        // early sample is skipped instead of faulting the monitor thread.
+        // (Elsewhere: a kernel-checked read, see guest_memory.h; PROT_NONE
+        // arena pages just fail the read.)
+        auto committed = [](const volatile void* p) {
+  #ifdef _WIN32
+          MEMORY_BASIC_INFORMATION mbi{};
+          if (::VirtualQuery(const_cast<void*>(const_cast<const void*>(p)), &mbi, sizeof(mbi)) == 0) return false;
+          return mbi.State == MEM_COMMIT &&
+                 (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) != 0;
+  #else
+          return fable2::guestmem::Readable(const_cast<const void*>(p));
+  #endif
+        };
+        auto safe_sample = [&](uint32_t& tbl, uint32_t& flag, uint32_t& head) -> bool {
+          tbl = flag = head = 0;
+          if (!committed(GuestPtr(base, kTablePtrGuest))) return false;
+          tbl = *GuestPtr(base, kTablePtrGuest);
+          flag = *GuestByte(base, kFlagGuestAddr);
+          if (tbl != 0) {
+            if (!committed(GuestPtr(base, tbl + 12))) return false;
+            head = *GuestPtr(base, tbl + 12);
           }
-          s_prev_head = head; s_have_prev = true;
+          return true;
+        };
+        bool first_valid = false;
+        bool ever_valid = false;
+        int null_samples = 0;
+        while (true) {
+          uint32_t tbl, flag, head;
+          if (!safe_sample(tbl, flag, head)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;  // page not committed yet
+          }
+          if (tbl != 0 && head != 0 && !first_valid) {
+            first_valid = true; ever_valid = true;
+            REXSYS_ERROR("[alloc-watch] FIRST VALID head: t={}ms tbl@83496BD4=0x{:08X} head=0x{:08X} flag=0x{:02X}",
+                         ms(), tbl, head, flag);
+          }
+          if (tbl != 0 && head != 0) ever_valid = true;
+          // Log the transition valid->null (the zeroing) with full context.
+          static uint32_t s_prev_head = 0;
+          static bool s_have_prev = false;
+          if (tbl != 0) {
+            if (s_have_prev && s_prev_head != 0 && head == 0) {
+              uint32_t ev = null_samples++;
+              if (ev < 6) {
+                REXSYS_ERROR("[alloc-watch] HEAD WENT NULL: t={}ms tbl=0x{:08X} prevHead=0x{:08X} flag=0x{:02X} ever_valid={} ; dump:",
+                             ms(), tbl, s_prev_head, flag, ever_valid);
+                for (int o = 0; o < 20; o += 4)
+                  REXSYS_ERROR("[alloc-watch]   table+{:2d}=0x{:08X}", o, *GuestPtr(base, tbl + o));
+                for (uint32_t a = 0x83496BC0; a < 0x83496BF0; a += 4)
+                  REXSYS_ERROR("[alloc-watch]   0x{:08X}=0x{:08X}", a, *GuestPtr(base, a));
+              }
+            }
+            s_prev_head = head; s_have_prev = true;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-      }
-    }).detach();
+      }).detach();
+    }
 
+    // The F3 debug overlay's "Guest: X FPS (Y ms)" line, from the perf
+    // counter registry's frame time (rex::perf, shared by rexruntime and the
+    // GPU plugin). The counters exist only in builds with
+    // REXGLUE_ENABLE_PERF_COUNTERS (not Release); the overlay's own frame,
+    // GPU and CPU lines come from rex/perf/live_stats.h in every build.
     SetGuestFrameStats([]() {
       rex::ui::FrameStats stats;
       auto ft_us =
@@ -397,9 +400,10 @@ class Fable2App : public rex::ReXApp {
     // Seed cvars from the config. Only when the cvar is still at its
     // compiled default (source kDefault), so higher-priority sources --
     // fable_2.toml (kConfig), REX_* env vars (kEnvironment), and the command
-    // line (kCommandLine) -- keep winning over the recomp config. The F3
-    // console can still change the value live afterwards (the driver
-    // hot-reloads on text change, see src/input/keyboard_gamepad.h).
+    // line (kCommandLine) -- keep winning over the recomp config. The
+    // settings overlay (F4) can still change the value live afterwards
+    // (the driver hot-reloads on text change, see
+    // src/input/keyboard_gamepad.h).
     const auto seed_cvar = [](std::string_view cvar, std::string_view value) {
       if (rex::cvar::GetFlagSource(cvar) != rex::cvar::Source::kDefault) return;
       if (!rex::cvar::SetFlagByName(cvar, value)) {

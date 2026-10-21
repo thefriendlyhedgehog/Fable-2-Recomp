@@ -106,6 +106,15 @@ REXCVAR_DEFINE_STRING(
     "released (free cursor) and re-engaged when it closes. Empty = always lock "
     "while focused. This key is excluded from the gamepad map.");
 
+// The allocator table monitor in Fable2App::OnPostSetup: a thread that samples
+// the guest allocator table every 2 ms and logs when its head goes null (the
+// table-zeroing / init-ordering bug). Off by default.
+REXCVAR_DEFINE_BOOL(debug_alloc_watch, false, "Debug",
+                    "Run the allocator table monitor: a thread sampling the guest "
+                    "allocator table every 2 ms that logs when its head goes null "
+                    "(the table-zeroing / init-ordering bug). Read at startup.")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 // Skip the default.xex SHA-256 integrity check at startup (see
 // Fable2App::OnLoadXexImage). When set, the XEX hash is still computed and
 // written to the log, but a mismatch (or an unreadable file) no longer blocks

@@ -32,7 +32,7 @@ config_version = 1
 # LT/RT, Up/Down/Left/Right, Pause, Select, L3/R3, StickUp/StickDown/
 # StickLeft/StickRight. Empty string disables the keyboard gamepad.
 # --keyboard_gamepad_map, REX_* environment variables and fable_2.toml still
-# take priority over this value; the F3 console can change it live.
+# take priority over this value; the settings overlay (F4) can change it live.
 # Default: the built-in layout
 #   LMB:X,RMB:Y,MMB:B,Shift:A,E:A,Q:LT,Tab:RB,R:RT,Z:LB,B:B,
 #   W:StickUp,S:StickDown,A:StickLeft,D:StickRight,Escape:Pause,M:Select,

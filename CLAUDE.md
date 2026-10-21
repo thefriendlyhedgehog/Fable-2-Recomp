@@ -36,8 +36,14 @@ ReXGlue (Xenia-derived) static recompilation of Fable II. The app is in
 
 - Keep `config/fable2_config.toml` and the template in
   `src/core/fable2_config.cpp` identical.
-- The game builds against the SDK's prebuilt headers: do not change the
-  layout of SDK classes the app uses (append members only).
+- The game builds against the SDK's prebuilt headers
+  (`thirdparty/rexglue-sdk-prebuilt`, which `build_sdk_mac.sh` doesn't
+  update) and compiles its own copy of `rex_app.cpp` from them. Do not change
+  the layout of SDK classes the app uses. A class the app allocates (ReXApp's
+  overlay dialogs, the achievement toast, `FrameStats`, ...) must keep its
+  exact size: put new state in the `.cpp`. Appending members is safe only for
+  classes the SDK alone allocates; appending to an overlay dialog overflowed
+  the heap (2026-10-21).
 - `.gitignore` ignores `*.sh`, `*.py` and `*.png` by default; new tools need
   a `!tools/<name>` line.
 - Commit messages: what changed and why; no model names or IDs.

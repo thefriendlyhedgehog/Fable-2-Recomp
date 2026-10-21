@@ -1,7 +1,8 @@
 # macOS port: handoff and working notes
 
-State as of 2026-10-12, branch `claude/elegant-ride-r7ako0` (fork
-thefriendlyhedgehog/Fable-2-Recomp). Written so work can continue on the Mac
+State as of 2026-10-21, branch `master` (fork
+thefriendlyhedgehog/Fable-2-Recomp; the work was done on
+`claude/elegant-ride-r7ako0`). Written so work can continue on the Mac
 itself (a local Claude Code instance can build, run and look at the game
 directly) without the history of the cloud sessions. Background and the
 reasoning behind each SDK change: `docs/macos_port.md`. Tools for offline
@@ -9,83 +10,45 @@ shader checks: `tools/sdk_offline/README.md`.
 
 ## Resume here
 
-**Fixed (2026-10-12): wrong mip levels and the white edge lines.** Both came
-from the FSI early quad skip. It decided with fine derivatives, which Metal
-computes like coarse ones, so single pixels ran without the rest of their
-quad and got garbage texture derivatives. The SDK now decides with subgroup
-quad operations (`vulkan_fsi_quad_skip_quad_ops`, on by default; details in
-`docs/macos_port.md`, "FSI early quad skip with quad operations"). Verified
-with a sweep: snowflakes are round dots, the hero's face is right, no edge
-lines, and the whole-quads tile now differs from baseline by only 1.9% of
-pixels (before the fix, whole quads changed the picture a lot).
+**Where things stand (2026-10-21).** The game holds its 60 fps cap at the
+trail and in the heavy views (items 44, 48), with even frame pacing (item 47).
+At the trail: GPU 6.7-6.9 ms per frame (40% busy, 2.8 W, item 58); the
+process uses about one core and 3.7 W of CPU power (items 56, 57). The latest
+CPU work: guest registers in C++ locals (55), `skip_lr`, no global lock for
+the interrupts-off atomic sections plus real memory fences, and `db16cyc` as
+`sched_yield` (56). Profiles of the CPU (57) and the GPU passes (58) show no
+single lever left at the cap; performance work is parked.
 
-**Open: black / dark shadow areas that flicker.** What is known:
+**In-game overlays** (`docs/macos_port.md`, "In-game overlays"):
 
-- The mask resolve at `0x12B17000` (one channel, 1120x720, sampled as `t8`
-  by ~1100-1600 later draws) is a plausible sun-shadow mask: white lit,
-  black shadowed. Snow in its shadow still gets ambient light, so the mask
-  alone does not make areas black.
-- Both shadow maps (t6 `0x12BE1000`, t7 `0x12FE1000`: a near and a wider
-  cascade, 1024x1024 depth) look sane in the dumps.
-- A dark area with stepped edges on the ground next to the glowing trail
-  (its outline looks like the shadow of the roof on the right) **flickers**:
-  the user confirms, and a flicker test caught it (16 baseline shots 250 ms
-  apart while standing still, `--debug_sweep_steps="f00;f01;...;f15"
-  --debug_sweep_settle_ms=250`; shots 12 and 15 have it, the others not: 6%
-  of pixels vs. under 2% for snowflakes). So some input of the ground /
-  lighting draws differs between frames.
-- Skipping ps `401A01FD4E5F8757` (sweep tile 08) removed the dark area in
-  one sweep but not in the next; with the flicker that test says nothing.
-  That shader is a general material / lighting shader (base pass fmt 3,
-  lighting fmt 12, also the hero), not only screen-space shadows.
+- F3: debug overlay. Frame rate, frame times (graph), GPU and command
+  processor time per frame, draws, render pass starts and resolves per
+  frame, CPU by thread and CPU power, and "Debug switches": every measurement
+  and debug cvar, with a frame report button. The cursor is free while it's
+  open.
+- F4: settings, the player's settings only; "Show developer options" lists
+  every cvar. D3D12 and codegen settings are never shown on the Mac.
+- Backtick: the console.
 
-**Cause found (2026-10-12): upload hoisting.** The flicker test with
-`--vulkan_hoist_shared_memory_uploads` still flickers after the ordering
-fixes below; the same test without it does not (all 16 shots within
-1.3-1.8% of shot 00, snowflakes only, and the ground by the trail is soft
-and lit in every shot). The resolves are not the cause: dumps of 24
-consecutive frames (`dump 24`) change by 0.2% (mask), 1.4% / 0.6% (shadow
-maps) and 0.2% (scene depth) per frame. So hoisting still reorders some
-non-resolve data the ground draws read from shared memory (vertex or
-heightmap data most likely), even with only first uses of pages hoisted.
-Hoisting also brought no measurable speed: heavy scenes ran 12-14 fps with
-and without it (log 070 with, 071 without; not identical scenes). **Do not
-pass `--vulkan_hoist_shared_memory_uploads`**; the capture commands no
-longer do. Making it safe is only worth it if a profile shows the pass
-restarts it avoids matter; xenia-edge's zero-copy shared memory
-(`VK_EXT_external_memory_host`) would remove most uploads instead.
+**Next, when this is picked up again:**
 
-**Fixed (2026-10-14):** vertex buffers that skip their shared memory
-request (same address and size as before, an upstream shortcut that lasts
-across frames) did not mark their pages used in the submission, so an
-upload of those pages could be hoisted ahead of an earlier draw that read
-the old data. `VulkanSharedMemory::NoteRangeUsed` now marks them. Two
-flicker tests with hoisting (`fable_2_102`, `fable_2_105`): all 30 shots
-within 1.0-2.1% of shot 00 (snow), picture correct. And hoisting now pays:
-**+38% fps** (9.09 vs. 6.57, 81 vs. 258 render pass restarts per frame;
-`fable_2_104.log`, eight alternating 30 s phases with 60-frame statistics,
-`tools/phase_fps.py`; absolute numbers low because another process held
-~49% of the GPU). The earlier "no measurable speed" was before the quad
-patch fix, when tessellation passes dominated. **On by default on macOS**
-since then (`fable_2_106.log`: 80 restarts per frame without the flag).
+1. A check at the busy square (about 4,400 draws per frame), where frames
+   come closest to the budget (items 48, 49).
+2. Resolves inside the producing render pass, which needs a patched
+   MoltenVK: at most about 1 ms of GPU per frame (item 50).
+3. Watch for the pool allocator crash (`Pool_AcquireNode_83230688` reading
+   guest address 0, seen once in `fable_2_495`). The first boot without
+   memory fences crashed in the same function (item 56), so the fences may
+   have fixed it.
+4. Small CPU items (item 57): sampler parameters cached per fetch
+   constant, fewer descriptor writes.
 
-Ordering holes found by a review against upstream Xenia and xenia-edge and
-fixed anyway (see `docs/macos_port.md`, "Shared memory and texture load
-ordering"):
-1. Upload hoisting could reorder uploads of the same page and overtake
-   earlier reads and GPU writes. Now only first uses of pages in a
-   submission are hoisted; not enough, see above.
-2. Stale textures: a texture could be marked up to date with data the CPU
-   had already changed again (xenia-edge 9781a75a), or two loads of one
-   image in a submission could land in either order. Both fixed.
-3. Resolve readback is unlikely to matter: memexport readback is off on
-   macOS and the only forced resolve readback (`0x12704000`) needs
-   `[patches] hero_dog_texture_readback`, which is off. (Background:
-   `docs/macos_port.md`, "Readback defaults on macOS".)
-
-Resolve numbers differ between frames (the mask was resolve 15, 18, 23 or
-24 in different reports); the addresses stay the same, so refer to
-resolves by address.
+**Measuring rules:** frame reports off (`--vulkan_frame_report_interval=0`),
+`AUTOTEST_FRAME_MS=0`, alternate the variants within one run, and check what
+else uses the GPU and CPU first (WindWaker, Dusklight, remote screen
+sharing). No Metal traces (they fill the system disk) and no uncapped runs.
+The per-pass GPU timer can't rank small passes; skip a candidate
+(`vulkan_debug_skip_ps`) to measure it (item 58).
 
 ## Building and running (on the Mac)
 
@@ -183,11 +146,15 @@ Keys work only while the game window is focused; every press is logged as
 
 | Key | cvar | What it does |
 |---|---|---|
+| F3 | `bind_debug_overlay` | debug overlay: frame, GPU and CPU statistics and the debug switches; frees the cursor while open |
+| F4 | `bind_settings`, `mouse_unlock_key` | settings overlay (player settings; "Show developer options" for all); frees the cursor while open |
+| Backtick | `bind_console` | console overlay |
 | 6 / fn+F6 | `vulkan_debug_fsi_whole_quads` | FSI pixel shaders run for every 2x2 quad (no early quad skip) |
 | 7 / fn+F7 | `vulkan_debug_force_mip` | cycles the mip level all textures are sampled at: off, 0..6, off (`vulkan_debug_base_mip_only` = level 0); the mip data proved fine |
 | 8 / fn+F8 | `vulkan_debug_skip_ps_group` | cycles the `;`-separated groups of `vulkan_debug_skip_ps` (guest pixel shader hashes), skipping one group's draws at a time |
 | 9 / fn+F9 | `vulkan_frame_report` | logs every draw and resolve of the next frame (`[frame]` lines) |
 | 0 / fn+F10 | (app) | debug sweep: `debug_sweep_steps`, `debug_sweep_dir`, `debug_sweep_settle_ms` |
+| - | `debug_alloc_watch` | the allocator table monitor thread (samples the guest allocator table every 2 ms, logs when its head goes null; off; restart) |
 | - | `vulkan_fsi_quad_skip_quad_ops` | quad-uniform early quad skip with subgroup quad ops (on; needs a restart; off = the old derivative check) |
 | - | `vulkan_debug_skip_depth_only_draws` | skip the depth prepass (turns the picture white: the prepass also writes the stencil the base pass tests) |
 | - | `vulkan_debug_depth_only_tiny_scissor`, `vulkan_debug_depth_only_first_triangle` | draw the same prepass draws with a 1x1 scissor (vertex work and draw overhead stay), and with the second also only their first triangle (only the per-draw and render pass costs stay); the picture is white as with the skip |
@@ -248,18 +215,99 @@ running whole quads removed both symptoms. Kept for reference: snowflakes
 are point sprites (ps `718C12FF9E1B888B`, 64x64 DXT1, packed mips 0-6), the
 hero's textures are built by resolves (`plans/hero-dog-realtime-texture-morphing.md`).
 
-### 1. Black / dark shadow areas (flicker)
+### 1. (fixed 2026-10-14) Black / dark shadow areas (flicker)
 
-See "Resume here" for the evidence and candidates. Reference data:
+The history below was the "Resume here" section until 2026-10-21. Reference data:
 ps `401A01FD4E5F8757` samples both shadow maps (t6, t7) and the scene depth
 (t13, `0x1A02A000`), all as `24_8_FLOAT` (float24 depth, decoded to R32
 float by the texture cache, same as Xenia). The shadow maps are drawn with
 polygon offset (ps 0 draws with `poly offset`), applied in the FSI shader
 the same way as Xenia's ROV path.
 
+**Fixed (2026-10-12): wrong mip levels and the white edge lines.** Both came
+from the FSI early quad skip. It decided with fine derivatives, which Metal
+computes like coarse ones, so single pixels ran without the rest of their
+quad and got garbage texture derivatives. The SDK now decides with subgroup
+quad operations (`vulkan_fsi_quad_skip_quad_ops`, on by default; details in
+`docs/macos_port.md`, "FSI early quad skip with quad operations"). Verified
+with a sweep: snowflakes are round dots, the hero's face is right, no edge
+lines, and the whole-quads tile now differs from baseline by only 1.9% of
+pixels (before the fix, whole quads changed the picture a lot).
+
+**Open: black / dark shadow areas that flicker.** What is known:
+
+- The mask resolve at `0x12B17000` (one channel, 1120x720, sampled as `t8`
+  by ~1100-1600 later draws) is a plausible sun-shadow mask: white lit,
+  black shadowed. Snow in its shadow still gets ambient light, so the mask
+  alone does not make areas black.
+- Both shadow maps (t6 `0x12BE1000`, t7 `0x12FE1000`: a near and a wider
+  cascade, 1024x1024 depth) look sane in the dumps.
+- A dark area with stepped edges on the ground next to the glowing trail
+  (its outline looks like the shadow of the roof on the right) **flickers**:
+  the user confirms, and a flicker test caught it (16 baseline shots 250 ms
+  apart while standing still, `--debug_sweep_steps="f00;f01;...;f15"
+  --debug_sweep_settle_ms=250`; shots 12 and 15 have it, the others not: 6%
+  of pixels vs. under 2% for snowflakes). So some input of the ground /
+  lighting draws differs between frames.
+- Skipping ps `401A01FD4E5F8757` (sweep tile 08) removed the dark area in
+  one sweep but not in the next; with the flicker that test says nothing.
+  That shader is a general material / lighting shader (base pass fmt 3,
+  lighting fmt 12, also the hero), not only screen-space shadows.
+
+**Cause found (2026-10-12): upload hoisting.** The flicker test with
+`--vulkan_hoist_shared_memory_uploads` still flickers after the ordering
+fixes below; the same test without it does not (all 16 shots within
+1.3-1.8% of shot 00, snowflakes only, and the ground by the trail is soft
+and lit in every shot). The resolves are not the cause: dumps of 24
+consecutive frames (`dump 24`) change by 0.2% (mask), 1.4% / 0.6% (shadow
+maps) and 0.2% (scene depth) per frame. So hoisting still reorders some
+non-resolve data the ground draws read from shared memory (vertex or
+heightmap data most likely), even with only first uses of pages hoisted.
+Hoisting also brought no measurable speed: heavy scenes ran 12-14 fps with
+and without it (log 070 with, 071 without; not identical scenes). **Do not
+pass `--vulkan_hoist_shared_memory_uploads`**; the capture commands no
+longer do. Making it safe is only worth it if a profile shows the pass
+restarts it avoids matter; xenia-edge's zero-copy shared memory
+(`VK_EXT_external_memory_host`) would remove most uploads instead.
+
+**Fixed (2026-10-14):** vertex buffers that skip their shared memory
+request (same address and size as before, an upstream shortcut that lasts
+across frames) did not mark their pages used in the submission, so an
+upload of those pages could be hoisted ahead of an earlier draw that read
+the old data. `VulkanSharedMemory::NoteRangeUsed` now marks them. Two
+flicker tests with hoisting (`fable_2_102`, `fable_2_105`): all 30 shots
+within 1.0-2.1% of shot 00 (snow), picture correct. And hoisting now pays:
+**+38% fps** (9.09 vs. 6.57, 81 vs. 258 render pass restarts per frame;
+`fable_2_104.log`, eight alternating 30 s phases with 60-frame statistics,
+`tools/phase_fps.py`; absolute numbers low because another process held
+~49% of the GPU). The earlier "no measurable speed" was before the quad
+patch fix, when tessellation passes dominated. **On by default on macOS**
+since then (`fable_2_106.log`: 80 restarts per frame without the flag).
+
+Ordering holes found by a review against upstream Xenia and xenia-edge and
+fixed anyway (see `docs/macos_port.md`, "Shared memory and texture load
+ordering"):
+1. Upload hoisting could reorder uploads of the same page and overtake
+   earlier reads and GPU writes. Now only first uses of pages in a
+   submission are hoisted; not enough, see above.
+2. Stale textures: a texture could be marked up to date with data the CPU
+   had already changed again (xenia-edge 9781a75a), or two loads of one
+   image in a submission could land in either order. Both fixed.
+3. Resolve readback is unlikely to matter: memexport readback is off on
+   macOS and the only forced resolve readback (`0x12704000`) needs
+   `[patches] hero_dog_texture_readback`, which is off. (Background:
+   `docs/macos_port.md`, "Readback defaults on macOS".)
+
+Resolve numbers differ between frames (the mask was resolve 15, 18, 23 or
+24 in different reports); the addresses stay the same, so refer to
+resolves by address.
+
 ### 2. Performance
 
-- GPU at 100%; ~28 fps in light scenes, 12-14 fps in heavy ones (with or
+Now at the 60 fps cap (see "Resume here"). The entries below are the record
+of how it got there, oldest first; the numbered items are the latest.
+
+- (2026-10-12) GPU at 100%; ~28 fps in light scenes, 12-14 fps in heavy ones (with or
   without upload hoisting); heavy scenes were 130-400 ms per frame before
   the fixes. A Metal System Trace put fragment work at 84% of GPU time,
   but the `fbo` path is no faster than `fsi` at the trail (14 fps both),

@@ -367,6 +367,12 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       bool unlock_down = has_unlock_key && (GetAsyncKeyState(unlock_vk) & 0x8000);
       if (unlock_down && !unlock_down_prev_) console_open_ = !console_open_;
       unlock_down_prev_ = unlock_down;
+      // The debug overlay's key (bind_debug_overlay, default F3) also frees
+      // the cursor while the overlay is open, for its switches.
+      uint16_t overlay_vk = DebugOverlayKey();
+      bool overlay_down = overlay_vk && (GetAsyncKeyState(overlay_vk) & 0x8000);
+      if (overlay_down && !overlay_down_prev_) debug_overlay_open_ = !debug_overlay_open_;
+      overlay_down_prev_ = overlay_down;
     }
 
     if (focused) {
@@ -397,7 +403,8 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // away releases the lock) and on the debug menu being closed (F4) so the
     // cursor is free while the menu is open. Fable 2 inverts Y, so mouse-up
     // (dy<0) maps to +ry (look up).
-    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_;
+    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_ &&
+                   !debug_overlay_open_;
 
     // Hide/restore the cursor via the SDK Window. This is a thread-safe
     // "desired state" that the UI thread applies, so it actually takes effect
@@ -548,6 +555,11 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       bool unlock_down = has_unlock_key && KeyDown(unlock_vk);
       if (unlock_down && !unlock_down_prev_) console_open_ = !console_open_;
       unlock_down_prev_ = unlock_down;
+      // The debug overlay's key (default F3); see the Windows path above.
+      uint16_t overlay_vk = DebugOverlayKey();
+      bool overlay_down = overlay_vk && KeyDown(overlay_vk);
+      if (overlay_down && !overlay_down_prev_) debug_overlay_open_ = !debug_overlay_open_;
+      overlay_down_prev_ = overlay_down;
     }
 
     if (focused) {
@@ -574,7 +586,8 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // and locks the pointer with SDL relative mouse mode (or, if that is
     // refused, recenters the cursor), and motion events accumulate deltas
     // between polls (OnMouseMove).
-    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_;
+    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_ &&
+                   !debug_overlay_open_;
     RequestMouseCapture(looking);
 
     // Consume whole pixels and keep the fraction for the next poll: macOS
@@ -657,6 +670,22 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
   [[maybe_unused]] bool cursor_hidden_ = false;  // Windows: SDK window cursor hidden
   bool console_open_ = false;    // debug menu open -> mouse lock released
   bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
+  bool debug_overlay_open_ = false;  // F3 overlay open -> mouse lock released
+  bool overlay_down_prev_ = false;   // prev-poll state of the overlay key
+
+  // The key of the SDK's debug overlay bind (bind_debug_overlay, "F3" unless
+  // rebound), looked up again every second so a rebind takes effect.
+  uint16_t DebugOverlayKey() {
+    auto now = std::chrono::steady_clock::now();
+    if (now - debug_overlay_key_checked_ >= std::chrono::seconds(1)) {
+      debug_overlay_key_checked_ = now;
+      debug_overlay_vk_ = static_cast<uint16_t>(rex::ui::ParseVirtualKey(
+          rex::cvar::Query<std::string>("bind_debug_overlay")));
+    }
+    return debug_overlay_vk_;
+  }
+  std::chrono::steady_clock::time_point debug_overlay_key_checked_;
+  uint16_t debug_overlay_vk_ = 0;
   [[maybe_unused]] bool frame_report_down_prev_ = false;  // F9 state (non-Windows)
   [[maybe_unused]] int32_t frame_report_requests_ = 0;  // F9 presses (vulkan_frame_report)
   [[maybe_unused]] bool debug_toggle_down_prev_[4] = {};  // F6-F8, F10 state (non-Windows)
@@ -778,6 +807,33 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       int32_t ms = 0;
       words >> ms;
       command_presses_.push_back({0, std::max(ms, 0)});
+    } else if (command == "key") {
+      // "key F3": the SDK key bind of that key (the overlays: F3 debug, F4
+      // settings, Backtick console), run on the UI thread as a key press
+      // would, and the cursor state that follows the F3 and F4 overlays.
+      std::string name;
+      words >> name;
+      rex::ui::VirtualKey vk = rex::ui::ParseVirtualKey(name);
+      if (vk == rex::ui::VirtualKey::kNone) {
+        REXSYS_WARN("[input] command file: unknown key '{}'", name);
+        return;
+      }
+      uint16_t vk_code = static_cast<uint16_t>(vk);
+      if (vk_code == static_cast<uint16_t>(
+                         rex::ui::ParseVirtualKey(REXCVAR_GET(mouse_unlock_key)))) {
+        console_open_ = !console_open_;
+      }
+      if (vk_code == DebugOverlayKey()) {
+        debug_overlay_open_ = !debug_overlay_open_;
+      }
+      rex::ui::WindowedAppContext* ctx = ui_context_.load(std::memory_order_acquire);
+      std::shared_ptr<UiState> ui = ui_;
+      if (ctx) {
+        ctx->CallInUIThreadDeferred([ui, vk] {
+          rex::ui::KeyEvent e(ui->ui_window, vk, 1, false, false, false, false, false);
+          rex::ui::ProcessKeyEvent(e);
+        });
+      }
     } else {
       REXSYS_WARN("[input] command file: unknown command '{}'", command);
     }

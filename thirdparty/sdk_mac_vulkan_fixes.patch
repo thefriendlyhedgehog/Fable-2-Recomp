@@ -865,7 +865,7 @@ index e5e4908..ca5c5e2 100644
     public:
      void Export(ucode::ExportRegister export_register, const float* value,
 diff --git a/include/rex/graphics/vulkan/command_processor.h b/include/rex/graphics/vulkan/command_processor.h
-index 696ff48..198b687 100644
+index 696ff48..f23d254 100644
 --- a/include/rex/graphics/vulkan/command_processor.h
 +++ b/include/rex/graphics/vulkan/command_processor.h
 @@ -12,6 +12,7 @@
@@ -1155,7 +1155,7 @@ index 696ff48..198b687 100644
    VkPipeline current_external_graphics_pipeline_;
    VkPipeline current_external_compute_pipeline_;
  
-@@ -839,6 +1047,137 @@ class VulkanCommandProcessor : public CommandProcessor {
+@@ -839,6 +1047,147 @@ class VulkanCommandProcessor : public CommandProcessor {
  
    // Temporary storage for memexport stream constants used in the draw.
    std::vector<draw_util::MemExportRange> memexport_ranges_;
@@ -1290,6 +1290,16 @@ index 696ff48..198b687 100644
 +  uint64_t texture_descriptor_set_reuse_frame_ = UINT64_MAX;
 +  uint64_t texture_descriptor_sets_reused_ = 0;
 +  uint64_t texture_descriptor_sets_written_ = 0;
++
++  // The per-frame sample for the debug overlay (rex/perf/live_stats.h): the
++  // statistics counters when the previous frame ended (they are reset every
++  // vulkan_stats_frames frames), the resolves of the frame, and this thread's
++  // CPU time at the previous frame end.
++  uint32_t live_draws_prev_ = 0;
++  uint32_t live_pass_starts_prev_ = 0;
++  uint64_t live_gpu_time_ns_prev_ = 0;
++  uint32_t live_resolves_ = 0;
++  uint64_t live_thread_cpu_ns_prev_ = 0;
  };
  
  }  // namespace rex::graphics::vulkan
@@ -2034,8 +2044,56 @@ index 1cb3faa..be34c10 100644
  };
  
  /// Create a default InputSystem with SDL + NOP drivers.
+diff --git a/include/rex/perf/live_stats.h b/include/rex/perf/live_stats.h
+new file mode 100644
+index 0000000..4e5a060
+--- /dev/null
++++ b/include/rex/perf/live_stats.h
+@@ -0,0 +1,42 @@
++/**
++ * @file        perf/live_stats.h
++ *
++ * @brief       Per-frame statistics for the debug overlay (F3), in every build.
++ *
++ * The GPU command processor pushes one sample per guest frame; the overlay
++ * reads the latest ones. Unlike the perf counters (rex/perf/counter.h) this is
++ * compiled into Release builds too. It lives in rexruntime, which the GPU
++ * plugin links, so both see the same samples.
++ */
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++namespace rex::perf::live {
++
++struct FrameSample {
++  // Host time since the previous guest frame ended.
++  float frame_ms = 0.0f;
++  // GPU time of the submissions that completed during the frame
++  // (vulkan_gpu_time); 0 when not measured.
++  float gpu_ms = 0.0f;
++  // CPU time of the GPU command processor thread during the frame.
++  float command_processor_cpu_ms = 0.0f;
++  uint32_t draws = 0;
++  uint32_t render_pass_starts = 0;
++  uint32_t resolves = 0;
++};
++
++// Number of frames kept.
++constexpr size_t kFrameHistory = 240;
++
++// Adds the sample of a frame that just ended.
++void PushFrame(const FrameSample& sample);
++
++// Copies the latest samples, oldest first, into out (up to max_count) and
++// returns how many. serial_out, if not null, gets the number of frames pushed
++// so far, so a reader can tell whether new frames arrived.
++size_t ReadFrames(FrameSample* out, size_t max_count, uint64_t* serial_out = nullptr);
++
++}  // namespace rex::perf::live
 diff --git a/include/rex/ui/overlay/achievement_toast.h b/include/rex/ui/overlay/achievement_toast.h
-index 7642601..e11fd18 100644
+index 7642601..3f70a2a 100644
 --- a/include/rex/ui/overlay/achievement_toast.h
 +++ b/include/rex/ui/overlay/achievement_toast.h
 @@ -32,7 +32,8 @@ class AchievementToastDialog : public AchievementNotificationDialog {
@@ -2048,17 +2106,48 @@ index 7642601..e11fd18 100644
    void Push(const rex::system::AchievementEvent& event) override;
  
   protected:
-@@ -50,6 +51,10 @@ class AchievementToastDialog : public AchievementNotificationDialog {
-   std::mutex mutex_;
-   std::deque<PendingToast> queue_;
-   AchievementIconCache icon_cache_;
-+  // Registered with the ImGuiDrawer only while a toast is queued: a registered
-+  // dialog makes the presenter repaint continuously (about 125 times a second
-+  // on the UI thread), even with nothing to draw.
-+  bool registered_ = true;
- };
- 
- }  // namespace rex::ui
+diff --git a/include/rex/ui/overlay/cvar_groups.h b/include/rex/ui/overlay/cvar_groups.h
+new file mode 100644
+index 0000000..3c8469b
+--- /dev/null
++++ b/include/rex/ui/overlay/cvar_groups.h
+@@ -0,0 +1,36 @@
++/**
++ * @file        ui/overlay/cvar_groups.h
++ *
++ * @brief       Which cvars the overlays show, and the editor row they share.
++ *
++ * The settings overlay (F4) shows the settings a player changes, and every
++ * cvar with "Show developer options". The debug overlay (F3) lists the
++ * measurement and debug switches.
++ */
++#pragma once
++
++#include <rex/cvar.h>
++#include <rex/ui/style.h>
++
++namespace rex::ui {
++
++// Has no effect on this platform (the D3D12 backend outside Windows), or
++// only at code generation time: never shown.
++bool IsInertSetting(const rex::cvar::FlagEntry& entry);
++
++// A measurement or debug switch: logs, timers, dumps, debug_* switches,
++// validation; never a key bind. Listed by the debug overlay (F3).
++bool IsDiagnosticSetting(const rex::cvar::FlagEntry& entry);
++
++// A setting a player changes (display, window, presentation, audio, input
++// and key binds, a few GPU quality options): the settings overlay's default
++// view.
++bool IsPlayerSetting(const rex::cvar::FlagEntry& entry);
++
++// One editor row for a cvar that isn't a key bind: its name (colored by
++// lifecycle, with the description as a tooltip) and a widget for its value
++// at value_column.
++void DrawFlagEditorRow(const rex::cvar::FlagEntry& entry, const SettingsStyle& style,
++                       float value_column = 240.0f);
++
++}  // namespace rex::ui
 diff --git a/include/rex/ui/presentation_display.h b/include/rex/ui/presentation_display.h
 new file mode 100644
 index 0000000..4c9ca3e
@@ -3823,6 +3912,18 @@ index 7d1fa44..5cb7f21 100644
        graph.setFunctionName(addr, fmt::format("__savevmx_{}", i));
      }
    }
+diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
+index 1ddafd0..518f6e6 100644
+--- a/src/core/CMakeLists.txt
++++ b/src/core/CMakeLists.txt
+@@ -15,6 +15,7 @@ add_library(rexcore OBJECT
+     logging.cpp
+     memory.cpp
+     mutex.cpp
++    perf/live_stats.cpp
+     ring_buffer.cpp
+     string_buffer.cpp
+     threading.cpp
 diff --git a/src/core/clock.cpp b/src/core/clock.cpp
 index ae72b7a..dd3f4a5 100644
 --- a/src/core/clock.cpp
@@ -3937,6 +4038,54 @@ index 4a9b1ee..6648f00 100644
  void ExceptionHandler::Install(Handler fn, void* data) {
    if (!veh_handle_) {
      veh_handle_ = AddVectoredExceptionHandler(1, ExceptionHandlerCallback);
+diff --git a/src/core/perf/live_stats.cpp b/src/core/perf/live_stats.cpp
+new file mode 100644
+index 0000000..599e706
+--- /dev/null
++++ b/src/core/perf/live_stats.cpp
+@@ -0,0 +1,42 @@
++/**
++ * @file        core/perf/live_stats.cpp
++ *
++ * @brief       Per-frame statistics for the debug overlay. See live_stats.h.
++ */
++#include <rex/perf/live_stats.h>
++
++#include <algorithm>
++#include <array>
++#include <mutex>
++
++namespace rex::perf::live {
++namespace {
++
++// One writer (the command processor, once per frame) and one reader (the
++// overlay, once per paint), so a plain mutex is uncontended.
++std::mutex g_mutex;
++std::array<FrameSample, kFrameHistory> g_frames;
++uint64_t g_serial = 0;
++
++}  // namespace
++
++void PushFrame(const FrameSample& sample) {
++  std::lock_guard<std::mutex> lock(g_mutex);
++  g_frames[g_serial % kFrameHistory] = sample;
++  ++g_serial;
++}
++
++size_t ReadFrames(FrameSample* out, size_t max_count, uint64_t* serial_out) {
++  std::lock_guard<std::mutex> lock(g_mutex);
++  size_t count = size_t(std::min<uint64_t>(g_serial, kFrameHistory));
++  count = std::min(count, max_count);
++  for (size_t i = 0; i < count; ++i) {
++    out[i] = g_frames[(g_serial - count + i) % kFrameHistory];
++  }
++  if (serial_out) {
++    *serial_out = g_serial;
++  }
++  return count;
++}
++
++}  // namespace rex::perf::live
 diff --git a/src/core/threading_posix.cpp b/src/core/threading_posix.cpp
 index 9ac8d15..2084a4c 100644
 --- a/src/core/threading_posix.cpp
@@ -24825,7 +24974,7 @@ index 3027dc8..c82a0aa 100644
  
    return max_y;
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..5818363 100644
+index 001f36b..d17cd43 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -10,9 +10,16 @@
@@ -24857,7 +25006,13 @@ index 001f36b..5818363 100644
  #include <rex/graphics/vulkan/pipeline_cache.h>
  #include <rex/graphics/vulkan/render_target_cache.h>
  #include <rex/graphics/vulkan/shader.h>
-@@ -47,6 +57,67 @@
+@@ -42,11 +52,73 @@
+ #include <rex/kernel/xboxkrnl/video.h>
+ #include <rex/types.h>
+ #include <rex/memory/utils.h>
++#include <rex/perf/live_stats.h>
+ #include <rex/ui/flags.h>
+ #include <rex/ui/vulkan/presenter.h>
  #include <rex/ui/vulkan/util.h>
  
  // Legacy backend compatibility aliases for shared readback controls.
@@ -24925,7 +25080,7 @@ index 001f36b..5818363 100644
  REXCVAR_DEFINE_BOOL(vulkan_readback_resolve, false, "GPU/Vulkan",
                      "Read render-to-texture results on the CPU")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
-@@ -60,15 +131,149 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
+@@ -60,15 +132,149 @@ REXCVAR_DEFINE_BOOL(vulkan_async_skip_incomplete_frames, true, "GPU/Vulkan",
                      "used placeholder pipelines to avoid visible flashing")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -25075,7 +25230,7 @@ index 001f36b..5818363 100644
  namespace rex::graphics::vulkan {
  
  namespace {
-@@ -547,6 +752,129 @@ bool CompileGlslToSpirvInternal(EShLanguage stage, std::string_view source,
+@@ -547,6 +753,129 @@ bool CompileGlslToSpirvInternal(EShLanguage stage, std::string_view source,
    return true;
  }
  
@@ -25205,7 +25360,7 @@ index 001f36b..5818363 100644
  }  // namespace
  
  // Generated with `xb buildshaders`.
-@@ -580,6 +908,9 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
+@@ -580,6 +909,9 @@ VulkanCommandProcessor::VulkanCommandProcessor(VulkanGraphicsSystem* graphics_sy
                                                 system::KernelState* kernel_state)
      : CommandProcessor(graphics_system, kernel_state),
        deferred_command_buffer_(*this),
@@ -25215,7 +25370,7 @@ index 001f36b..5818363 100644
        transient_descriptor_allocator_uniform_buffer_(
            static_cast<const ui::vulkan::VulkanProvider*>(graphics_system->provider())
                ->vulkan_device(),
-@@ -807,6 +1138,13 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -807,6 +1139,13 @@ bool VulkanCommandProcessor::SetupContext() {
        rex::align(std::max(ui::GraphicsUploadBufferPool::kDefaultPageSize, size_t(16384)),
                   size_t(device_properties.minUniformBufferOffsetAlignment)));
  
@@ -25229,7 +25384,7 @@ index 001f36b..5818363 100644
    // Descriptor set layouts that don't depend on the setup of other subsystems.
    VkShaderStageFlags guest_shader_stages =
        guest_shader_vertex_stages_ | VK_SHADER_STAGE_FRAGMENT_BIT;
-@@ -1889,6 +2227,7 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1889,6 +2228,7 @@ bool VulkanCommandProcessor::SetupContext() {
    }
  
    occlusion_query_resources_available_ = InitializeOcclusionQueryResources();
@@ -25237,7 +25392,7 @@ index 001f36b..5818363 100644
  
    // Just not to expose uninitialized memory.
    std::memset(&system_constants_, 0, sizeof(system_constants_));
-@@ -1898,8 +2237,10 @@ bool VulkanCommandProcessor::SetupContext() {
+@@ -1898,8 +2238,10 @@ bool VulkanCommandProcessor::SetupContext() {
  
  void VulkanCommandProcessor::ShutdownContext() {
    AwaitAllQueueOperationsCompletion();
@@ -25248,7 +25403,7 @@ index 001f36b..5818363 100644
  
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -1907,6 +2248,12 @@ void VulkanCommandProcessor::ShutdownContext() {
+@@ -1907,6 +2249,12 @@ void VulkanCommandProcessor::ShutdownContext() {
  
    DestroyScratchBuffer();
  
@@ -25261,7 +25416,7 @@ index 001f36b..5818363 100644
    for (auto& readback_pair : readback_buffers_) {
      ReadbackBuffer& readback = readback_pair.second;
      for (uint32_t i = 0; i < 2; ++i) {
-@@ -2052,6 +2399,7 @@ void VulkanCommandProcessor::ShutdownContext() {
+@@ -2052,6 +2400,7 @@ void VulkanCommandProcessor::ShutdownContext() {
                                           descriptor_set_layout_empty_);
  
    uniform_buffer_pool_.reset();
@@ -25269,7 +25424,7 @@ index 001f36b..5818363 100644
  
    sparse_bind_wait_stage_mask_ = 0;
    sparse_buffer_binds_.clear();
-@@ -2272,6 +2620,19 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -2272,6 +2621,19 @@ void VulkanCommandProcessor::OnGammaRampPWLValueWritten() {
  void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbuffer_width,
                                         uint32_t frontbuffer_height) {
    SCOPE_profile_cpu_f("gpu");
@@ -25289,7 +25444,7 @@ index 001f36b..5818363 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -2857,6 +3218,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2857,6 +3219,7 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
            render_pass_begin_info.pClearValues = nullptr;
            deferred_command_buffer_.CmdVkBeginRenderPass(&render_pass_begin_info,
                                                          VK_SUBPASS_CONTENTS_INLINE);
@@ -25297,7 +25452,7 @@ index 001f36b..5818363 100644
  
            VkViewport viewport;
            viewport.x = 0.0f;
-@@ -2929,6 +3291,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
+@@ -2929,6 +3292,13 @@ void VulkanCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontb
    EndSubmission(true);
  }
  
@@ -25311,7 +25466,7 @@ index 001f36b..5818363 100644
  bool VulkanCommandProcessor::PushBufferMemoryBarrier(
      VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size, VkPipelineStageFlags src_stage_mask,
      VkPipelineStageFlags dst_stage_mask, VkAccessFlags src_access_mask,
-@@ -2938,6 +3307,8 @@ bool VulkanCommandProcessor::PushBufferMemoryBarrier(
+@@ -2938,6 +3308,8 @@ bool VulkanCommandProcessor::PushBufferMemoryBarrier(
        src_queue_family_index == dst_queue_family_index) {
      return false;
    }
@@ -25320,7 +25475,7 @@ index 001f36b..5818363 100644
  
    // Separate different barriers for overlapping buffer ranges into different
    // pipeline barrier commands.
-@@ -2989,6 +3360,8 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
+@@ -2989,6 +3361,8 @@ bool VulkanCommandProcessor::PushImageMemoryBarrier(
        old_layout == new_layout && src_queue_family_index == dst_queue_family_index) {
      return false;
    }
@@ -25329,7 +25484,7 @@ index 001f36b..5818363 100644
  
    // Separate different barriers for overlapping image subresource ranges into
    // different pipeline barrier commands.
-@@ -3058,8 +3431,18 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
+@@ -3058,8 +3432,18 @@ bool VulkanCommandProcessor::SubmitBarriers(bool force_end_render_pass) {
      if (force_end_render_pass) {
        EndRenderPass();
      }
@@ -25348,7 +25503,7 @@ index 001f36b..5818363 100644
    EndRenderPass();
    for (auto it = pending_barriers_.cbegin(); it != pending_barriers_.cend(); ++it) {
      auto it_next = std::next(it);
-@@ -3118,6 +3501,27 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3118,6 +3502,27 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
    current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
    current_framebuffer_ = framebuffer;
  
@@ -25376,7 +25531,7 @@ index 001f36b..5818363 100644
    if (use_dynamic_rendering) {
      VkRenderingAttachmentInfo color_attachments[xenos::kMaxColorRenderTargets];
      VkRenderingAttachmentInfo depth_attachment;
-@@ -3146,7 +3550,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3146,7 +3551,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
      VkRenderPassBeginInfo render_pass_begin_info;
      render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
      render_pass_begin_info.pNext = nullptr;
@@ -25385,7 +25540,7 @@ index 001f36b..5818363 100644
      render_pass_begin_info.framebuffer = framebuffer->framebuffer;
      render_pass_begin_info.renderArea.offset.x = 0;
      render_pass_begin_info.renderArea.offset.y = 0;
-@@ -3161,6 +3565,46 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3161,6 +3566,46 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
    in_render_pass_ = true;
  }
  
@@ -25432,7 +25587,7 @@ index 001f36b..5818363 100644
  void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
      VkRenderPass render_pass, const VulkanRenderTargetCache::Framebuffer* framebuffer,
      VkImageView transfer_dest_view, bool transfer_dest_is_depth) {
-@@ -3192,6 +3636,13 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3192,6 +3637,13 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
    current_render_pass_ = use_dynamic_rendering ? VK_NULL_HANDLE : render_pass;
    current_framebuffer_ = framebuffer;
  
@@ -25446,7 +25601,7 @@ index 001f36b..5818363 100644
    if (use_dynamic_rendering) {
      VkRenderingAttachmentInfo color_attachment = {};
      VkRenderingAttachmentInfo depth_attachment = {};
-@@ -3240,7 +3691,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3240,7 +3692,7 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
      VkRenderPassBeginInfo render_pass_begin_info;
      render_pass_begin_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
      render_pass_begin_info.pNext = nullptr;
@@ -25455,7 +25610,7 @@ index 001f36b..5818363 100644
      render_pass_begin_info.framebuffer = framebuffer->framebuffer;
      render_pass_begin_info.renderArea.offset.x = 0;
      render_pass_begin_info.renderArea.offset.y = 0;
-@@ -3255,9 +3706,15 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
+@@ -3255,9 +3707,15 @@ void VulkanCommandProcessor::SubmitBarriersAndEnterRenderTargetCacheRenderPass(
  
  void VulkanCommandProcessor::EndRenderPass() {
    assert_true(submission_open_);
@@ -25471,7 +25626,7 @@ index 001f36b..5818363 100644
    if (current_render_pass_ == VK_NULL_HANDLE) {
      deferred_command_buffer_.CmdVkEndRendering();
    } else {
-@@ -3510,6 +3967,67 @@ VulkanCommandProcessor::ScratchBufferAcquisition VulkanCommandProcessor::Acquire
+@@ -3510,6 +3968,67 @@ VulkanCommandProcessor::ScratchBufferAcquisition VulkanCommandProcessor::Acquire
                                    initial_access_mask);
  }
  
@@ -25539,7 +25694,7 @@ index 001f36b..5818363 100644
  void VulkanCommandProcessor::BindExternalGraphicsPipeline(VkPipeline pipeline,
                                                            bool keep_dynamic_depth_bias,
                                                            bool keep_dynamic_blend_constants,
-@@ -3575,7 +4093,201 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
+@@ -3575,7 +4094,201 @@ void VulkanCommandProcessor::SetScissor(const VkRect2D& scissor) {
    }
  }
  
@@ -25741,7 +25896,7 @@ index 001f36b..5818363 100644
    if (REXCVAR_GET(vulkan_submit_on_primary_buffer_end) && submission_open_ &&
        CanEndSubmissionImmediately()) {
      EndSubmission(false);
-@@ -3590,12 +4302,25 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
+@@ -3590,12 +4303,25 @@ Shader* VulkanCommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32
  bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
                                         IndexBufferInfo* index_buffer_info,
                                         bool major_mode_explicit) {
@@ -25767,7 +25922,7 @@ index 001f36b..5818363 100644
    auto draw_fail = [&](const char* stage) {
      auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
      REXGPU_ERROR(
-@@ -3613,6 +4338,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3613,6 +4339,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
    if (edram_mode == xenos::EdramMode::kCopy) {
      // Special copy handling.
@@ -25777,7 +25932,7 @@ index 001f36b..5818363 100644
      return IssueCopy();
    }
  
-@@ -3681,6 +4409,68 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3681,6 +4410,68 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
    reg::RB_DEPTHCONTROL normalized_depth_control = draw_util::GetNormalizedDepthControl(regs);
  
@@ -25846,7 +26001,7 @@ index 001f36b..5818363 100644
    uint32_t ps_param_gen_pos = UINT32_MAX;
    uint32_t interpolator_mask =
        pixel_shader ? (vertex_shader->writes_interpolators() &
-@@ -3708,6 +4498,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3708,6 +4499,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      }
  
      // Process primitives.
@@ -25856,7 +26011,7 @@ index 001f36b..5818363 100644
      if (!primitive_processor_->Process(primitive_processing_result)) {
        return draw_fail("primitive_processing");
      }
-@@ -3731,6 +4524,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3731,6 +4525,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      if (host_vertex_shader_type != Shader::HostVertexShaderType::kVertex &&
          host_vertex_shader_type != Shader::HostVertexShaderType::kPointListAsTriangleStrip &&
          host_vertex_shader_type != Shader::HostVertexShaderType::kRectangleListAsTriangleStrip &&
@@ -25864,7 +26019,7 @@ index 001f36b..5818363 100644
          !Shader::IsHostVertexShaderTypeDomain(host_vertex_shader_type)) {
        REXGPU_ERROR("Unsupported Vulkan host vertex shader type {}",
                     uint32_t(host_vertex_shader_type));
-@@ -3835,32 +4629,133 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3835,32 +4630,133 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -26007,7 +26162,7 @@ index 001f36b..5818363 100644
    if (REXCVAR_GET(async_shader_compilation) && pipeline_is_placeholder) {
      frame_used_async_placeholder_pipeline_ = true;
      return true;
-@@ -3933,7 +4828,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3933,7 +4829,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        host_render_targets_used, pixel_shader && pixel_shader->writes_depth(), viewport_info);
  
    // Update dynamic graphics pipeline state.
@@ -26022,7 +26177,7 @@ index 001f36b..5818363 100644
  
    auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
  
-@@ -3978,6 +4879,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3978,6 +4880,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    }
  
    // Ensure vertex buffers are resident.
@@ -26030,7 +26185,7 @@ index 001f36b..5818363 100644
    const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
      uint32_t vfetch_bits_remaining = constant_map_vertex.vertex_fetch_bitmap[i];
-@@ -3987,6 +4889,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -3987,6 +4890,11 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        uint32_t vfetch_index = i * 32 + j;
        uint64_t vfetch_bit = uint64_t(1) << (vfetch_index & 63);
        if (vertex_buffers_in_sync_[vfetch_index >> 6] & vfetch_bit) {
@@ -26042,7 +26197,7 @@ index 001f36b..5818363 100644
          continue;
        }
        xenos::xe_gpu_vertex_fetch_t vfetch_constant = regs.GetVertexFetch(vfetch_index);
-@@ -4011,10 +4918,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4011,10 +4919,14 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
        VertexBufferState& state = vertex_buffer_states_[vfetch_index];
        if (state.address == vfetch_constant.address && state.size == vfetch_constant.size) {
@@ -26058,7 +26213,7 @@ index 001f36b..5818363 100644
          REXGPU_ERROR(
              "Failed to request vertex buffer at 0x{:08X} (size {}) in the shared "
              "memory",
-@@ -4023,6 +4934,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4023,6 +4935,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
        state.address = vfetch_constant.address;
        state.size = vfetch_constant.size;
@@ -26066,7 +26221,7 @@ index 001f36b..5818363 100644
        vertex_buffers_in_sync_[vfetch_index >> 6] |= vfetch_bit;
      }
    }
-@@ -4032,7 +4944,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4032,7 +4945,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    uint32_t memexport_extent_start = UINT32_MAX, memexport_extent_end = 0;
    for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
      uint32_t memexport_range_base_bytes = memexport_range.base_address_dwords << 2;
@@ -26076,7 +26231,7 @@ index 001f36b..5818363 100644
        REXGPU_ERROR(
            "Failed to request memexport stream at 0x{:08X} (size {}) in the "
            "shared memory",
-@@ -4044,7 +4957,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4044,7 +4958,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
          std::max(memexport_extent_end, memexport_range_base_bytes + memexport_range.size_bytes);
    }
    if (memexport_writes_possible && memexport_ranges_.empty()) {
@@ -26086,7 +26241,7 @@ index 001f36b..5818363 100644
        REXGPU_ERROR(
            "Failed to request full shared memory residency for unresolved "
            "memexport destinations");
-@@ -4072,6 +4986,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4072,6 +4987,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
        }
  
        shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -26094,7 +26249,7 @@ index 001f36b..5818363 100644
        SubmitBarriers(true);
  
        VkBufferCopy guest_dma_index_copy_region = {};
-@@ -4094,32 +5009,152 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4094,32 +5010,152 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
    // TODO(Triang3l): Find some PM4 command that can be used for indication of
    // when memexports should be awaited instead of inserting the barrier in Use
    // every time if memory export was done in the previous draw?
@@ -26257,7 +26412,7 @@ index 001f36b..5818363 100644
    } else {
      std::pair<VkBuffer, VkDeviceSize> index_buffer;
      switch (primitive_processing_result.index_buffer_type) {
-@@ -4166,8 +5201,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
+@@ -4166,8 +5202,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type, uint32_t
      shared_memory_->RangeWrittenByGpu(0, SharedMemory::kBufferSize);
    }
  
@@ -26269,7 +26424,7 @@ index 001f36b..5818363 100644
      uint32_t memexport_total_size = 0;
      for (const draw_util::MemExportRange& memexport_range : memexport_ranges_) {
        memexport_total_size += memexport_range.size_bytes;
-@@ -4206,6 +5242,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
+@@ -4206,6 +5243,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFullPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -26277,7 +26432,7 @@ index 001f36b..5818363 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4331,6 +5368,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4331,6 +5369,7 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    }
  
    shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -26285,7 +26440,7 @@ index 001f36b..5818363 100644
    SubmitBarriers(true);
  
    uint32_t readback_offset = 0;
-@@ -4350,12 +5388,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
+@@ -4350,12 +5389,24 @@ bool VulkanCommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_
    readback.written_size[write_index] = total_size;
  
    CheckSubmissionFenceAndDeviceLoss(0);
@@ -26315,11 +26470,12 @@ index 001f36b..5818363 100644
    if (!previous_slot_ready) {
      IssueDraw_MemexportReadbackFullPath(total_size);
      readback.current_index = read_index;
-@@ -4385,27 +5435,167 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4385,27 +5436,168 @@ bool VulkanCommandProcessor::IssueCopy() {
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
 +  frame_timing::Scope resolves_scope(frame_timing::kResolves);
++  ++live_resolves_;
  
    if (!BeginSubmission(true)) {
      return false;
@@ -26328,10 +26484,7 @@ index 001f36b..5818363 100644
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
 +  // vulkan_debug_dump_resolves: index of the resolve in the frame report.
 +  int64_t dump_resolve_index = -1;
-   if (readback_mode == ReadbackResolveMode::kDisabled) {
--    uint32_t written_address, written_length;
--    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
--                                         written_address, written_length);
++  if (readback_mode == ReadbackResolveMode::kDisabled) {
 +    const RegisterFile& regs = *register_file_;
 +    uint32_t resolve_in_frame = dump_frame_resolves++;
 +    if ((frame_report_active_ || dump_frame_active) &&
@@ -26393,8 +26546,11 @@ index 001f36b..5818363 100644
 +      case ForcedReadbackResolve::kNo:
 +        break;
 +    }
-   }
-+  if (readback_mode == ReadbackResolveMode::kDisabled) {
++  }
+   if (readback_mode == ReadbackResolveMode::kDisabled) {
+-    uint32_t written_address, written_length;
+-    return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
+-                                         written_address, written_length);
 +    uint32_t written_address = 0, written_length = 0;
 +    if (transfer_log_active_) {
 +      transfer_log_context_ = "resolve";
@@ -26423,8 +26579,7 @@ index 001f36b..5818363 100644
 +
 +  return IssueCopy_ReadbackResolvePath(readback_mode);
 +}
- 
--  return IssueCopy_ReadbackResolvePath();
++
 +void VulkanCommandProcessor::QueueResolveDump(uint32_t resolve_index, uint32_t written_address,
 +                                              uint32_t written_length) {
 +  if (!written_length || texture_cache_->IsDrawResolutionScaled()) {
@@ -26441,7 +26596,7 @@ index 001f36b..5818363 100644
 +          ui::vulkan::util::MemoryPurpose::kReadback, dump.buffer, dump.memory)) {
 +    REXGPU_WARN("[frame] resolve {}: could not create a dump buffer", resolve_index);
 +    return;
-+  }
+   }
 +  if (dfn.vkMapMemory(device, dump.memory, 0, VK_WHOLE_SIZE, 0, &dump.mapping) != VK_SUCCESS) {
 +    dfn.vkDestroyBuffer(device, dump.buffer, nullptr);
 +    dfn.vkFreeMemory(device, dump.memory, nullptr);
@@ -26459,7 +26614,8 @@ index 001f36b..5818363 100644
 +  dump.format = uint32_t(copy_dest_info.copy_dest_format);
 +  dump.endian = uint32_t(copy_dest_info.copy_dest_endian);
 +  dump.resolve_index = resolve_index;
-+
+ 
+-  return IssueCopy_ReadbackResolvePath();
 +  shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
 +  SetRenderPassEndReason(RenderPassEndReason::kReadback);
 +  SubmitBarriers(true);
@@ -26488,7 +26644,7 @@ index 001f36b..5818363 100644
    if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
                                       written_length)) {
      return false;
-@@ -4419,7 +5609,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4419,7 +5611,6 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      return true;
    }
  
@@ -26496,7 +26652,7 @@ index 001f36b..5818363 100644
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
-@@ -4579,6 +5768,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4579,6 +5770,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      dfn.vkUpdateDescriptorSets(device, 2, descriptor_writes, 0, nullptr);
  
      texture_cache_->UseScaledResolveBufferForRead();
@@ -26504,7 +26660,7 @@ index 001f36b..5818363 100644
      SubmitBarriers(true);
  
      VkBufferMemoryBarrier pre_barrier = {};
-@@ -4635,6 +5825,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4635,6 +5827,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
                                               readback.buffers[write_index], 1, &readback_region);
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
@@ -26512,7 +26668,7 @@ index 001f36b..5818363 100644
      SubmitBarriers(true);
  
      VkBufferCopy readback_region = {};
-@@ -4780,6 +5971,198 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
+@@ -4780,6 +5973,198 @@ bool VulkanCommandProcessor::InitializeOcclusionQueryResources() {
    return true;
  }
  
@@ -26711,7 +26867,7 @@ index 001f36b..5818363 100644
  void VulkanCommandProcessor::ShutdownOcclusionQueryResources() {
    DisableHostOcclusionQueries();
  
-@@ -4849,6 +6232,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
+@@ -4849,6 +6234,7 @@ bool VulkanCommandProcessor::BeginGuestOcclusionQuery(uint32_t sample_count_addr
      return false;
    }
  
@@ -26719,7 +26875,7 @@ index 001f36b..5818363 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4874,6 +6258,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
+@@ -4874,6 +6260,7 @@ bool VulkanCommandProcessor::EndGuestOcclusionQuery(uint32_t sample_count_addres
      return false;
    }
  
@@ -26727,7 +26883,7 @@ index 001f36b..5818363 100644
    EndRenderPass();
  
    DeferredCommandBuffer& command_buffer = deferred_command_buffer();
-@@ -4944,6 +6329,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
+@@ -4944,6 +6331,9 @@ void VulkanCommandProcessor::WriteGuestOcclusionResult(uint32_t sample_count_add
  }
  
  void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_submission) {
@@ -26737,7 +26893,7 @@ index 001f36b..5818363 100644
    // Only report once, no need to retry a wait that won't succeed anyway.
    if (device_lost_) {
      return;
-@@ -4970,9 +6358,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -4970,9 +6360,12 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
      // defined by vkQueueSubmit additionally include in the first
      // synchronization scope all commands that occur earlier in submission
      // order."
@@ -26753,7 +26909,7 @@ index 001f36b..5818363 100644
      if (wait_result == VK_SUCCESS) {
        fences_awaited += await_submission - submission_completed_;
      } else {
-@@ -5015,6 +6406,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5015,6 +6408,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
    submissions_in_flight_fences_.erase(submissions_in_flight_fences_.cbegin(),
                                        submissions_in_flight_fences_awaited_end);
    submission_completed_ += fences_awaited;
@@ -26761,7 +26917,7 @@ index 001f36b..5818363 100644
  
    // Reclaim semaphores.
    while (!submissions_in_flight_semaphores_.empty()) {
-@@ -5037,6 +6429,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
+@@ -5037,6 +6431,7 @@ void VulkanCommandProcessor::CheckSubmissionFenceAndDeviceLoss(uint64_t await_su
    }
  
    shared_memory_->CompletedSubmissionUpdated();
@@ -26769,7 +26925,7 @@ index 001f36b..5818363 100644
  
    primitive_processor_->CompletedSubmissionUpdated();
  
-@@ -5111,7 +6504,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5111,7 +6506,11 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    // is still available, and whether the await was successful.
    uint64_t await_submission =
        is_opening_frame ? closed_frame_submissions_[frame_current_ % kMaxFramesInFlight] : 0;
@@ -26781,7 +26937,7 @@ index 001f36b..5818363 100644
    if (device_lost_ || submission_completed_ < await_submission) {
      return false;
    }
-@@ -5136,6 +6533,31 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5136,6 +6535,31 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
      // the end of the submission (when async pipeline object creation requests
      // are fulfilled).
      deferred_command_buffer_.Reset();
@@ -26813,7 +26969,7 @@ index 001f36b..5818363 100644
  
      // Reset cached state of the command buffer.
      dynamic_viewport_update_needed_ = true;
-@@ -5165,6 +6587,351 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5165,6 +6589,377 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
    if (is_opening_frame) {
      frame_open_ = true;
      frame_used_async_placeholder_pipeline_ = false;
@@ -26976,6 +27132,26 @@ index 001f36b..5818363 100644
 +    if (fsi_stats_have_last_frame_) {
 +      double frame_ms =
 +          std::chrono::duration<double, std::milli>(frame_now - fsi_stats_last_frame_).count();
++      {
++        // The debug overlay's sample of this frame.
++        rex::perf::live::FrameSample live_sample;
++        live_sample.frame_ms = float(frame_ms);
++        live_sample.gpu_ms = float(double(gpu_time_ns_ - live_gpu_time_ns_prev_) * 1e-6);
++        live_sample.draws = fsi_stats_draws_ - live_draws_prev_;
++        live_sample.render_pass_starts = fsi_stats_pass_switches_ - live_pass_starts_prev_;
++        live_sample.resolves = live_resolves_;
++        timespec live_thread_time;
++        if (!clock_gettime(CLOCK_THREAD_CPUTIME_ID, &live_thread_time)) {
++          uint64_t thread_cpu_ns = uint64_t(live_thread_time.tv_sec) * 1000000000 +
++                                   uint64_t(live_thread_time.tv_nsec);
++          if (live_thread_cpu_ns_prev_) {
++            live_sample.command_processor_cpu_ms =
++                float(double(thread_cpu_ns - live_thread_cpu_ns_prev_) * 1e-6);
++          }
++          live_thread_cpu_ns_prev_ = thread_cpu_ns;
++        }
++        rex::perf::live::PushFrame(live_sample);
++      }
 +      fsi_stats_max_frame_ms_ = std::max(fsi_stats_max_frame_ms_, frame_ms);
 +      if (frame_ms > 40.0) {
 +        ++fsi_stats_long_frames_;
@@ -27162,10 +27338,16 @@ index 001f36b..5818363 100644
 +    }
 +    fsi_stats_have_last_frame_ = true;
 +    fsi_stats_last_frame_ = frame_now;
++    // After the statistics reset above, so the next frame's sample is a
++    // difference within the same counting window.
++    live_draws_prev_ = fsi_stats_draws_;
++    live_pass_starts_prev_ = fsi_stats_pass_switches_;
++    live_gpu_time_ns_prev_ = gpu_time_ns_;
++    live_resolves_ = 0;
  
      // Reset bindings that depend on transient data.
      std::memset(current_float_constant_map_vertex_, 0, sizeof(current_float_constant_map_vertex_));
-@@ -5230,6 +6997,47 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -5230,6 +7025,47 @@ bool VulkanCommandProcessor::BeginSubmission(bool is_guest_command) {
  }
  
  bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
@@ -27213,7 +27395,7 @@ index 001f36b..5818363 100644
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
    const VkDevice device = vulkan_device->device();
-@@ -5308,9 +7116,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5308,9 +7144,15 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        active_occlusion_query_ = {};
      }
  
@@ -27230,7 +27412,7 @@ index 001f36b..5818363 100644
  
      render_target_cache_->EndSubmission();
  
-@@ -5368,6 +7182,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5368,6 +7210,8 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        sparse_memory_binds_.clear();
      }
  
@@ -27239,7 +27421,7 @@ index 001f36b..5818363 100644
      SubmitBarriers(true);
  
      assert_false(command_buffers_writable_.empty());
-@@ -5385,7 +7201,106 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5385,7 +7229,106 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        REXGPU_ERROR("Failed to begin a Vulkan command buffer");
        return false;
      }
@@ -27346,7 +27528,7 @@ index 001f36b..5818363 100644
      if (dfn.vkEndCommandBuffer(command_buffer.buffer) != VK_SUCCESS) {
        REXGPU_ERROR("Failed to end a Vulkan command buffer");
        return false;
-@@ -5430,6 +7345,17 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
+@@ -5430,6 +7373,17 @@ bool VulkanCommandProcessor::EndSubmission(bool is_swap) {
        return false;
      }
      uint64_t submission_current = GetCurrentSubmission();
@@ -27364,7 +27546,7 @@ index 001f36b..5818363 100644
      current_submission_wait_stage_masks_.clear();
      for (VkSemaphore semaphore : current_submission_wait_semaphores_) {
        submissions_in_flight_semaphores_.emplace_back(submission_current, semaphore);
-@@ -5652,9 +7578,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
+@@ -5652,9 +7606,116 @@ void VulkanCommandProcessor::DestroySwapFxaaSourceImage() {
    swap_fxaa_source_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
  }
  
@@ -27482,7 +27664,7 @@ index 001f36b..5818363 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -5701,6 +7734,21 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5701,6 +7762,21 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
    scissor_rect.offset.y = int32_t(scissor.offset[1]);
    scissor_rect.extent.width = scissor.extent[0];
    scissor_rect.extent.height = scissor.extent[1];
@@ -27504,7 +27686,7 @@ index 001f36b..5818363 100644
    SetScissor(scissor_rect);
  
    if (render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
-@@ -5718,6 +7766,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5718,6 +7794,11 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
      // background is more likely.
      depth_bias_slope_factor *= xenos::kPolygonOffsetScaleSubpixelUnit *
                                 float(std::max(draw_resolution_scale_x, draw_resolution_scale_y));
@@ -27516,7 +27698,7 @@ index 001f36b..5818363 100644
      // std::memcmp instead of != so in case of NaN, every draw won't be
      // invalidating it.
      dynamic_depth_bias_update_needed_ |=
-@@ -5990,6 +8043,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -5990,6 +8071,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (pa_cl_vte_cntl.vtx_w0_fmt) {
      flags |= SpirvShaderTranslator::kSysFlag_WNotReciprocal;
    }
@@ -27526,7 +27708,7 @@ index 001f36b..5818363 100644
    // Whether the primitive is polygonal, and gl_FrontFacing matters.
    if (primitive_polygonal) {
      flags |= SpirvShaderTranslator::kSysFlag_PrimitivePolygonal;
-@@ -6121,6 +8177,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6121,6 +8205,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    dirty |= system_constants_.tessellation_factor_range_max != tessellation_factor_max;
    system_constants_.tessellation_factor_range_min = tessellation_factor_min;
    system_constants_.tessellation_factor_range_max = tessellation_factor_max;
@@ -27536,7 +27718,7 @@ index 001f36b..5818363 100644
  
    // Conversion to host normalized device coordinates.
    for (uint32_t i = 0; i < 3; ++i) {
-@@ -6134,10 +8193,15 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6134,10 +8221,15 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
    if (vgt_draw_initiator.prim_type == xenos::PrimitiveType::kPointList) {
      auto pa_su_point_minmax = regs.Get<reg::PA_SU_POINT_MINMAX>();
      auto pa_su_point_size = regs.Get<reg::PA_SU_POINT_SIZE>();
@@ -27556,7 +27738,7 @@ index 001f36b..5818363 100644
      dirty |= system_constants_.point_vertex_diameter_min != point_vertex_diameter_min;
      dirty |= system_constants_.point_vertex_diameter_max != point_vertex_diameter_max;
      dirty |= system_constants_.point_constant_diameter[0] != point_constant_diameter_x;
-@@ -6560,6 +8624,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6560,6 +8652,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      texture_count_pixel = 0;
    }
    // TODO(Triang3l): Reuse texture and sampler bindings if not changed.
@@ -27569,7 +27751,7 @@ index 001f36b..5818363 100644
    current_graphics_descriptor_set_values_up_to_date_ &=
        ~((UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex) |
          (UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel));
-@@ -6672,6 +8742,69 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6672,6 +8770,69 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetConstants] =
          constants_descriptor_set;
    }
@@ -27639,7 +27821,7 @@ index 001f36b..5818363 100644
    // Vertex shader textures and samplers.
    if (write_vertex_textures) {
      VkWriteDescriptorSet* write_textures =
-@@ -6688,6 +8821,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6688,6 +8849,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesVertex;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesVertex] =
          write_textures[0].dstSet;
@@ -27652,7 +27834,7 @@ index 001f36b..5818363 100644
    }
    // Pixel shader textures and samplers.
    if (write_pixel_textures) {
-@@ -6705,6 +8844,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
+@@ -6705,6 +8872,12 @@ bool VulkanCommandProcessor::UpdateBindings(const VulkanShader* vertex_shader,
      write_descriptor_set_bits |= UINT32_C(1) << SpirvShaderTranslator::kDescriptorSetTexturesPixel;
      current_graphics_descriptor_sets_[SpirvShaderTranslator::kDescriptorSetTexturesPixel] =
          write_textures[0].dstSet;
@@ -31933,10 +32115,18 @@ index 813bb1c..4b46c83 100644
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
-index 5bd3dc5..c4cf1fb 100644
+index 5bd3dc5..b371348 100644
 --- a/src/ui/CMakeLists.txt
 +++ b/src/ui/CMakeLists.txt
-@@ -162,7 +162,7 @@ if(UNIX AND NOT APPLE)
+@@ -28,6 +28,7 @@ set(REXUI_OVERLAY_SOURCES
+     overlay/debug_overlay.cpp
+     overlay/console_overlay.cpp
+     overlay/console_commands.cpp
++    overlay/cvar_groups.cpp
+     overlay/settings_overlay.cpp
+ )
+ 
+@@ -162,7 +163,7 @@ if(UNIX AND NOT APPLE)
          ${WAYLAND_LIBRARIES}
      )
  elseif(APPLE)
@@ -31946,10 +32136,33 @@ index 5bd3dc5..c4cf1fb 100644
  
  if(WIN32)
 diff --git a/src/ui/overlay/achievement_toast.cpp b/src/ui/overlay/achievement_toast.cpp
-index 53b8c0b..214eff2 100644
+index 53b8c0b..5feb4d3 100644
 --- a/src/ui/overlay/achievement_toast.cpp
 +++ b/src/ui/overlay/achievement_toast.cpp
-@@ -20,13 +20,23 @@ namespace rex::ui {
+@@ -12,21 +12,45 @@
+ #include <imgui.h>
+ 
+ #include <algorithm>
++#include <unordered_set>
+ 
+ #include <rex/ui/immediate_drawer.h>
+ 
+ namespace rex::ui {
++namespace {
++
++// The toast dialogs not registered with their ImGuiDrawer (UI thread only).
++// A dialog is registered only while a toast is queued: a registered dialog
++// makes the presenter repaint continuously (about 125 times a second on the
++// UI thread), even with nothing to draw. Kept here rather than as a member
++// because the app allocates the dialog (its own rex_app.cpp, built against the
++// SDK's prebuilt headers), so the class must keep its size.
++std::unordered_set<const AchievementToastDialog*>& Unregistered() {
++  static std::unordered_set<const AchievementToastDialog*> dialogs;
++  return dialogs;
++}
++
++}  // namespace
+ 
  AchievementToastDialog::AchievementToastDialog(ImGuiDrawer* drawer,
                                                 ImmediateDrawer* immediate_drawer,
                                                 rex::Runtime* runtime)
@@ -31957,10 +32170,11 @@ index 53b8c0b..214eff2 100644
 +    : AchievementNotificationDialog(drawer), icon_cache_(immediate_drawer, runtime) {
 +  // Nothing to show yet.
 +  imgui_drawer()->RemoveDialog(this);
-+  registered_ = false;
++  Unregistered().insert(this);
 +}
  
- AchievementToastDialog::~AchievementToastDialog() {}
+-AchievementToastDialog::~AchievementToastDialog() {}
++AchievementToastDialog::~AchievementToastDialog() { Unregistered().erase(this); }
  
  void AchievementToastDialog::Push(const rex::system::AchievementEvent& event) {
 -  std::lock_guard<std::mutex> lock(mutex_);
@@ -31969,23 +32183,763 @@ index 53b8c0b..214eff2 100644
 +    std::lock_guard<std::mutex> lock(mutex_);
 +    queue_.push_back({event, std::chrono::steady_clock::now()});
 +  }
-+  if (!registered_) {
++  if (Unregistered().erase(this)) {
 +    imgui_drawer()->AddDialog(this);
-+    registered_ = true;
 +  }
  }
  
  void AchievementToastDialog::OnDraw(ImGuiIO& io) {
-@@ -48,6 +58,9 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
+@@ -48,6 +72,9 @@ void AchievementToastDialog::OnDraw(ImGuiIO& io) {
        }
      }
      if (queue_.empty()) {
 +      // Idle: stop the presenter's continuous repaints until the next Push.
 +      imgui_drawer()->RemoveDialog(this);
-+      registered_ = false;
++      Unregistered().insert(this);
        return;
      }
      toast = queue_.front();
+diff --git a/src/ui/overlay/cvar_groups.cpp b/src/ui/overlay/cvar_groups.cpp
+new file mode 100644
+index 0000000..3f21140
+--- /dev/null
++++ b/src/ui/overlay/cvar_groups.cpp
+@@ -0,0 +1,209 @@
++/**
++ * @file        ui/overlay/cvar_groups.cpp
++ *
++ * @brief       Which cvars the overlays show. See cvar_groups.h.
++ */
++#include <rex/ui/overlay/cvar_groups.h>
++#include <rex/string.h>
++#include <rex/string/numeric.h>
++#include <imgui.h>
++
++#include <algorithm>
++#include <climits>
++#include <cstdlib>
++#include <string>
++#include <string_view>
++
++namespace rex::ui {
++namespace {
++
++bool StartsWith(std::string_view s, std::string_view prefix) {
++  return s.size() >= prefix.size() && s.compare(0, prefix.size(), prefix) == 0;
++}
++
++bool Contains(std::string_view s, std::string_view part) {
++  return s.find(part) != std::string_view::npos;
++}
++
++bool InCategory(std::string_view category, std::string_view root) {
++  return category == root || (StartsWith(category, root) && category.size() > root.size() &&
++                              category[root.size()] == '/');
++}
++
++ImVec4 LifecycleColor(rex::cvar::Lifecycle lc, const SettingsStyle& style) {
++  switch (lc) {
++    case rex::cvar::Lifecycle::kHotReload:
++      return style.lifecycle_live;
++    case rex::cvar::Lifecycle::kRequiresRestart:
++      return style.lifecycle_restart;
++    case rex::cvar::Lifecycle::kInitOnly:
++      return style.lifecycle_init_only;
++  }
++  return style.lifecycle_unknown;
++}
++
++}  // namespace
++
++bool IsInertSetting(const rex::cvar::FlagEntry& entry) {
++  if (InCategory(entry.category, "Codegen")) {
++    return true;
++  }
++#ifndef _WIN32
++  if (InCategory(entry.category, "GPU/D3D12") || InCategory(entry.category, "UI/D3D12")) {
++    return true;
++  }
++#endif
++  return false;
++}
++
++bool IsDiagnosticSetting(const rex::cvar::FlagEntry& entry) {
++  // Key binds (bind_debug_overlay among them) are the player's.
++  if (InCategory(entry.category, "Input/Keybinds")) {
++    return false;
++  }
++  if (entry.is_debug_only || InCategory(entry.category, "Debug")) {
++    return true;
++  }
++  const std::string_view name = entry.name;
++  static constexpr std::string_view kParts[] = {
++      "debug",       "_log",         "dump",       "frame_report", "gpu_time",
++      "stats_frames", "wireframe",   "verbose",    "validation",   "frame_timing",
++      "log_high_frequency",
++  };
++  for (std::string_view part : kParts) {
++    if (Contains(name, part)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++bool IsPlayerSetting(const rex::cvar::FlagEntry& entry) {
++  if (IsInertSetting(entry) || IsDiagnosticSetting(entry)) {
++    return false;
++  }
++  // Internals in the player's categories.
++  static constexpr std::string_view kInternals[] = {
++      "host_present_from_non_ui_thread", "present_render_pass_clear", "audio_maxqframes",
++      "video_driver",
++  };
++  if (std::find(std::begin(kInternals), std::end(kInternals), std::string_view(entry.name)) !=
++      std::end(kInternals)) {
++    return false;
++  }
++  static constexpr std::string_view kCategories[] = {
++      "Audio", "Display", "Input", "UI/Window", "UI/Presenter", "Launch",
++  };
++  for (std::string_view category : kCategories) {
++    if (InCategory(entry.category, category)) {
++      return true;
++    }
++  }
++  static constexpr std::string_view kNames[] = {
++      "resolution_scale",       "draw_resolution_scale_x", "draw_resolution_scale_y",
++      "anisotropic_override",   "vsync",                   "async_shader_compilation",
++  };
++  return std::find(std::begin(kNames), std::end(kNames), std::string_view(entry.name)) !=
++         std::end(kNames);
++}
++
++void DrawFlagEditorRow(const rex::cvar::FlagEntry& entry, const SettingsStyle& style,
++                       float value_column) {
++  const bool read_only = entry.lifecycle == rex::cvar::Lifecycle::kInitOnly;
++  if (read_only) {
++    ImGui::BeginDisabled();
++  }
++  std::string current_val = entry.getter();
++
++  ImGui::TextColored(LifecycleColor(entry.lifecycle, style), "%-20s", entry.name.c_str());
++  if (ImGui::IsItemHovered()) {
++    const char* lifecycle_label = "";
++    switch (entry.lifecycle) {
++      case rex::cvar::Lifecycle::kHotReload:
++        lifecycle_label = "Live - changes apply immediately";
++        break;
++      case rex::cvar::Lifecycle::kRequiresRestart:
++        lifecycle_label = "Requires restart to take effect";
++        break;
++      case rex::cvar::Lifecycle::kInitOnly:
++        lifecycle_label = "Read-only - set at initialization only";
++        break;
++    }
++    if (!entry.description.empty()) {
++      ImGui::SetTooltip("%s\n[%s]", entry.description.c_str(), lifecycle_label);
++    } else {
++      ImGui::SetTooltip("[%s]", lifecycle_label);
++    }
++  }
++  ImGui::SameLine(value_column);
++
++  ImGui::SetNextItemWidth(160.0f);
++  if (entry.type == rex::cvar::FlagType::Boolean) {
++    bool v = rex::string::from_string<bool>(current_val, false);
++    if (ImGui::Checkbox("##v", &v)) {
++      rex::cvar::SetFlagByName(entry.name, v ? "true" : "false");
++    }
++  } else if (entry.type == rex::cvar::FlagType::String &&
++             !entry.constraints.allowed_values.empty()) {
++    const auto& opts = entry.constraints.allowed_values;
++    int cur_idx = 0;
++    for (int i = 0; i < static_cast<int>(opts.size()); ++i) {
++      if (opts[i] == current_val) {
++        cur_idx = i;
++        break;
++      }
++    }
++    if (ImGui::BeginCombo("##v", opts[cur_idx].c_str())) {
++      for (int i = 0; i < static_cast<int>(opts.size()); ++i) {
++        bool sel = (i == cur_idx);
++        if (ImGui::Selectable(opts[i].c_str(), sel)) {
++          rex::cvar::SetFlagByName(entry.name, opts[i]);
++        }
++        if (sel) {
++          ImGui::SetItemDefaultFocus();
++        }
++      }
++      ImGui::EndCombo();
++    }
++  } else if (entry.type == rex::cvar::FlagType::Int32 ||
++             entry.type == rex::cvar::FlagType::Int64 ||
++             entry.type == rex::cvar::FlagType::Uint32 ||
++             entry.type == rex::cvar::FlagType::Uint64) {
++    int v = std::atoi(current_val.c_str());
++    int vmin =
++        entry.constraints.min.has_value() ? static_cast<int>(*entry.constraints.min) : INT_MIN;
++    int vmax =
++        entry.constraints.max.has_value() ? static_cast<int>(*entry.constraints.max) : INT_MAX;
++    if (ImGui::InputInt("##v", &v)) {
++      v = std::clamp(v, vmin, vmax);
++      rex::cvar::SetFlagByName(entry.name, std::to_string(v));
++    }
++  } else if (entry.type == rex::cvar::FlagType::Double) {
++    double v = std::atof(current_val.c_str());
++    if (ImGui::InputDouble("##v", &v, 0.0, 0.0, "%.4f")) {
++      if (entry.constraints.min) {
++        v = std::max(v, *entry.constraints.min);
++      }
++      if (entry.constraints.max) {
++        v = std::min(v, *entry.constraints.max);
++      }
++      rex::cvar::SetFlagByName(entry.name, std::to_string(v));
++    }
++  } else if (entry.type == rex::cvar::FlagType::Command) {
++    if (ImGui::Button(std::string(entry.name + "##v").c_str())) {
++      entry.command_callback("");
++    }
++  } else {
++    char buf[256];
++    rex::string::copy_truncating(buf, current_val, sizeof(buf));
++    if (ImGui::InputText("##v", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
++      rex::cvar::SetFlagByName(entry.name, buf);
++    }
++  }
++
++  if (read_only) {
++    ImGui::EndDisabled();
++  }
++}
++
++}  // namespace rex::ui
+diff --git a/src/ui/overlay/debug_overlay.cpp b/src/ui/overlay/debug_overlay.cpp
+index 43d6c06..a78e13a 100644
+--- a/src/ui/overlay/debug_overlay.cpp
++++ b/src/ui/overlay/debug_overlay.cpp
+@@ -10,28 +10,93 @@
+  *              See LICENSE file in the project root for full license text.
+  */
+ #include <rex/ui/overlay/debug_overlay.h>
++#include <rex/cvar.h>
++#include <rex/perf/live_stats.h>
++#include <rex/ui/overlay/cvar_groups.h>
+ #include <rex/version.h>
+ #include <imgui.h>
++
++#include <algorithm>
++#include <cctype>
++#include <chrono>
++#include <cstdlib>
++#include <string>
++#include <string_view>
++#include <unordered_map>
++#include <vector>
++
+ #ifdef REXGLUE_ENABLE_PERF_COUNTERS
+ #include <rex/perf/counter.h>
+ #include <cinttypes>
+ #endif
+ 
++#if defined(__APPLE__)
++#include <libproc.h>
++#include <sys/proc_info.h>
++#include <sys/resource.h>
++#include <unistd.h>
++// Not in the public headers (as in tools/mac_thread_cpu.c).
++#ifndef PROC_PIDLISTTHREADIDS
++#define PROC_PIDLISTTHREADIDS 28
++#endif
++#endif
++
++REXCVAR_DEFINE_BOOL(debug_overlay_thread_cpu, true, "UI",
++                    "Debug overlay (F3): show the process's CPU use by thread and its CPU "
++                    "power, sampled once a second while the overlay is open (macOS)")
++    .lifecycle(rex::cvar::Lifecycle::kHotReload);
++
+ namespace rex::ui {
++namespace {
++
++// The overlay's own state. Here rather than in DebugOverlayDialog because the
++// app allocates the dialog (its own rex_app.cpp, built against the SDK's
++// prebuilt headers), so the class must keep its size; there is one overlay at
++// a time.
++struct OverlayState {
++  // CPU use by thread, sampled once a second while the overlay is open
++  // (macOS).
++  struct ThreadCpu {
++    std::string name;
++    float percent = 0.0f;
++  };
++  std::chrono::steady_clock::time_point cpu_sample_time;
++  std::unordered_map<uint64_t, uint64_t> cpu_thread_ns;
++  uint64_t cpu_energy_nj = 0;
++  std::vector<ThreadCpu> cpu_threads;
++  float cpu_total_percent = 0.0f;
++  float cpu_watts = 0.0f;
++  bool cpu_have_sample = false;
++
++  char switch_search[64] = {};
++};
++
++OverlayState& State() {
++  static OverlayState state;
++  return state;
++}
++
++void DrawFrameStats();
++void DrawCpuStats();
++void DrawDebugSwitches(const SettingsStyle& style);
++
++}  // namespace
+ 
+ DebugOverlayDialog::DebugOverlayDialog(ImGuiDrawer* imgui_drawer, FrameStatsProvider stats_provider)
+-    : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {}
++    : ImGuiDialog(imgui_drawer), stats_provider_(std::move(stats_provider)) {
++  // The first CPU sample of this opening starts the interval.
++  State().cpu_have_sample = false;
++  State().cpu_thread_ns.clear();
++  State().cpu_threads.clear();
++  State().cpu_energy_nj = 0;
++}
+ 
+ DebugOverlayDialog::~DebugOverlayDialog() {}
+ 
+ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
+   ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
+-#ifdef REXGLUE_ENABLE_PERF_COUNTERS
+-  ImGui::SetNextWindowSize(ImVec2(280, 280), ImGuiCond_FirstUseEver);
+-#else
+-  ImGui::SetNextWindowSize(ImVec2(220, 60), ImGuiCond_FirstUseEver);
+-#endif
+-  ImGui::SetNextWindowBgAlpha(0.5f);
++  ImGui::SetNextWindowSize(ImVec2(400, 330), ImGuiCond_FirstUseEver);
++  ImGui::SetNextWindowBgAlpha(0.6f);
+   if (ImGui::Begin("Debug##overlay", nullptr, ImGuiWindowFlags_NoCollapse)) {
+     if (stats_provider_) {
+       auto stats = stats_provider_();
+@@ -39,6 +104,8 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
+         ImGui::Text("Guest: %.1f FPS (%.2f ms)", stats.fps, stats.frame_time_ms);
+       }
+     }
++    DrawFrameStats();
++    DrawCpuStats();
+ #ifdef REXGLUE_ENABLE_PERF_COUNTERS
+     ImGui::Separator();
+ 
+@@ -84,6 +151,7 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
+     ImGui::Text("TexCache: %" PRId64 "/%" PRId64 "  PipeCache: %" PRId64 "/%" PRId64, tex_h,
+                 tex_h + tex_m, pip_h, pip_h + pip_m);
+ #endif
++    DrawDebugSwitches(imgui_drawer()->style().settings);
+   }
+   ImGui::End();
+ 
+@@ -105,4 +173,192 @@ void DebugOverlayDialog::OnDraw(ImGuiIO& io) {
+   ImGui::PopStyleColor();
+ }
+ 
++namespace {
++
++// Frame rate, frame times, GPU and command processor time, and the draws,
++// render pass starts and resolves per frame, from the GPU command processor's
++// per-frame samples (rex/perf/live_stats.h).
++void DrawFrameStats() {
++  using rex::perf::live::FrameSample;
++  static FrameSample samples[rex::perf::live::kFrameHistory];
++  const size_t count = rex::perf::live::ReadFrames(samples, rex::perf::live::kFrameHistory);
++  if (!count) {
++    ImGui::TextDisabled("Waiting for the first frames");
++    return;
++  }
++
++  // Averages over the frames of the last second, the maximum over all kept.
++  double window_ms = 0.0, gpu_ms = 0.0, cp_ms = 0.0;
++  double draws = 0.0, pass_starts = 0.0, resolves = 0.0;
++  size_t window_frames = 0;
++  float max_ms = 0.0f;
++  float frame_ms[rex::perf::live::kFrameHistory];
++  for (size_t i = 0; i < count; ++i) {
++    frame_ms[i] = samples[i].frame_ms;
++    max_ms = std::max(max_ms, samples[i].frame_ms);
++  }
++  double kept_ms = 0.0;
++  for (size_t i = count; i-- > 0;) {
++    kept_ms += samples[i].frame_ms;
++    if (window_ms < 1000.0) {
++      const FrameSample& s = samples[i];
++      window_ms += s.frame_ms;
++      gpu_ms += s.gpu_ms;
++      cp_ms += s.command_processor_cpu_ms;
++      draws += s.draws;
++      pass_starts += s.render_pass_starts;
++      resolves += s.resolves;
++      ++window_frames;
++    }
++  }
++  const double n = double(window_frames);
++  ImGui::Text("%.1f fps   %.2f ms/frame   max %.1f ms in %.0f s",
++              window_ms > 0.0 ? 1000.0 * n / window_ms : 0.0, window_ms / n, max_ms,
++              kept_ms / 1000.0);
++  ImGui::PlotLines("##frame_ms", frame_ms, int(count), 0, nullptr, 0.0f, 50.0f,
++                   ImVec2(-1.0f, 40.0f));
++  if (ImGui::IsItemHovered()) {
++    ImGui::SetTooltip("Host time per guest frame, 0-50 ms");
++  }
++  if (gpu_ms > 0.0) {
++    ImGui::Text("GPU %.2f ms/frame, %.0f%% busy", gpu_ms / n, 100.0 * gpu_ms / window_ms);
++  } else {
++    ImGui::TextDisabled("GPU time not measured (vulkan_gpu_time)");
++  }
++  ImGui::Text("Command processor CPU %.2f ms/frame", cp_ms / n);
++  ImGui::Text("Per frame: %.0f draws, %.0f render pass starts, %.0f resolves", draws / n,
++              pass_starts / n, resolves / n);
++}
++
++// The process's CPU use by thread and its CPU power, once a second.
++void DrawCpuStats() {
++#if defined(__APPLE__)
++  OverlayState& st = State();
++  if (!REXCVAR_GET(debug_overlay_thread_cpu)) {
++    return;
++  }
++  auto now = std::chrono::steady_clock::now();
++  if (!st.cpu_have_sample || now - st.cpu_sample_time >= std::chrono::seconds(1)) {
++    const pid_t pid = getpid();
++    const double seconds =
++        st.cpu_have_sample ? std::chrono::duration<double>(now - st.cpu_sample_time).count() : 0.0;
++    std::vector<uint64_t> ids(1024);
++    int id_count = proc_pidinfo(pid, PROC_PIDLISTTHREADIDS, 0, ids.data(),
++                                int(ids.size() * sizeof(uint64_t))) /
++                   int(sizeof(uint64_t));
++    std::unordered_map<uint64_t, uint64_t> thread_ns;
++    std::vector<OverlayState::ThreadCpu> threads;
++    float total = 0.0f;
++    for (int i = 0; i < id_count; ++i) {
++      proc_threadinfo info;
++      if (proc_pidinfo(pid, PROC_PIDTHREADID64INFO, ids[i], &info, sizeof(info)) !=
++          int(sizeof(info))) {
++        continue;
++      }
++      uint64_t ns = info.pth_user_time + info.pth_system_time;
++      thread_ns[ids[i]] = ns;
++      auto it = st.cpu_thread_ns.find(ids[i]);
++      if (seconds > 0.0 && it != st.cpu_thread_ns.end()) {
++        float percent = float(double(ns - it->second) / (seconds * 1e7));
++        total += percent;
++        threads.push_back({info.pth_name[0] ? info.pth_name : "(unnamed)", percent});
++      }
++    }
++    std::sort(threads.begin(), threads.end(),
++              [](const OverlayState::ThreadCpu& a, const OverlayState::ThreadCpu& b) { return a.percent > b.percent; });
++    rusage_info_v6 usage;
++    if (!proc_pid_rusage(pid, RUSAGE_INFO_V6, reinterpret_cast<rusage_info_t*>(&usage))) {
++      if (seconds > 0.0 && st.cpu_energy_nj) {
++        st.cpu_watts = float(double(usage.ri_energy_nj - st.cpu_energy_nj) / (seconds * 1e9));
++      }
++      st.cpu_energy_nj = usage.ri_energy_nj;
++    }
++    if (seconds > 0.0) {
++      st.cpu_threads = std::move(threads);
++      st.cpu_total_percent = total;
++    }
++    st.cpu_thread_ns = std::move(thread_ns);
++    st.cpu_sample_time = now;
++    st.cpu_have_sample = true;
++  }
++  ImGui::Separator();
++  if (st.cpu_threads.empty()) {
++    ImGui::TextDisabled("CPU: sampling");
++    return;
++  }
++  ImGui::Text("CPU %.0f%% of a core, %.2f W", st.cpu_total_percent, st.cpu_watts);
++  for (size_t i = 0; i < std::min(st.cpu_threads.size(), size_t(5)); ++i) {
++    if (st.cpu_threads[i].percent < 2.0f) {
++      break;
++    }
++    ImGui::Text("  %5.1f%%  %s", st.cpu_threads[i].percent, st.cpu_threads[i].name.c_str());
++  }
++#endif
++}
++
++// The measurement and debug switches (IsDiagnosticSetting), by category, and
++// a button for the frame report.
++void DrawDebugSwitches(const SettingsStyle& style) {
++  OverlayState& st = State();
++  ImGui::Separator();
++  if (!ImGui::CollapsingHeader("Debug switches")) {
++    return;
++  }
++  auto& registry = rex::cvar::GetRegistry();
++  for (auto& entry : registry) {
++    if (entry.name == "vulkan_frame_report") {
++      if (ImGui::Button("Frame report")) {
++        // Any change of the value requests a report of the next frame.
++        int32_t value = std::atoi(entry.getter().c_str());
++        rex::cvar::SetFlagByName(entry.name, std::to_string(value + 1));
++      }
++      if (ImGui::IsItemHovered()) {
++        ImGui::SetTooltip("Logs every draw and resolve of the next frame ([frame] lines)");
++      }
++      break;
++    }
++  }
++  ImGui::SetNextItemWidth(-1.0f);
++  ImGui::InputTextWithHint("##switch_search", "Search", st.switch_search, sizeof(st.switch_search));
++  std::string search(st.switch_search);
++  for (auto& c : search) {
++    c = char(std::tolower(static_cast<unsigned char>(c)));
++  }
++
++  std::vector<const rex::cvar::FlagEntry*> entries;
++  for (auto& entry : registry) {
++    if (IsInertSetting(entry) || !IsDiagnosticSetting(entry)) {
++      continue;
++    }
++    if (!search.empty()) {
++      std::string name = entry.name;
++      for (auto& c : name) {
++        c = char(std::tolower(static_cast<unsigned char>(c)));
++      }
++      if (name.find(search) == std::string::npos) {
++        continue;
++      }
++    }
++    entries.push_back(&entry);
++  }
++  std::sort(entries.begin(), entries.end(), [](const auto* a, const auto* b) {
++    return a->category != b->category ? a->category < b->category : a->name < b->name;
++  });
++
++  ImGui::BeginChild("##switches", ImVec2(0, 260.0f), true);
++  const std::string* category = nullptr;
++  for (const rex::cvar::FlagEntry* entry : entries) {
++    if (!category || *category != entry->category) {
++      category = &entry->category;
++      ImGui::TextDisabled("%s", category->c_str());
++    }
++    ImGui::PushID(entry->name.c_str());
++    DrawFlagEditorRow(*entry, style, 260.0f);
++    ImGui::PopID();
++  }
++  ImGui::EndChild();
++}
++
++}  // namespace
++
+ }  // namespace rex::ui
+diff --git a/src/ui/overlay/settings_overlay.cpp b/src/ui/overlay/settings_overlay.cpp
+index 4ede107..24aa9ab 100644
+--- a/src/ui/overlay/settings_overlay.cpp
++++ b/src/ui/overlay/settings_overlay.cpp
+@@ -14,6 +14,7 @@
+ #include <rex/string.h>
+ #include <rex/string/numeric.h>
+ #include <rex/ui/keybinds.h>
++#include <rex/ui/overlay/cvar_groups.h>
+ #include <imgui.h>
+ 
+ #include <algorithm>
+@@ -24,35 +25,17 @@
+ 
+ namespace rex::ui {
+ 
++// "Show developer options": every cvar instead of only the player's settings
++// (IsPlayerSetting). Here rather than in SettingsDialog because the app
++// allocates the dialog (its own rex_app.cpp, built against the SDK's prebuilt
++// headers), so the class must keep its size. Kept between openings.
++static bool g_show_developer_options = false;
++
+ SettingsDialog::SettingsDialog(ImGuiDrawer* imgui_drawer, std::filesystem::path config_path)
+     : ImGuiDialog(imgui_drawer), config_path_(std::move(config_path)) {}
+ 
+ SettingsDialog::~SettingsDialog() {}
+ 
+-static const char* LifecycleBadge(rex::cvar::Lifecycle lc) {
+-  switch (lc) {
+-    case rex::cvar::Lifecycle::kHotReload:
+-      return " [live]";
+-    case rex::cvar::Lifecycle::kRequiresRestart:
+-      return " [restart]";
+-    case rex::cvar::Lifecycle::kInitOnly:
+-      return " [init-only]";
+-  }
+-  return "";
+-}
+-
+-static ImVec4 LifecycleColor(rex::cvar::Lifecycle lc, const SettingsStyle& style) {
+-  switch (lc) {
+-    case rex::cvar::Lifecycle::kHotReload:
+-      return style.lifecycle_live;
+-    case rex::cvar::Lifecycle::kRequiresRestart:
+-      return style.lifecycle_restart;
+-    case rex::cvar::Lifecycle::kInitOnly:
+-      return style.lifecycle_init_only;
+-  }
+-  return style.lifecycle_unknown;
+-}
+-
+ static rex::ui::VirtualKey ImGuiKeyToVirtualKey(ImGuiKey key) {
+   using VK = rex::ui::VirtualKey;
+   if (key >= ImGuiKey_A && key <= ImGuiKey_Z) {
+@@ -159,10 +142,33 @@ static rex::ui::VirtualKey ImGuiKeyToVirtualKey(ImGuiKey key) {
+ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+   auto& registry = rex::cvar::GetRegistry();
+ 
++  // The player's settings, or every cvar with "Show developer options";
++  // never the ones that do nothing on this platform.
++  auto visible = [&](const rex::cvar::FlagEntry& entry) {
++    return !IsInertSetting(entry) && (g_show_developer_options || IsPlayerSetting(entry));
++  };
++
+   // Collect sorted unique category paths.
+   std::set<std::string> category_set;
+   for (auto& entry : registry) {
+-    category_set.insert(entry.category);
++    if (visible(entry)) {
++      category_set.insert(entry.category);
++    }
++  }
++  if (!selected_category_.empty()) {
++    bool selected_visible = false;
++    for (auto& cat : category_set) {
++      if (cat == selected_category_ ||
++          (cat.size() > selected_category_.size() &&
++           cat.compare(0, selected_category_.size(), selected_category_) == 0 &&
++           cat[selected_category_.size()] == '/')) {
++        selected_visible = true;
++        break;
++      }
++    }
++    if (!selected_visible) {
++      selected_category_.clear();
++    }
+   }
+ 
+   // Build tree: for each category path like "Input/Keybinds/Controller",
+@@ -291,6 +297,9 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+ 
+   ImGui::BeginChild("##cvars", ImVec2(0, -30.0f), false);
+   for (auto& entry : registry) {
++    if (!visible(entry)) {
++      continue;
++    }
+     // Filter by category (unless searching).
+     if (!searching) {
+       if (!category_matches(entry.category)) {
+@@ -406,95 +415,12 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+         ImGui::EndDisabled();
+       ImGui::PopID();
+       continue;
+-    } else {
+-      // Non-keybind CVARs: colored label on left, value widget on right
+-      ImGui::TextColored(LifecycleColor(entry.lifecycle, imgui_drawer()->style().settings), "%-20s",
+-                         entry.name.c_str());
+-      if (ImGui::IsItemHovered()) {
+-        const char* lifecycle_label = "";
+-        switch (entry.lifecycle) {
+-          case rex::cvar::Lifecycle::kHotReload:
+-            lifecycle_label = "Live - changes apply immediately";
+-            break;
+-          case rex::cvar::Lifecycle::kRequiresRestart:
+-            lifecycle_label = "Requires restart to take effect";
+-            break;
+-          case rex::cvar::Lifecycle::kInitOnly:
+-            lifecycle_label = "Read-only - set at initialization only";
+-            break;
+-        }
+-        if (!entry.description.empty()) {
+-          ImGui::SetTooltip("%s\n[%s]", entry.description.c_str(), lifecycle_label);
+-        } else {
+-          ImGui::SetTooltip("[%s]", lifecycle_label);
+-        }
+-      }
+-      ImGui::SameLine(240.0f);
+-
+-      ImGui::SetNextItemWidth(160.0f);
+-      if (entry.type == rex::cvar::FlagType::Boolean) {
+-        bool v = rex::string::from_string<bool>(current_val, false);
+-        if (ImGui::Checkbox("##v", &v)) {
+-          rex::cvar::SetFlagByName(entry.name, v ? "true" : "false");
+-        }
+-      } else if (entry.type == rex::cvar::FlagType::String &&
+-                 !entry.constraints.allowed_values.empty()) {
+-        const auto& opts = entry.constraints.allowed_values;
+-        int cur_idx = 0;
+-        for (int i = 0; i < static_cast<int>(opts.size()); ++i) {
+-          if (opts[i] == current_val) {
+-            cur_idx = i;
+-            break;
+-          }
+-        }
+-        if (ImGui::BeginCombo("##v", opts[cur_idx].c_str())) {
+-          for (int i = 0; i < static_cast<int>(opts.size()); ++i) {
+-            bool sel = (i == cur_idx);
+-            if (ImGui::Selectable(opts[i].c_str(), sel)) {
+-              rex::cvar::SetFlagByName(entry.name, opts[i]);
+-            }
+-            if (sel)
+-              ImGui::SetItemDefaultFocus();
+-          }
+-          ImGui::EndCombo();
+-        }
+-      } else if (entry.type == rex::cvar::FlagType::Int32 ||
+-                 entry.type == rex::cvar::FlagType::Int64 ||
+-                 entry.type == rex::cvar::FlagType::Uint32 ||
+-                 entry.type == rex::cvar::FlagType::Uint64) {
+-        int v = std::atoi(current_val.c_str());
+-        int vmin =
+-            entry.constraints.min.has_value() ? static_cast<int>(*entry.constraints.min) : INT_MIN;
+-        int vmax =
+-            entry.constraints.max.has_value() ? static_cast<int>(*entry.constraints.max) : INT_MAX;
+-        if (ImGui::InputInt("##v", &v)) {
+-          v = std::clamp(v, vmin, vmax);
+-          rex::cvar::SetFlagByName(entry.name, std::to_string(v));
+-        }
+-      } else if (entry.type == rex::cvar::FlagType::Double) {
+-        double v = std::atof(current_val.c_str());
+-        if (ImGui::InputDouble("##v", &v, 0.0, 0.0, "%.4f")) {
+-          if (entry.constraints.min)
+-            v = std::max(v, *entry.constraints.min);
+-          if (entry.constraints.max)
+-            v = std::min(v, *entry.constraints.max);
+-          rex::cvar::SetFlagByName(entry.name, std::to_string(v));
+-        }
+-      } else if (entry.type == rex::cvar::FlagType::Command) {
+-        if (ImGui::Button(std::string(entry.name + "##v").c_str())) {
+-          entry.command_callback("");
+-        }
+-      } else {
+-        char buf[256];
+-        rex::string::copy_truncating(buf, current_val, sizeof(buf));
+-        if (ImGui::InputText("##v", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+-          rex::cvar::SetFlagByName(entry.name, buf);
+-        }
+-      }
+     }
+ 
++    // Non-keybind CVARs: colored label on left, value widget on right.
+     if (read_only)
+       ImGui::EndDisabled();
++    DrawFlagEditorRow(entry, imgui_drawer()->style().settings);
+ 
+     ImGui::PopID();
+   }
+@@ -507,6 +433,13 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+   }
+   ImGui::SameLine();
+   ImGui::TextDisabled("(%s)", config_path_.filename().string().c_str());
++  ImGui::SameLine();
++  ImGui::Checkbox("Show developer options", &g_show_developer_options);
++  if (ImGui::IsItemHovered()) {
++    ImGui::SetTooltip(
++        "Every setting, not only the player's. The measurement and debug switches are also "
++        "in the debug overlay (F3).");
++  }
+ 
+   ImGui::End();
+ }
 diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
 index b94fe9e..8e96094 100644
 --- a/src/ui/rex_app.cpp

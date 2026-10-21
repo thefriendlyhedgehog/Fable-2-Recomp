@@ -2004,6 +2004,67 @@ GPU at 100% with a low frame rate after the fix. Things known to cost:
   Without dynamic rendering every sample-count change and every barrier
   restarts the Metal render encoder; the `FSI stats` line shows how often.
 
+## In-game overlays: F3 debug, F4 settings
+
+Until 2026-10-21, F3 opened an empty box in the Release build. The SDK's debug
+overlay showed only the perf counters, which are compiled only into
+non-Release builds (`REXGLUE_ENABLE_PERF_COUNTERS`), and a "Guest FPS" line
+from a frame-time counter no code ever set. F4 listed all of the roughly 290
+cvars: about 65 measurement and debug switches, the D3D12 settings that do
+nothing on the Mac, and the codegen limits, which only matter when the code
+is generated.
+
+**F3, the debug overlay** (`src/ui/overlay/debug_overlay.cpp`):
+
+- The frame lines come from `rex/perf/live_stats.h`. The Vulkan command
+  processor pushes one sample per guest frame: host frame time, GPU time
+  (`vulkan_gpu_time`), its own CPU time, draws, render pass starts and
+  resolves. The samples are differences of the statistics counters the
+  300-frame log lines use. The block lives in rexruntime, which the GPU
+  plugin links. It costs a mutex and a `clock_gettime` per frame, in every
+  build.
+- The overlay shows averages over the last second: the frame rate, a graph
+  of the last 240 frame times, and the GPU and command processor milliseconds
+  per frame.
+- On macOS it also shows the process's CPU use by thread and its CPU power,
+  read once a second with `proc_pidinfo` and `proc_pid_rusage` (as
+  `tools/mac_thread_cpu.c` does), only while it is open.
+- "Debug switches" (collapsed) lists every measurement and debug cvar by
+  category, with a search field and a frame report button.
+- The app frees the cursor while it is open, as it does for F4
+  (`src/input/keyboard_gamepad.h`, reading the `bind_debug_overlay` key).
+
+**F4, the settings overlay** (`src/ui/overlay/settings_overlay.cpp`) shows
+the player's settings:
+
+- the Audio, Display, Input (key binds included), UI/Window, UI/Presenter
+  and Launch categories;
+- `resolution_scale`, `draw_resolution_scale_x/y`, `anisotropic_override`,
+  `vsync` and `async_shader_compilation`.
+
+"Show developer options" lists everything else.
+
+**The rules** are in `src/ui/overlay/cvar_groups.cpp`:
+
+- `IsDiagnosticSetting`: `.debug_only()`, the Debug category, or a name
+  containing `debug`, `_log`, `dump`, `frame_report`, `gpu_time`,
+  `stats_frames`, `wireframe`, `verbose`, `validation` or `frame_timing`;
+- `IsInertSetting`: the Codegen category, and D3D12 outside Windows.
+
+A new diagnostic cvar lands in F3 by its name; a new player setting needs
+its category or name added to `IsPlayerSetting`.
+
+**The overlay classes keep their size.** The game allocates the dialogs
+itself: its own `rex_app.cpp` is compiled against the SDK's prebuilt headers.
+The first version appended members to `DebugOverlayDialog` and
+`SettingsDialog`, and the SDK's constructor then wrote past the game's
+smaller allocation. Opening F3 corrupted the heap, and other threads crashed
+at random: MoltenVK's descriptor update, the audio worker, and the malloc
+free-list checks (2 to 3 crashes in 15 openings). The overlay state now lives
+in the `.cpp` files. The same fix applied to an older change:
+`AchievementToastDialog`'s `registered_` flag, which overflowed by a byte,
+is now a set of unregistered dialogs in `achievement_toast.cpp`.
+
 ## Renderer review: Vulkan on MoltenVK vs. a native Metal backend
 
 Reviewed against the v0.10.0 SDK source, the M4's reported device features
