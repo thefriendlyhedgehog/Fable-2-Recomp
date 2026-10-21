@@ -1637,9 +1637,18 @@ and a local is invisible to every other function:
   `FABLE2_HOTFUNC_OVERRIDES=OFF`).
 - **Indirect jumps** (`bctr` without a switch table, 715 sites) copy every
   local into ctx around the jump, in case the target is a fragment.
-- **setjmp.** The 21 functions that call it copy their locals into `env`
-  before `setjmp` and back on the longjmp path, as `ctx = env` does for the
-  rest.
+- **setjmp.** The 21 functions that call it copy their locals into
+  `env_locals` before `setjmp` and back on the longjmp path, while
+  `ctx = env` gives ctx back the values it had at `setjmp`. The locals first
+  went into `env` itself, so a longjmp put the setjmp function's own
+  registers into ctx, where its caller's belong: the function never wrote
+  them there, and on the console its epilogue would have restored them from
+  the stack. A caller that keeps a register in ctx then got it back
+  clobbered. `ProcessGameFrame_82276C30` (a hand-written override, r31 in
+  ctx) came back from `ProcessAndSetjmpAndProcess_82277AF8` with r31 = 0,
+  that function's local before it loads it, and stored through it: a crash
+  on pressing Start in gameplay (`fable_2_622`, 2026-10-21, a guest write
+  to 0xD8).
 - **Save/restore helpers.** Generated code drops calls to `__savegprlr_N`
   and the others (a function holding locals has nothing to save; a save
   and its restore can sit in different functions: an owner's prologue and a

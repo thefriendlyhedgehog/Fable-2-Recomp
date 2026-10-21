@@ -2045,6 +2045,15 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- **2026-10-21: crash on pressing Start in gameplay** (`fable_2_622`: guest
+  write to 0xD8 in `ProcessGameFrame_82276C30`, r31 = 0). A longjmp into a
+  setjmp function left that function's local registers in ctx
+  (`docs/macos_port.md`, "CPU: guest registers in C++ locals", setjmp);
+  the codegen now keeps them in `env_locals`. Needs `tools/build_sdk_mac.sh
+  -codegen` (21 files regenerate). Not reproduced on demand: Start
+  presses in capped runs didn't crash before the fix (`fable_2_623`) or
+  after it (`fable_2_624`), so they never reached the longjmp.
+
 - Adaptive quad patches drawn as triangle lists like the continuous ones
   (`vulkan_adaptive_quad_patches_in_vs`): no MoltenVK tessellation left at
   the trail, +16% fps.

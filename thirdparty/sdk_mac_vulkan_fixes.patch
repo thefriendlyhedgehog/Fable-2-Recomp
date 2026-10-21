@@ -3482,7 +3482,7 @@ index 5da54a0..99feea5 100644
              hasBool("generate_exception_handlers"), "generate_exception_handlers");
    if (hasBool("is_dll")) {
 diff --git a/src/codegen/function_graph.cpp b/src/codegen/function_graph.cpp
-index fc918bb..52cfe27 100644
+index fc918bb..ff5008e 100644
 --- a/src/codegen/function_graph.cpp
 +++ b/src/codegen/function_graph.cpp
 @@ -15,7 +15,11 @@
@@ -3760,7 +3760,7 @@ index fc918bb..52cfe27 100644
  }  // namespace
  
  std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
-@@ -637,32 +897,125 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
+@@ -637,36 +897,140 @@ std::string FunctionNode::emitCpp(const EmitContext& ctx) const {
      emit_println(body, "}}\n");
    }
  
@@ -3780,9 +3780,10 @@ index fc918bb..52cfe27 100644
 +    use.sharesRegisters = sharesRegisters();
 +  }
 +
-+  // --- Expand the markers: copy every local register into env before setjmp
-+  // and back on the longjmp path (as ctx = env does for the rest), and into
++  // --- Expand the markers: copy every local register into env_locals before
++  // setjmp and back on the longjmp path (ctx = env restores the rest), and into
 +  // ctx around an indirect jump ---
++  bool envLocals = false;
 +  {
 +    std::vector<std::string> names;
 +    if (localVariables.ctr)
@@ -3804,11 +3805,19 @@ index fc918bb..52cfe27 100644
 +      if (localVariables.v[i])
 +        names.push_back(fmt::format("v{}", i));
 +
++    // The locals go into their own context, not into env: ctx = env must give
++    // ctx back the values it had at setjmp, which for a register held in a
++    // local are the caller's (the function never wrote them to ctx). With the
++    // local in env, a longjmp left the setjmp function's own register in ctx,
++    // and a caller that keeps that register in ctx (a hand-written override,
++    // which does for r31) got it back clobbered: ProcessGameFrame_82276C30
++    // stored through r31 = 0.
 +    std::string save, restore, toContext, fromContext;
 +    for (const auto& name : names) {
-+      save += fmt::format("\tenv.{0} = {0};\n", name);
-+      restore += fmt::format("\t\t{0} = env.{0};\n", name);
++      save += fmt::format("\tenv_locals.{0} = {0};\n", name);
++      restore += fmt::format("\t\t{0} = env_locals.{0};\n", name);
 +    }
++    envLocals = !names.empty() && body.find(kSetjmpSaveLocalsMarker) != std::string::npos;
 +    if (!names.empty()) {
 +      toContext = "\t{\n";
 +      for (const auto& name : names) {
@@ -3893,6 +3902,12 @@ index fc918bb..52cfe27 100644
    }
  
    if (localVariables.env)
+     emit_println(out, "\tPPCContext env{{}};");
++  if (localVariables.env && envLocals)
++    emit_println(out, "\tPPCContext env_locals{{}};");
+   if (localVariables.temp)
+     emit_println(out, "\tPPCRegister temp{{}};");
+   if (localVariables.v_temp)
 diff --git a/src/codegen/phase_register.cpp b/src/codegen/phase_register.cpp
 index 7d1fa44..5cb7f21 100644
 --- a/src/codegen/phase_register.cpp
