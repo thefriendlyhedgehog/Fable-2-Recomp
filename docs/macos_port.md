@@ -2095,7 +2095,17 @@ d-pad on F1-F4 also pressed d-pad Left with F3. Now:
   The command file's `key` command toggles them the same way.
 - While a bit is set, the guest gets no mapped keys, mouse buttons, mouse
   look or debug hotkeys, and the cursor is free. The SDL gamepad is not
-  touched (the SDK itself pauses it while the mouse is over an overlay).
+  touched.
+- The SDK paused every input driver while an overlay was open and the mouse
+  was over one of its windows (`ReXApp::ConstructRuntime`'s active
+  callback, which also read ImGui's state from the input thread). ImGui
+  doesn't use the gamepad, so that only made a controller go dead under a
+  resting pointer, for example with F3 left open while playing.
+  `Fable2App::OnPostLoadXexImage` removes the callback.
+- With mouse look off (a controller player), the free cursor is
+  `kAutoHidden` while no overlay is open: the SDL window shows it on mouse
+  motion and hides it again after a delay. With an overlay open it stays
+  visible.
 - The overlay keys never act as gamepad buttons.
 - `mouse_unlock_key` (a separate "F4" that didn't follow a rebound
   `bind_settings`) is gone. The mip hotkey is only the digit 7, since F7 is
@@ -2103,6 +2113,27 @@ d-pad on F1-F4 also pressed d-pad Left with F3. Now:
 - Mouse buttons in `keyboard_gamepad_map` (`LMB`, `RMB`, `MMB`, `XMB1`,
   `XMB2`) work on the Mac: the driver records the window's mouse button
   events as held keys. Before, only Windows read them (`GetAsyncKeyState`).
+
+**"Save to config" writes only the user's settings.** `rex::cvar::SaveConfig`
+wrote every cvar not at its default: command-line flags, `REX_*`
+environment defaults, values the app seeds (the macOS GPU defaults, the
+`[input]` settings from `fable2_config.toml`, the dog fur depth bias). One
+save froze all of them into `fable_2.toml`, which outranks
+`fable2_config.toml`; a test's `audio_mute`, `headless` and `game_data_root`
+ended up there that way. Now it keeps what the file sets (parsed, nested
+tables flattened as the loader does) and applies the flags changed through
+`rex::cvar::SetFlagFromUser`, which the settings overlay (editor rows, key
+rebinding and reset) and the console's `set` use; one set back to its
+default is dropped. Debug overlay (F3) switches use plain `SetFlagByName`
+and last for the session. Strings are now escaped. Checked with a test
+program against the built runtime (file values and tables kept, command-line
+and code values left out, a user string with quotes and a backslash round
+trips, a reset flag removed).
+
+**F4 hides the SDK's keyboard/mouse emulation** (`mnk_mode`, `mnk_mouse`,
+`mnk_sensitivity`, the `Input/Keybinds/Controller` keys) and `input_backend`
+from the player view: Fable II uses its own `keyboard_gamepad_map`, and with
+`mnk_mode` on both would drive the pad. "Show developer options" lists them.
 
 Test commands (command file, for `tools/mac_autotest.sh`): `keydown <key>`
 / `keyup <key>` and `mousedown <LMB|RMB|MMB>` / `mouseup ...` send events

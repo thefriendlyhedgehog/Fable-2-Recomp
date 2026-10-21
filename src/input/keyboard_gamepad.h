@@ -42,8 +42,10 @@
 // achievements; their keys are the bind_* cvars) take the keyboard and mouse
 // while one is open: the driver then sends the guest no keys, mouse buttons,
 // debug hotkeys or mouse look, and frees the cursor. A real gamepad keeps
-// working (the SDK pauses it only while the mouse is over an overlay). The
-// overlay keys never act as gamepad buttons, even when the map lists them.
+// working (Fable2App drops the SDK's pause of all input while the mouse is
+// over an overlay). The overlay keys never act as gamepad buttons, even when
+// the map lists them. With mouse look off, the free cursor hides while the
+// mouse rests over the game.
 
 #pragma once
 
@@ -387,7 +389,9 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // Withdraw the request too, so the next poll that wants the mouse queues
     // a new capture once focus is back.
     ui_->capture_requested.store(false, std::memory_order_relaxed);
+    ui_->auto_hide_requested.store(false, std::memory_order_relaxed);
     ReleaseMouseCapture(*ui_);
+    ApplyFreeCursor(*ui_);
   }
 #endif
 
@@ -642,7 +646,9 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     // refused, recenters the cursor), and motion events accumulate deltas
     // between polls (OnMouseMove).
     bool looking = focused && REXCVAR_GET(mouse_look) && !overlay_open;
-    RequestMouseCapture(looking);
+    // Without mouse look (playing with a controller) the cursor stays free;
+    // it hides while it rests over the game and shows when the mouse moves.
+    RequestCursor(looking, focused && !looking && !overlay_open);
 
     // Consume whole pixels and keep the fraction for the next poll: macOS
     // trackpads and high-DPI mice report sub-pixel deltas, which truncating
@@ -971,6 +977,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     int32_t prev_mouse_y = 0;
     // Any thread.
     std::atomic<bool> capture_requested{false};
+    std::atomic<bool> auto_hide_requested{false};  // free cursor hides at rest
     std::atomic<bool> capture_update_queued{false};
     std::mutex mouse_mutex;  // guards the deltas
     float mouse_dx = 0.0f;
@@ -1040,6 +1047,8 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       UiState& ui = *ui_;
       if (ui.ui_window == window) {
         ReleaseMouseCapture(ui);
+        ui.auto_hide_requested.store(false, std::memory_order_relaxed);
+        ApplyFreeCursor(ui);
         ui.ui_window = nullptr;
       }
       window->RemoveInputListener(this);
@@ -1055,9 +1064,15 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
 
   // Cursor visibility and the pointer lock are window (Cocoa/X11/SDL) calls,
   // so they run on the UI thread; the guest thread only forwards changes of
-  // the request, coalesced into one queued update.
-  void RequestMouseCapture(bool capture) {
-    if (ui_->capture_requested.exchange(capture, std::memory_order_relaxed) == capture) return;
+  // the request, coalesced into one queued update. capture: mouse look
+  // (cursor hidden, pointer locked); auto_hide: a free cursor that hides
+  // while the mouse rests; neither: a visible cursor (an overlay is open).
+  void RequestCursor(bool capture, bool auto_hide) {
+    bool changed =
+        ui_->capture_requested.exchange(capture, std::memory_order_relaxed) != capture;
+    changed |=
+        ui_->auto_hide_requested.exchange(auto_hide, std::memory_order_relaxed) != auto_hide;
+    if (!changed) return;
     rex::ui::WindowedAppContext* ctx = ui_context_.load(std::memory_order_acquire);
     if (!ctx) return;
     bool already_queued = false;
@@ -1066,9 +1081,20 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
     if (!ctx->CallInUIThreadDeferred([ui] {
           ui->capture_update_queued.store(false, std::memory_order_relaxed);
           ApplyMouseCapture(*ui);
+          ApplyFreeCursor(*ui);
         })) {
       ui_->capture_update_queued.store(false, std::memory_order_relaxed);
     }
+  }
+  // The free cursor (not captured): auto-hidden (the SDL window shows it on
+  // mouse motion and hides it again after a delay) or always visible.
+  static void ApplyFreeCursor(UiState& ui) {
+    rex::ui::Window* window = ui.ui_window;
+    if (!window || ui.captured) return;
+    auto want = ui.auto_hide_requested.load(std::memory_order_relaxed)
+                    ? rex::ui::Window::CursorVisibility::kAutoHidden
+                    : rex::ui::Window::CursorVisibility::kVisible;
+    if (window->GetCursorVisibility() != want) window->SetCursorVisibility(want);
   }
   static void ApplyMouseCapture(UiState& ui) {
     rex::ui::Window* window = ui.ui_window;

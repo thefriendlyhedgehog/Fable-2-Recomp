@@ -31,7 +31,11 @@ single lever left at the cap; performance work is parked.
 - Backtick: the console.
 - While any overlay (also F7, achievements) is open, the keyboard, mouse
   buttons, mouse look and debug hotkeys reach only the overlay and the
-  cursor is free; a gamepad keeps working. Mouse buttons in the key map work
+  cursor is free; a gamepad keeps working, also with the mouse over an
+  overlay. With mouse look off the cursor hides at rest.
+- "Save to config" (F4) writes the file's own settings plus what was changed
+  in F4 or the console, never command-line, environment or app-seeded
+  values. Mouse buttons in the key map work
   on the Mac since 2026-10-21 (`docs/macos_port.md`, "Keyboard and mouse
   while an overlay is open").
 

@@ -59,6 +59,31 @@ index 8c6772d..facfc91 100644
    void reference(std::string_view name) const {
      if (referenced)
        referenced->emplace(name);
+diff --git a/include/rex/cvar.h b/include/rex/cvar.h
+index fe94186..aa00f7d 100644
+--- a/include/rex/cvar.h
++++ b/include/rex/cvar.h
+@@ -124,6 +124,9 @@ void LoadConfig(const std::filesystem::path& config_path);
+ void ApplyEnvironment();
+ void FinalizeInit();
+ bool IsFinalized();
++// Writes the config file's own settings plus the flags changed with
++// SetFlagFromUser this session (one at its default is dropped). Values from
++// the command line, the environment or code are not written.
+ void SaveConfig(const std::filesystem::path& config_path);
+ 
+ //=============================================================================
+@@ -191,6 +194,10 @@ void UnregisterFlag(std::string_view name);
+ 
+ bool SetFlagByName(std::string_view name, std::string_view value);
+ 
++// SetFlagByName for a change the user made (settings overlay, console): the
++// flag is also one SaveConfig writes.
++bool SetFlagFromUser(std::string_view name, std::string_view value);
++
+ // Applies a value parsed off the command line. Returns false only when the
+ // value is rejected (unparseable, or outside the flag's constraints); a value
+ // skipped because a higher-priority source already won returns true.
 diff --git a/include/rex/exception_handler.h b/include/rex/exception_handler.h
 index bcd00bf..13c5f8a 100644
 --- a/include/rex/exception_handler.h
@@ -2108,10 +2133,10 @@ index 7642601..3f70a2a 100644
   protected:
 diff --git a/include/rex/ui/overlay/cvar_groups.h b/include/rex/ui/overlay/cvar_groups.h
 new file mode 100644
-index 0000000..3c8469b
+index 0000000..8fa413c
 --- /dev/null
 +++ b/include/rex/ui/overlay/cvar_groups.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,38 @@
 +/**
 + * @file        ui/overlay/cvar_groups.h
 + *
@@ -2143,9 +2168,11 @@ index 0000000..3c8469b
 +
 +// One editor row for a cvar that isn't a key bind: its name (colored by
 +// lifecycle, with the description as a tooltip) and a widget for its value
-+// at value_column.
++// at value_column. With remember, a change is one "Save to config" writes
++// (the settings overlay); without, it lasts for the session (the debug
++// overlay's switches).
 +void DrawFlagEditorRow(const rex::cvar::FlagEntry& entry, const SettingsStyle& style,
-+                       float value_column = 240.0f);
++                       float value_column = 240.0f, bool remember = true);
 +
 +}  // namespace rex::ui
 diff --git a/include/rex/ui/presentation_display.h b/include/rex/ui/presentation_display.h
@@ -3961,6 +3988,137 @@ index ae72b7a..dd3f4a5 100644
      last_guest_tick_count_ += guest_tick_delta;
      return last_guest_tick_count_;
    } else {
+diff --git a/src/core/cvar.cpp b/src/core/cvar.cpp
+index 228728d..75cb472 100644
+--- a/src/core/cvar.cpp
++++ b/src/core/cvar.cpp
+@@ -12,6 +12,7 @@
+ #include <charconv>
+ #include <filesystem>
+ #include <fstream>
++#include <functional>
+ #include <mutex>
+ #include <optional>
+ #include <string_view>
+@@ -67,6 +68,28 @@ std::unordered_map<std::string, PendingValues>& GetPendingValuesStorage() {
+   return pending;
+ }
+ 
++// Flags the user changed this session (SetFlagFromUser): what SaveConfig
++// writes on top of the config file. Guarded by the registry mutex.
++std::vector<std::string>& GetUserChangedStorage() {
++  static std::vector<std::string> names;
++  return names;
++}
++
++// A TOML value for a flag's string value.
++std::string TomlValue(FlagType type, std::string_view value) {
++  if (type != FlagType::String) {
++    return std::string(value);
++  }
++  std::string quoted = "\"";
++  for (char c : value) {
++    if (c == '"' || c == '\\') {
++      quoted += '\\';
++    }
++    quoted += c;
++  }
++  return quoted + '"';
++}
++
+ // Convert flag name to environment variable: gpu_vsync -> REX_GPU_VSYNC
+ std::string FlagNameToEnvVar(std::string_view name) {
+   std::string result = "REX_";
+@@ -343,6 +366,18 @@ bool SetFlagByName(std::string_view name, std::string_view value) {
+   return SetFlagFromSource(name, value, Source::kRuntime) == ApplyResult::kApplied;
+ }
+ 
++bool SetFlagFromUser(std::string_view name, std::string_view value) {
++  if (!SetFlagByName(name, value)) {
++    return false;
++  }
++  std::lock_guard lock(GetRegistryMutex());
++  auto& names = GetUserChangedStorage();
++  if (std::find(names.begin(), names.end(), name) == names.end()) {
++    names.emplace_back(name);
++  }
++  return true;
++}
++
+ bool SetFlagFromCommandLine(std::string_view name, std::string_view value) {
+   return SetFlagFromSource(name, value, Source::kCommandLine) != ApplyResult::kRejected;
+ }
+@@ -691,10 +726,66 @@ bool IsFinalized() {
+ }
+ 
+ void SaveConfig(const std::filesystem::path& config_path) {
+-  std::string content = SerializeToTOML();
+-  if (content.empty()) {
+-    REXLOG_DEBUG("SaveConfig: no modified flags to save");
+-    return;
++  // Start from what the file sets, so values that only came from the command
++  // line, the environment or code (the app's own defaults, a test's flags)
++  // never end up in it, then apply what the user changed.
++  std::vector<std::pair<std::string, std::string>> lines;
++  std::error_code ec;
++  if (std::filesystem::exists(config_path, ec)) {
++    try {
++      auto existing = toml::parse_file(config_path.string());
++      // The same flattening as ApplyTomlTable: [a] b = 1 is the flag a_b.
++      std::function<void(const toml::table&, const std::string&)> collect =
++          [&](const toml::table& table, const std::string& prefix) {
++            for (const auto& [key, value] : table) {
++              std::string full_key =
++                  prefix.empty() ? std::string(key) : prefix + "_" + std::string(key);
++              if (value.is_table()) {
++                collect(*value.as_table(), full_key);
++              } else if (value.is_boolean()) {
++                lines.emplace_back(full_key, value.as_boolean()->get() ? "true" : "false");
++              } else if (value.is_integer()) {
++                lines.emplace_back(full_key, std::to_string(value.as_integer()->get()));
++              } else if (value.is_floating_point()) {
++                lines.emplace_back(full_key, std::to_string(value.as_floating_point()->get()));
++              } else if (value.is_string()) {
++                lines.emplace_back(full_key,
++                                   TomlValue(FlagType::String, value.as_string()->get()));
++              }
++            }
++          };
++      collect(existing, "");
++    } catch (const toml::parse_error& err) {
++      REXLOG_ERROR("SaveConfig: {} does not parse ({}); not overwriting it", config_path.string(),
++                   err.what());
++      return;
++    }
++  }
++  {
++    std::lock_guard lock(GetRegistryMutex());
++    for (const std::string& name : GetUserChangedStorage()) {
++      auto it = GetRegistryIndex().find(name);
++      if (it == GetRegistryIndex().end()) {
++        continue;
++      }
++      const FlagEntry& entry = GetRegistryStorage()[it->second];
++      std::string value = entry.getter();
++      auto line = std::find_if(lines.begin(), lines.end(),
++                               [&](const auto& l) { return l.first == name; });
++      if (value == entry.default_value) {
++        if (line != lines.end()) {
++          lines.erase(line);
++        }
++      } else if (line != lines.end()) {
++        line->second = TomlValue(entry.type, value);
++      } else {
++        lines.emplace_back(name, TomlValue(entry.type, value));
++      }
++    }
++  }
++  std::string content;
++  for (const auto& [name, value] : lines) {
++    content += name + " = " + value + "\n";
+   }
+ 
+   try {
 diff --git a/src/core/exception_handler_posix.cpp b/src/core/exception_handler_posix.cpp
 index 8b1c76a..32400f0 100644
 --- a/src/core/exception_handler_posix.cpp
@@ -32199,12 +32357,25 @@ index 53b8c0b..5feb4d3 100644
        return;
      }
      toast = queue_.front();
+diff --git a/src/ui/overlay/console_overlay.cpp b/src/ui/overlay/console_overlay.cpp
+index d70c1a1..acd2a84 100644
+--- a/src/ui/overlay/console_overlay.cpp
++++ b/src/ui/overlay/console_overlay.cpp
+@@ -218,7 +218,7 @@ void ConsoleDialog::ExecuteCommand(std::string_view cmd) {
+   }
+ 
+   // Has args, non-command: set.
+-  if (rex::cvar::SetFlagByName(name, args)) {
++  if (rex::cvar::SetFlagFromUser(name, args)) {
+     AddLocal(spdlog::level::info, "[console] " + name + " = " + args);
+   } else {
+     AddLocal(spdlog::level::warn, "[console] unknown cvar: " + name);
 diff --git a/src/ui/overlay/cvar_groups.cpp b/src/ui/overlay/cvar_groups.cpp
 new file mode 100644
-index 0000000..3f21140
+index 0000000..f1fd181
 --- /dev/null
 +++ b/src/ui/overlay/cvar_groups.cpp
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,222 @@
 +/**
 + * @file        ui/overlay/cvar_groups.cpp
 + *
@@ -32292,10 +32463,16 @@ index 0000000..3f21140
 +  // Internals in the player's categories.
 +  static constexpr std::string_view kInternals[] = {
 +      "host_present_from_non_ui_thread", "present_render_pass_clear", "audio_maxqframes",
-+      "video_driver",
++      "video_driver", "input_backend",
 +  };
 +  if (std::find(std::begin(kInternals), std::end(kInternals), std::string_view(entry.name)) !=
 +      std::end(kInternals)) {
++    return false;
++  }
++  // The SDK's own keyboard/mouse controller emulation (mnk_mode and its
++  // keybind_* keys). Games with their own keyboard map (Fable II's
++  // keyboard_gamepad_map) leave it off; on, both would drive the pad.
++  if (StartsWith(entry.name, "mnk_") || InCategory(entry.category, "Input/Keybinds/Controller")) {
 +    return false;
 +  }
 +  static constexpr std::string_view kCategories[] = {
@@ -32315,7 +32492,14 @@ index 0000000..3f21140
 +}
 +
 +void DrawFlagEditorRow(const rex::cvar::FlagEntry& entry, const SettingsStyle& style,
-+                       float value_column) {
++                       float value_column, bool remember) {
++  const auto set = [&](std::string_view value) {
++    if (remember) {
++      rex::cvar::SetFlagFromUser(entry.name, value);
++    } else {
++      rex::cvar::SetFlagByName(entry.name, value);
++    }
++  };
 +  const bool read_only = entry.lifecycle == rex::cvar::Lifecycle::kInitOnly;
 +  if (read_only) {
 +    ImGui::BeginDisabled();
@@ -32348,7 +32532,7 @@ index 0000000..3f21140
 +  if (entry.type == rex::cvar::FlagType::Boolean) {
 +    bool v = rex::string::from_string<bool>(current_val, false);
 +    if (ImGui::Checkbox("##v", &v)) {
-+      rex::cvar::SetFlagByName(entry.name, v ? "true" : "false");
++      set(v ? "true" : "false");
 +    }
 +  } else if (entry.type == rex::cvar::FlagType::String &&
 +             !entry.constraints.allowed_values.empty()) {
@@ -32364,7 +32548,7 @@ index 0000000..3f21140
 +      for (int i = 0; i < static_cast<int>(opts.size()); ++i) {
 +        bool sel = (i == cur_idx);
 +        if (ImGui::Selectable(opts[i].c_str(), sel)) {
-+          rex::cvar::SetFlagByName(entry.name, opts[i]);
++          set(opts[i]);
 +        }
 +        if (sel) {
 +          ImGui::SetItemDefaultFocus();
@@ -32383,7 +32567,7 @@ index 0000000..3f21140
 +        entry.constraints.max.has_value() ? static_cast<int>(*entry.constraints.max) : INT_MAX;
 +    if (ImGui::InputInt("##v", &v)) {
 +      v = std::clamp(v, vmin, vmax);
-+      rex::cvar::SetFlagByName(entry.name, std::to_string(v));
++      set(std::to_string(v));
 +    }
 +  } else if (entry.type == rex::cvar::FlagType::Double) {
 +    double v = std::atof(current_val.c_str());
@@ -32394,7 +32578,7 @@ index 0000000..3f21140
 +      if (entry.constraints.max) {
 +        v = std::min(v, *entry.constraints.max);
 +      }
-+      rex::cvar::SetFlagByName(entry.name, std::to_string(v));
++      set(std::to_string(v));
 +    }
 +  } else if (entry.type == rex::cvar::FlagType::Command) {
 +    if (ImGui::Button(std::string(entry.name + "##v").c_str())) {
@@ -32404,7 +32588,7 @@ index 0000000..3f21140
 +    char buf[256];
 +    rex::string::copy_truncating(buf, current_val, sizeof(buf));
 +    if (ImGui::InputText("##v", buf, sizeof(buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-+      rex::cvar::SetFlagByName(entry.name, buf);
++      set(buf);
 +    }
 +  }
 +
@@ -32415,7 +32599,7 @@ index 0000000..3f21140
 +
 +}  // namespace rex::ui
 diff --git a/src/ui/overlay/debug_overlay.cpp b/src/ui/overlay/debug_overlay.cpp
-index 43d6c06..a78e13a 100644
+index 43d6c06..5ab6e25 100644
 --- a/src/ui/overlay/debug_overlay.cpp
 +++ b/src/ui/overlay/debug_overlay.cpp
 @@ -10,28 +10,93 @@
@@ -32720,7 +32904,7 @@ index 43d6c06..a78e13a 100644
 +      ImGui::TextDisabled("%s", category->c_str());
 +    }
 +    ImGui::PushID(entry->name.c_str());
-+    DrawFlagEditorRow(*entry, style, 260.0f);
++    DrawFlagEditorRow(*entry, style, 260.0f, /*remember=*/false);
 +    ImGui::PopID();
 +  }
 +  ImGui::EndChild();
@@ -32730,7 +32914,7 @@ index 43d6c06..a78e13a 100644
 +
  }  // namespace rex::ui
 diff --git a/src/ui/overlay/settings_overlay.cpp b/src/ui/overlay/settings_overlay.cpp
-index 4ede107..24aa9ab 100644
+index 4ede107..e413cfb 100644
 --- a/src/ui/overlay/settings_overlay.cpp
 +++ b/src/ui/overlay/settings_overlay.cpp
 @@ -14,6 +14,7 @@
@@ -32828,6 +33012,33 @@ index 4ede107..24aa9ab 100644
      // Filter by category (unless searching).
      if (!searching) {
        if (!category_matches(entry.category)) {
+@@ -352,7 +361,7 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+               auto vk = ImGuiKeyToVirtualKey(imgui_key);
+               std::string name = rex::ui::VirtualKeyToString(vk);
+               if (!name.empty()) {
+-                rex::cvar::SetFlagByName(entry.name, name);
++                rex::cvar::SetFlagFromUser(entry.name, name);
+               }
+               capturing_bind_name_.clear();
+               break;
+@@ -361,7 +370,7 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+           for (int mb = 0; mb < 3; ++mb) {
+             if (ImGui::IsMouseClicked(mb)) {
+               const char* names[] = {"LMB", "RMB", "MMB"};
+-              rex::cvar::SetFlagByName(entry.name, names[mb]);
++              rex::cvar::SetFlagFromUser(entry.name, names[mb]);
+               capturing_bind_name_.clear();
+               break;
+             }
+@@ -376,7 +385,7 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
+         }
+         ImGui::SameLine();
+         if (ImGui::SmallButton("Reset##v")) {
+-          rex::cvar::SetFlagByName(entry.name, entry.default_value);
++          rex::cvar::SetFlagFromUser(entry.name, entry.default_value);
+         }
+       }
+ 
 @@ -406,95 +415,12 @@ void SettingsDialog::OnDraw(ImGuiIO& /*io*/) {
          ImGui::EndDisabled();
        ImGui::PopID();

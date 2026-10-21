@@ -191,9 +191,18 @@ The SDK's overlays (F3 debug, F4 settings, Backtick console, F7 achievements;
 the keys are the `bind_*` settings) take the keyboard and mouse while one is
 open: the keyboard map, the mouse buttons, mouse look and the debug hotkeys
 send nothing to the game, and the cursor is free, so typing in a search field
-doesn't move the hero. A gamepad keeps working (the SDK pauses it only while
-the mouse is over an overlay window). The overlay keys never act as gamepad
-buttons, even if `keyboard_gamepad_map` lists them.
+doesn't move the hero. A gamepad keeps working, also while the mouse is over
+an overlay. The overlay keys never act as gamepad buttons, even if
+`keyboard_gamepad_map` lists them. With `mouse_look` off (playing with a
+controller), the cursor hides while the mouse rests over the game and shows
+when it moves.
+
+The settings overlay's "Save to config" writes `fable_2.toml`: the settings
+already in that file plus the ones changed in the overlay or the console
+this session. Command-line flags, environment variables and the values the
+game sets itself (its macOS defaults, the `[input]` settings copied from
+`fable2_config.toml`) are not written. Switches changed in the debug overlay
+(F3) last only for the session.
 
 ## F5 — run an external Lua script
 

@@ -504,6 +504,16 @@ class Fable2App : public rex::ReXApp {
   // Each patch is switched on by a [patches] key in fable2_config.toml
   // (loaded earlier, in OnPostInitLogging).
   void OnPostLoadXexImage() override {
+    // ReXApp::ConstructRuntime pauses every input driver while an overlay is
+    // open and the mouse is over one of its windows. ImGui doesn't use the
+    // gamepad, so that only stopped a controller under a resting pointer
+    // (F3 left open while playing) and read ImGui's state from the input
+    // thread. The keyboard gamepad keeps the keyboard and mouse out of the
+    // game while an overlay is open itself (keyboard_gamepad.h). With no
+    // callback every driver is always active.
+    if (auto* input = static_cast<rex::input::InputSystem*>(runtime()->input_system())) {
+      input->SetActiveCallback(nullptr);
+    }
     fable2::patches::ApplyAll(runtime()->memory(), PPCImageConfig);
     // Lets the address-scan hook (src/core/fable2_address_scan.cpp) read the
     // guest page tables.
