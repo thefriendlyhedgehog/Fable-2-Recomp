@@ -1763,6 +1763,32 @@ the same way as Xenia's ROV path.
          priority.
        - Apple's hardware TSO mode isn't available to native macOS
          processes (Rosetta only), so it's no way around the fences.
+  57. **Measured (2026-10-21): where the CPU goes at the trail, after 56**
+     (`sample` for 15 s, `fable_2_596`, 60 fps; summary with
+     `tools/summarize_sample.py`, WindWaker on the GPU). Per-thread CPU:
+     GPU Commands 26%, GameThread 21%, 3D Engine 21% of a core.
+     - **GPU Commands** handles 2,313 draws a frame, about 1.9 us per draw,
+       and the profile is flat:
+       - `UpdateBindings` 19% (MoltenVK `vkUpdateDescriptorSets` 6%,
+         sampler parameters and fetch-constant decoding about 8%);
+       - shared memory requests 20% (the upload `memmove` 10%,
+         `EnableAccessCallbacks`/`mprotect` 3%, waiting on the global
+         critical region 4%, which the 3D Engine holds in its write-fault
+         handler);
+       - `RequestTextures` 9%, primitive processing 7%, render target
+         update 6%, `vkResetCommandPool` 3%;
+       - the `frame_timing` clock reads 5%, which happen only with
+         `vulkan_long_frame_log` (on in the local `fable_2.toml`).
+     - **GameThread and 3D Engine** spend a fifth of their samples sleeping
+       in the frame limiter (`ProcessGameFrame`, `FrameLimiterWait`). The 3D
+       Engine also yields 8.5% of its samples in `GpuProgressCheck_82B9BF90`:
+       its `db16cyc` is now `sched_yield` instead of a hot spin. Guest
+       spinlocks wait in 0.1% of samples. The 3D Engine's write faults on
+       watched pages (`_sigtramp` -> `TriggerCallbacks`) are 5% of its
+       samples.
+     - No single lever is left on the CPU side at the cap. The candidates are
+       small: caching sampler parameters per fetch constant, fewer descriptor
+       writes, and a cheaper clock for `frame_timing`.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
