@@ -1454,6 +1454,14 @@ Tried, no gain:
   the performance cores, but the GPU time doubled (16-20 ms), the
   command processor took 44% of a core and the process 1.32 cores, 5.4 W.
   Not kept.
+  At the trail on 2026-10-21 (`fable_2_613`, 0.97 cores, 3.4 W) the
+  performance cores ran 89% of the CPU time, 96-97% of the instructions,
+  92% of the cycles and 99% of the energy (`out/mac_thread_cpu` prints
+  these). The kernel counts this per process only, so it doesn't say which
+  threads took the other 11% of the time. Likely candidates are the unnamed
+  host threads at priority 37, which use 3-4% of a core each; the guest
+  threads run at 46. No thread comes close to a full core: GPU Commands
+  uses 22%, GameThread 20% and 3D Engine 17%.
 - **`-mcpu=apple-m1` instead of `-march=armv8-a`** for the recompiled game
   code. That gives LSE atomics and Apple scheduling; a full rebuild takes
   15 minutes at ~2.4 cores. Three alternating pairs of separate runs

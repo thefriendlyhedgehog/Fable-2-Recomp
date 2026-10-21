@@ -8,6 +8,8 @@
 // thread ID as `sample` prints it, its name), then the process total, the
 // CPU energy the kernel estimates for the process (as average watts, and
 // the share on the performance cores), and the instructions and cycles.
+// The last line is the share of the CPU time, instructions and cycles that
+// ran on the performance cores (the kernel only counts this per process).
 // The kernel's accounting, unlike `sample`, doesn't slow the process down:
 // `sample` at its default 1 ms interval cut the game's CPU use by more than
 // half and showed waiting threads as running.
@@ -29,6 +31,7 @@ typedef struct {
   uint64_t id;
   uint64_t ns;
   uint64_t system_ns;
+  int priority;
   char name[64];
 } ThreadTime;
 
@@ -44,6 +47,7 @@ static int Snapshot(int pid, ThreadTime* threads) {
     threads[n].id = ids[i];
     threads[n].ns = info.pth_user_time + info.pth_system_time;
     threads[n].system_ns = info.pth_system_time;
+    threads[n].priority = info.pth_curpri;
     strncpy(threads[n].name, info.pth_name, sizeof(threads[n].name) - 1);
     threads[n].name[sizeof(threads[n].name) - 1] = 0;
     ++n;
@@ -80,9 +84,10 @@ int main(int argc, char** argv) {
       double percent = (double)(after[i].ns - before[j].ns) / (seconds * 1e7);
       total += percent;
       if (percent >= 2.0) {
-        printf("%6.1f%%  (kernel %4.1f%%)  %llu %s\n", percent,
+        printf("%6.1f%%  (kernel %4.1f%%)  priority %2d  %llu %s\n", percent,
                (double)(after[i].system_ns - before[j].system_ns) / (seconds * 1e7),
-               (unsigned long long)after[i].id, after[i].name[0] ? after[i].name : "(unnamed)");
+               after[i].priority, (unsigned long long)after[i].id,
+               after[i].name[0] ? after[i].name : "(unnamed)");
       }
     }
   }
@@ -96,5 +101,14 @@ int main(int argc, char** argv) {
                       : 0.0,
          instructions / (seconds * 1e9),
          (double)(usage_after.ri_cycles - usage_before.ri_cycles) / (seconds * 1e9));
+#define DELTA(field) ((double)(usage_after.field - usage_before.field))
+  double time = DELTA(ri_user_time) + DELTA(ri_system_time);
+  double cycles = DELTA(ri_cycles);
+  printf("on the performance cores: %.1f%% of the time, %.1f%% of the instructions, "
+         "%.1f%% of the cycles\n",
+         time > 0.0 ? 100.0 * (DELTA(ri_user_ptime) + DELTA(ri_system_ptime)) / time : 0.0,
+         instructions > 0.0 ? 100.0 * DELTA(ri_pinstructions) / instructions : 0.0,
+         cycles > 0.0 ? 100.0 * DELTA(ri_pcycles) / cycles : 0.0);
+#undef DELTA
   return 0;
 }
