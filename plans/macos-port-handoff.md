@@ -1789,6 +1789,34 @@ the same way as Xenia's ROV path.
      - No single lever is left on the CPU side at the cap. The candidates are
        small: caching sampler parameters per fetch constant, fewer descriptor
        writes, and a cheaper clock for `frame_timing`.
+  58. **Measured (2026-10-21): GPU passes at the trail** (60 fps cap, 2,315
+     draws, other apps under 8% of the GPU).
+     - Untimed: **6.65-6.9 ms of GPU per frame, 40-41% busy**
+       (`fable_2_597`, `_601`; 7.35 ms on 2026-10-18), GPU power 2.8 W. While
+       active, the GPU sits at its top clock (P15, 1545 MHz average active
+       clock); the rest of the time it's off.
+     - Timed frames (`vulkan_pass_gpu_time`, 11.2 ms with the timing):
+       - the main scene pass (`8D900846800943C8`, 998 draws) 1.8 ms;
+       - the depth prepass (643 draws) 0.75 ms;
+       - 33 resolves 2.3 ms;
+       - 41 passes with 0-2 draws 2.5 ms;
+       - 2.7 ms outside passes.
+     - **Two single-draw passes looked costly and aren't:**
+       - `9A14C8F2C1D70F17`, a 16-tap horizontal blur of the 640x360
+         RGBA8 texture at 0x133E1000, timed at 0.56 ms;
+       - `87E85199E1E9B260`, a 4-tap downsample of the 1120x720 depth
+         (fmt 29) to 280x180, timed at 0.43 ms.
+
+       Their render areas are tight (640x360 and 280x180, `vulkan_pass_log`,
+       `fable_2_600`), and their sign-specialized shaders fold to one
+       sample per fetch. With both skipped (`vulkan_debug_skip_ps`, three
+       alternating pairs, `fable_2_601`): 6.90 -> 6.82 ms. The timed figures
+       were the wait on the resolve just before each pass.
+     - So the per-pass timer can't rank small passes. Measure a candidate by
+       skipping it (`vulkan_debug_skip_ps`, `debug_skip_*`) within one run
+       before working on it. What's left is item 50's per-resolve cost
+       (in-pass resolves need a patched MoltenVK, at most about 1 ms) and
+       the main scene.
 - **Zero-copy shared memory, ported from xenia-edge, opt-in**
   (`--vulkan_shared_memory_zero_copy=true`, restart): guest physical memory
   (the 512 MB view at `TranslatePhysical(0)`, 16 KB aligned) is imported
