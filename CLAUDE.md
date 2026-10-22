@@ -18,7 +18,8 @@ ReXGlue (Xenia-derived) static recompilation of Fable II. The app is in
 ## macOS quick reference
 
 - Repo on the Mac: `/Volumes/MacMiniExternal/Games/fable2/Fable-2-Recomp`;
-  game content in the repo root (`--game_data_root="$PWD"`).
+  game content in the repo root (`--game_data_root="$PWD"`, or
+  `game_data_root` in the build folder's `fable_2.toml`).
 - Build: `tools/build_sdk_mac.sh && ./build.sh -release fable_2`.
 - Capture and summary: `tools/mac_capture.sh --merge_controllers`
   (upload and texture load hoisting are on by default on macOS;

@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <format>
+#include <optional>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -65,8 +66,9 @@ namespace {
 // presenter() is a non-virtual inline that merely returns the presenter_
 // pointer - so the standard derived-class accessor idiom (reinterpret to a
 // first-base-derived type) safely reads the member without touching any
-// vtable. This keeps the fix self-contained in the app (no SDK edits).
-class WindowPresenterAccessor final : public rex::ui::Window {
+// vtable. This keeps the fix self-contained in the app (no SDK edits). Not
+// `final`: Window is abstract, and the accessor is never instantiated.
+class WindowPresenterAccessor : public rex::ui::Window {
  public:
   rex::ui::Presenter* PresenterPtr() const { return presenter(); }
 };
@@ -648,6 +650,21 @@ class Fable2App : public rex::ReXApp {
         rex::filesystem::GetExecutableFolder();
     sdk_config_path_ = paths.config_path;
 
+    // game_data_root set in fable_2.toml. The SDK reads that file only after
+    // this hook, so the setting otherwise never chose the content root. The
+    // command line still wins (it is already in paths.game_data_root). A
+    // relative path is taken from the config file's folder.
+    if (paths.game_data_root.empty()) {
+      if (auto root = ConfigFileValue(paths.config_path, "game_data_root");
+          root && !root->empty()) {
+        std::filesystem::path dir(*root);
+        if (dir.is_relative()) {
+          dir = paths.config_path.parent_path() / dir;
+        }
+        paths.game_data_root = dir.lexically_normal();
+      }
+    }
+
     if (paths.game_data_root.empty()) {
       if (std::filesystem::is_regular_file(exe_dir / "default.xex")) {
         paths.game_data_root = exe_dir;
@@ -660,7 +677,8 @@ class Fable2App : public rex::ReXApp {
         const std::string msg = std::format(
             "default.xex was not found next to fable_2.exe ({}).\n\n"
             "Stage the game content there (the build does this "
-            "automatically) or pass --game_data_root=<path>.",
+            "automatically), pass --game_data_root=<path> or set "
+            "game_data_root in fable_2.toml.",
             exe_dir.string());
         rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
         std::exit(1);
@@ -732,36 +750,48 @@ class Fable2App : public rex::ReXApp {
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 
  private:
-  // Whether the SDK config file sets cvar `name`, using the same key
+  // The value of cvar `name` in the SDK config file, using the same key
   // flattening as rex::cvar::LoadConfig (a key inside [table] is
-  // "table_key"). A missing or unparsable file sets nothing.
-  static bool ConfigFileSetsCvar(const std::filesystem::path& path, std::string_view name) {
+  // "table_key"): a string as is, anything else as TOML text. A missing or
+  // unparsable file sets nothing.
+  static std::optional<std::string> ConfigFileValue(const std::filesystem::path& path,
+                                                    std::string_view name) {
     std::error_code ec;
     if (path.empty() || !std::filesystem::is_regular_file(path, ec)) {
-      return false;
+      return std::nullopt;
     }
     toml::table root;
     try {
       root = toml::parse_file(path.string());
     } catch (const toml::parse_error&) {
-      return false;
+      return std::nullopt;
     }
     const auto visit = [&](const auto& self, const toml::table& table,
-                           const std::string& prefix) -> bool {
+                           const std::string& prefix) -> std::optional<std::string> {
       for (const auto& [key, value] : table) {
         std::string full_key =
             prefix.empty() ? std::string(key.str()) : prefix + "_" + std::string(key.str());
         if (const toml::table* sub = value.as_table()) {
-          if (self(self, *sub, full_key)) {
-            return true;
+          if (auto found = self(self, *sub, full_key)) {
+            return found;
           }
         } else if (full_key == name) {
-          return true;
+          if (const auto* text = value.as_string()) {
+            return text->get();
+          }
+          std::ostringstream out;
+          value.visit([&](const auto& node) { out << node; });
+          return out.str();
         }
       }
-      return false;
+      return std::nullopt;
     };
     return visit(visit, root, std::string());
+  }
+
+  // Whether the SDK config file sets cvar `name` (see ConfigFileValue).
+  static bool ConfigFileSetsCvar(const std::filesystem::path& path, std::string_view name) {
+    return ConfigFileValue(path, name).has_value();
   }
 
   // The SDK config file (fable_2.toml), captured in OnConfigurePaths.

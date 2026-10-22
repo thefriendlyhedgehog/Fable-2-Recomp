@@ -69,7 +69,7 @@ Recompiled and use new project-owned icons.
 - **How to extract (external GUI tool):** alternatively, rip the disc to an ISO and open it with **[XboxImageExtractor](https://github.com/dromex1/XboxImageExtractor)** — a GUI tool for Xbox 360 game images. It lists the image's filesystem; select `default.xex` and `data` and extract them into the project root (`data` extract as folders).
 - **You must supply the game content yourself** (it is not in the repo): rip the Fable 2 GOTY (USA/EU) disc (the one with SHA-256 above) and put `default.xex` and `data/` in the project root. The build does not copy this into the build directories   
 - **Saves live in `<build dir>\saves\`** — back that folder up to keep your progress, and copy it between build trees (Debug/Release) or machines to carry a save over.
-- The `--game_data_root <path>` override still points the content root at a different tree (e.g. to run from a shared content copy without staging); saves/cache still land next to the exe.
+- The `--game_data_root <path>` override, or `game_data_root = "<path>"` in `fable_2.toml` next to the exe (a relative path counts from that folder; the command line wins), still points the content root at a different tree (e.g. to run from a shared content copy without staging); saves/cache still land next to the exe.
 - Although this was made for the US / Europe GOTY version I have been able to run the following regions: Germany, France, Italy, Russia, and Spain. Your milage may very if you use those regions.
 
 
@@ -86,7 +86,7 @@ Optional command-line overrides (all normal `--cvar value` args):
 
 | Argument | Effect |
 |---|---|
-| `--game_data_root <path>` | Use a different content directory (beats the exe-dir-only search) |
+| `--game_data_root <path>` | Use a different content directory (beats `game_data_root` in `fable_2.toml` and the exe-dir-only search) |
 | `--update_data_root <path>` | Optional update content root |
 | `--window_width` / `--window_height` / `--fullscreen` | Presentation options |
 | `--keyboard_gamepad_map <map>` | Host keyboard -> guest gamepad button map (see below) |

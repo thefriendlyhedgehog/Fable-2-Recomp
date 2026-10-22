@@ -78,8 +78,10 @@ The per-pass GPU timer can't rank small passes; skip a candidate
 
 Repo: `/Volumes/MacMiniExternal/Games/fable2/Fable-2-Recomp`. Game content
 (default.xex, data/) lives in the repo root, so runs need
-`--game_data_root="$PWD"`. The user usually starts the game with their own
-`./run_and_watch.sh`; `tools/mac_capture.sh` passes that flag itself.
+`--game_data_root="$PWD"`, or `game_data_root` in the build folder's
+`fable_2.toml`, which the user's has (read since 2026-10-22; before, only
+the flag worked). The user usually starts the game with their own
+`./run_and_watch.sh`; `tools/mac_capture.sh` passes the flag itself.
 
 - SDK (GPU plugin and runtime) from source with the Mac patch, then the game:
   `tools/build_sdk_mac.sh && ./build.sh -release fable_2`
@@ -2060,7 +2062,8 @@ luminance at 280x180 / 560x360).
   the codegen now keeps them in `env_locals`. Needs `tools/build_sdk_mac.sh
   -codegen` (21 files regenerate). Not reproduced on demand: Start
   presses in capped runs didn't crash before the fix (`fable_2_623`) or
-  after it (`fable_2_624`), so they never reached the longjmp.
+  after it (`fable_2_624`), so they never reached the longjmp. The user
+  confirmed on 2026-10-22 that pressing Start in play no longer crashes.
 
 - Adaptive quad patches drawn as triangle lists like the continuous ones
   (`vulkan_adaptive_quad_patches_in_vs`): no MoltenVK tessellation left at
