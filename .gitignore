@@ -19,6 +19,8 @@ fable2_func_trace_prev.log
 fable2_func_summary.log
 fable2_func_summary_prev.log
 fps_probe.log
+# The game's stdout/stderr from run_and_watch.sh (a local launcher in the root).
+/run_stdout.log
 
 # --- SDK / runtime artifacts ------------------------------------------------
 .fable2_image.bin

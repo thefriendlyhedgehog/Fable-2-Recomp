@@ -57,6 +57,20 @@ Lord Lucien's castle in the prologue (the scene where Lucien asks the
 children to step in). With both off it works. Turn the switch off for that
 scene and back on afterwards.
 
+What breaks (2026-10-22, from the user's castle save in a copy of the build
+folder): the circle sits on a raised step, and with the patches on the hero
+stops at the foot of the step and slides along its edge. With them off, the
+same push from the same start walks straight up onto it, and switching them
+off live in the stuck session lets the hero climb at once and starts the
+scene. So it is the hero's movement up the step at doubled ticks, not a
+missed script event: the quest script (`scripts\quests\qc010_childhood.lua`
+in `gamescripts.bnk`, compiled Lua 5.1) waits for `AllowHeroToMove` (set by
+the `AllowHeroToWalk` event in the `QC010_LucienIntro2` cutscene) and then
+for the hero inside `QC010_CircleTrigger`, and the scene forces walking
+(`CUTSCENE_RULE_FORCE_WALK`). Likely a step-up check in the character
+movement that a smaller per-tick step at walking speed doesn't pass; other
+steps walked slowly may block the same way.
+
 At the title screen, before `sub_8233AE50` has run, the HF double still
 holds its image value of 15.0, so both ticks are 15 Hz there. Switching it
 off at the title screen writes 30.0, the value the game itself stores on

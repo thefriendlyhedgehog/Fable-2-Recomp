@@ -67,6 +67,7 @@
 #include <rex/input/input_driver.h>
 #include <rex/input/device_assignment.h>
 #include <rex/input/input_system.h>
+#include <rex/kernel/xam/module.h>  // xeXamIsUIActive
 #include <rex/runtime.h>
 #include <rex/ui/virtual_key.h>
 #include <rex/ui/keybinds.h>
@@ -443,7 +444,9 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
         overlay_down_prev_[i] = down;
       }
     }
-    bool overlay_open = overlays_open_ != 0;
+    // A game pop-up (Xbox message box or on-screen keyboard, an ImGui window
+    // without headless) counts as an overlay too.
+    bool overlay_open = overlays_open_ != 0 || rex::kernel::xam::xeXamIsUIActive();
 
     if (focused && !overlay_open) {
       for (const auto& m : bindings_) {
@@ -516,8 +519,11 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
                    has_focus_.load(std::memory_order_relaxed);
     if (!focused) ClearKeys();
     // An overlay open (F3, F4, the console, achievements) takes the keyboard
-    // and mouse: no keys, debug hotkeys or mouse look reach the game.
-    bool overlay_open = ui_->overlays_open.load(std::memory_order_relaxed) != 0;
+    // and mouse: no keys, debug hotkeys or mouse look reach the game. So does
+    // a game pop-up (Xbox message box or on-screen keyboard, an ImGui window
+    // without headless), which is answered with the mouse.
+    bool overlay_open = ui_->overlays_open.load(std::memory_order_relaxed) != 0 ||
+                        rex::kernel::xam::xeXamIsUIActive();
     bool hotkeys = focused && !overlay_open;
 
     // F5 (host) -> run the external Lua file (fable2_f5_lua.h).

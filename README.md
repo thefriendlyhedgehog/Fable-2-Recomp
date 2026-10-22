@@ -201,6 +201,11 @@ an overlay. The overlay keys never act as gamepad buttons, even if
 controller), the cursor hides while the mouse rests over the game and shows
 when it moves.
 
+The game's own Xbox pop-ups (message boxes, the on-screen keyboard) show as
+small windows answered with the mouse, and hold the keyboard and mouse the
+same way while open. With `headless = true` (a test setting) they are not
+shown: each takes its default answer.
+
 The settings overlay's "Save to config" writes `fable_2.toml`: the settings
 already in that file plus the ones changed in the overlay or the console
 this session. Command-line flags, environment variables and the values the

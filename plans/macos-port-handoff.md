@@ -2047,13 +2047,25 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- **2026-10-22: `headless = true` left in the user's `fable_2.toml`** by a
+  test run (before Save to config kept only user changes): the game's Xbox
+  message boxes and on-screen keyboard took their default answer unseen.
+  Removed from the file. Those pop-ups are ImGui windows answered with the
+  mouse; the keyboard pad now treats one as an open overlay
+  (`xeXamIsUIActive`), so clicking it sends nothing to the game. The game
+  opens message boxes from seven places, none triggered in a test yet.
+
 - **2026-10-22: the hero can't walk into Lord Lucien's glowing circle in
   the prologue** with the tick-rate patches on (`fable_2_625`); with both off
   it works (`fable_2_626`), but the game feels slower. `high_tick_rate` is now
   a cvar in F4 (Game) that switches both tick rates live (`docs/patches.md`,
   "Switching the tick rates live"). Checked at the title screen
-  (`fable_2_627`, `fable_2_628`): on and off rewrite the doubles at once. Why
-  the faster ticks block the trigger is not known.
+  (`fable_2_627`, `fable_2_628`): on and off rewrite the doubles at once.
+  Cause narrowed down: the hero can't climb the step up to the circle at
+  doubled ticks (walking is forced in that scene); switched off live he
+  climbs at once (`docs/patches.md`). The step-up code itself is not found
+  yet. A copy of the build folder with the castle save for this is in
+  `out/tickrate-test` (its own `saves/`, so the user's saves stay untouched).
 
 - **2026-10-21: crash on pressing Start in gameplay** (`fable_2_622`: guest
   write to 0xD8 in `ProcessGameFrame_82276C30`, r31 = 0). A longjmp into a
