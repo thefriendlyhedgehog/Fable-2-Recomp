@@ -38,6 +38,30 @@ the data ops had no effect. The game runs HF at twice LF (30:15). With only
 `high_tick_rate` the ratio becomes 1:1 (30:30) and cloth physics misbehaves,
 so turn on `higher_hf_tick_rate` with it (60:30).
 
+### Switching the tick rates live (2026-10-22)
+
+`high_tick_rate` is also a cvar (category Game, so it shows in F4), seeded
+from the config key. Changing it while the game runs calls
+`fable2::patches::ApplyTickRates`, which writes both doubles at once: 30.0
+and 60.0 when on (HF only with `higher_hf_tick_rate`, otherwise a warning),
+and the game's own values when off, copied from where `sub_8233AE50` takes
+them (LF from 0x820A0228, 15.0; HF from 0x833194F0, 30.0). The hooks ask the
+cvar on every call, so a later run of `sub_8233AE50` keeps the switched
+value. It works live because the frame loop reads both doubles every frame
+(`compute_frame_timing` in
+`src/core/hotfunc/frame/ProcessGameFrame_82276C30.cpp`); about 200 other
+functions read the LF double too.
+
+Why: with the patches on, the hero cannot walk into the glowing circle in
+Lord Lucien's castle in the prologue (the scene where Lucien asks the
+children to step in). With both off it works. Turn the switch off for that
+scene and back on afterwards.
+
+At the title screen, before `sub_8233AE50` has run, the HF double still
+holds its image value of 15.0, so both ticks are 15 Hz there. Switching it
+off at the title screen writes 30.0, the value the game itself stores on
+entering the world.
+
 This is the fundamental recomp vs. emulator split: **data patches work, code
 patches don't** (a code patch here would mean editing the recompiled C++ at
 build time, which codegen would clobber on the next run), so every code op is

@@ -429,6 +429,7 @@ class Fable2App : public rex::ReXApp {
     seed_cvar("mouse_look", cfg.mouse_look ? "true" : "false");
     seed_cvar("mouse_look_scale", std::to_string(cfg.mouse_look_scale));
     seed_cvar("merge_controllers", cfg.merge_controllers ? "true" : "false");
+    seed_cvar("high_tick_rate", cfg.high_tick_rate ? "true" : "false");
 #ifdef __APPLE__
     // MoltenVK also reports its per-draw "Metal does not support disabling
     // primitive restart" warning through VK_EXT_debug_utils, which
@@ -515,6 +516,13 @@ class Fable2App : public rex::ReXApp {
       input->SetActiveCallback(nullptr);
     }
     fable2::patches::ApplyAll(runtime()->memory(), PPCImageConfig);
+    // high_tick_rate switched while the game runs (F4, console): rewrite the
+    // tick doubles now. Registered after ApplyAll, which handled the startup
+    // value.
+    rex::cvar::RegisterChangeCallback(
+        "high_tick_rate", [memory = runtime()->memory()](std::string_view, std::string_view) {
+          fable2::patches::ApplyTickRates(memory);
+        });
     // Lets the address-scan hook (src/core/fable2_address_scan.cpp) read the
     // guest page tables.
     fable2::addressscan::SetMemory(runtime()->memory());

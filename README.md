@@ -118,8 +118,12 @@ game recreates it with defaults on launch if it is ever missing. Loaded in
   (`src/core/fable2_hooks.cpp`) — flip one and relaunch to A/B a patch with no
   rebuild. This includes `high_tick_rate` and `higher_hf_tick_rate` (Xenia
   "High Tick Rate" / "Higher HF Tick Rate"; turn both on together), which
-  also drive the guest-image data writes below. There is no separate patch
-  file.
+  also drive the guest-image data writes below. `high_tick_rate` is also a
+  cvar (F4, Game) that switches both tick rates while the game runs: turn it
+  off for a scripted scene that does not start with it on (the glowing circle
+  in Lord Lucien's castle in the prologue) and back on afterwards. Keep
+  `higher_hf_tick_rate = true` so the switch gives 30:60 Hz. There is no
+  separate patch file.
 
 
 

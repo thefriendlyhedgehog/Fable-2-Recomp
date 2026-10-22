@@ -2045,6 +2045,14 @@ luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
 
+- **2026-10-22: the hero can't walk into Lord Lucien's glowing circle in
+  the prologue** with the tick-rate patches on (`fable_2_625`); with both off
+  it works (`fable_2_626`), but the game feels slower. `high_tick_rate` is now
+  a cvar in F4 (Game) that switches both tick rates live (`docs/patches.md`,
+  "Switching the tick rates live"). Checked at the title screen
+  (`fable_2_627`, `fable_2_628`): on and off rewrite the doubles at once. Why
+  the faster ticks block the trigger is not known.
+
 - **2026-10-21: crash on pressing Start in gameplay** (`fable_2_622`: guest
   write to 0xD8 in `ProcessGameFrame_82276C30`, r31 = 0). A longjmp into a
   setjmp function left that function's local registers in ctx

@@ -24,11 +24,19 @@
 #include <string>
 #include <vector>
 
+#include <rex/cvar.h>
 #include <rex/image_info.h>
 
 namespace rex::memory {
 class Memory;
 }
+
+// [patches] high_tick_rate as a cvar (Game category in F4), seeded from
+// fable2_config.toml. It switches both tick-rate patches while the game runs
+// (the HF one only with [patches] higher_hf_tick_rate): the change callback
+// calls ApplyTickRates, and the frame loop reads both tick doubles every frame
+// (compute_frame_timing in ProcessGameFrame_82276C30.cpp).
+REXCVAR_DECLARE(bool, high_tick_rate);
 
 // Defined by the codegen output (generated/default/fable_2_init.cpp).
 extern const rex::PPCImageInfo PPCImageConfig;
@@ -64,5 +72,15 @@ const std::vector<Patch>& Patches();
 // Logs every write (old -> new value) plus a summary. Returns the number of
 // ops applied (out-of-range ops are skipped with an error log).
 size_t ApplyAll(rex::memory::Memory* memory, const rex::PPCImageInfo& image);
+
+// The tick-rate patches in effect now: the LF one follows the high_tick_rate
+// cvar, the HF one also needs [patches] higher_hf_tick_rate. The hooks that
+// skip the game's own stores (src/core/fable2_hooks.cpp) ask these.
+bool HighTickRateActive();
+bool HigherHfTickRateActive();
+
+// Writes the two tick doubles for the patches in effect: 30 Hz LF and 60 Hz
+// HF when on, the game's own 15 Hz and 30 Hz when off. Logs old -> new.
+void ApplyTickRates(rex::memory::Memory* memory);
 
 }  // namespace fable2::patches

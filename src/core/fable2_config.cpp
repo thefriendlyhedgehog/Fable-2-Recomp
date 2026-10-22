@@ -115,6 +115,10 @@ skip_intro_videos = false
 # fable2_hook_high_tick_rate_skip_store): doubles the game's LF tick from
 # 15 Hz to 30 Hz. Vastly improves in-game UI framerate and input delay.
 # Use together with higher_hf_tick_rate. false = original 15 Hz.
+# Switches live in the settings overlay (F4, Game: high_tick_rate), both
+# tick rates at once: turn it off for a scripted scene that does not start
+# with it on (the glowing circle in Lord Lucien's castle in the prologue)
+# and back on afterwards.
 # Default: false
 high_tick_rate = false
 

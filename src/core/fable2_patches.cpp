@@ -10,6 +10,8 @@
 
 #include "fable2_patches.h"
 
+#include <atomic>
+#include <bit>
 #include <format>
 
 #include <rex/logging.h>
@@ -17,9 +19,41 @@
 
 #include "fable2_config.h"
 
+REXCVAR_DEFINE_BOOL(high_tick_rate, false, "Game",
+                    "Run the game's update ticks at twice the original rate: 30 Hz, and "
+                    "60 Hz for the fast tick with [patches] higher_hf_tick_rate. Smoother "
+                    "movement, camera and UI. Takes effect immediately: turn it off for a "
+                    "scripted scene that does not start with it on (the glowing circle in "
+                    "Lord Lucien's castle in the prologue) and back on afterwards. Default "
+                    "comes from fable2_config.toml [patches] high_tick_rate.");
+
 namespace fable2::patches {
 
 namespace {
+
+// The tick-rate doubles the frame loop reads, and where sub_8233AE50 (game
+// init) copies the game's own values from with the two stores the tick-rate
+// hooks skip (0x8233AEB4 and 0x8233AE98).
+constexpr uint32_t kLfTick = 0x83319510;
+constexpr uint32_t kHfTick = 0x83319518;
+constexpr uint32_t kLfTickOriginal = 0x820A0228;  // 15.0
+constexpr uint32_t kHfTickOriginal = 0x833194F0;  // 30.0
+
+double ReadGuestDouble(rex::memory::Memory* memory, uint32_t address) {
+  const uint8_t* host = memory->TranslateVirtual<const uint8_t*>(address);
+  uint64_t bits = 0;
+  for (int i = 0; i < 8; ++i) {
+    bits = (bits << 8) | host[i];  // big-endian in guest memory
+  }
+  return std::bit_cast<double>(bits);
+}
+
+// One 64-bit store, so the frame loop never reads half of an old value.
+void WriteGuestDouble(rex::memory::Memory* memory, uint32_t address, double value) {
+  auto* host = memory->TranslateVirtual<uint64_t*>(address);
+  std::atomic_ref<uint64_t>(*host).store(std::byteswap(std::bit_cast<uint64_t>(value)),
+                                         std::memory_order_relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // The data halves of the Xenia patches from
@@ -29,14 +63,15 @@ namespace {
 // src/core/fable2_hooks.cpp, gated on the same config keys.
 // ---------------------------------------------------------------------------
 std::vector<Patch> BuildPatches() {
-  const auto& cfg = fable2::config::Get();
   return {
       {
           "High Tick Rate",
           "Doubles the LF tick to 30 Hz. Vastly improves in-game UI framerate. "
           "Improves input delay.",
           "Guy",
-          cfg.high_tick_rate,
+          // The cvar, seeded from [patches] high_tick_rate (it can change
+          // later; see ApplyTickRates).
+          HighTickRateActive(),
           {
               // LF tick double at 0x83319510: 15.0 -> 30.0.
               {Op::Width::kBe8, 0x83319511, 0x3E},
@@ -48,7 +83,7 @@ std::vector<Patch> BuildPatches() {
           "High Tick Rate.",
           "Ultra",
           // Requires High Tick Rate (same gate as the hook in fable2_hooks.cpp).
-          cfg.high_tick_rate && cfg.higher_hf_tick_rate,
+          HigherHfTickRateActive(),
           {
               // HF tick double at 0x83319518: 30.0 -> 60.0.
               {Op::Width::kBe8, 0x83319519, 0x4E},
@@ -270,6 +305,31 @@ size_t ApplyAll(rex::memory::Memory* memory, const rex::PPCImageInfo& image) {
     REXSYS_INFO("[patches] code at 0x{:08X} ({}): {}", site.first, site.name, words);
   }
   return applied;
+}
+
+bool HighTickRateActive() { return REXCVAR_GET(high_tick_rate); }
+
+bool HigherHfTickRateActive() {
+  return HighTickRateActive() && fable2::config::Get().higher_hf_tick_rate;
+}
+
+void ApplyTickRates(rex::memory::Memory* memory) {
+  if (!memory) {
+    return;
+  }
+  const double lf_old = ReadGuestDouble(memory, kLfTick);
+  const double hf_old = ReadGuestDouble(memory, kHfTick);
+  const double lf = HighTickRateActive() ? 30.0 : ReadGuestDouble(memory, kLfTickOriginal);
+  const double hf = HigherHfTickRateActive() ? 60.0 : ReadGuestDouble(memory, kHfTickOriginal);
+  WriteGuestDouble(memory, kLfTick, lf);
+  WriteGuestDouble(memory, kHfTick, hf);
+  REXSYS_INFO("[tick-rate] high_tick_rate {}: LF tick {} -> {} Hz, HF tick {} -> {} Hz",
+              HighTickRateActive() ? "on" : "off", lf_old, lf, hf_old, hf);
+  if (HighTickRateActive() && !HigherHfTickRateActive()) {
+    REXSYS_WARN("[tick-rate] HF tick left at {} Hz: [patches] higher_hf_tick_rate is false in "
+                "fable2_config.toml, and cloth physics misbehaves at 1:1",
+                hf);
+  }
 }
 
 }  // namespace fable2::patches

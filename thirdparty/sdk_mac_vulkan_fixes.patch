@@ -32421,10 +32421,10 @@ index d70c1a1..acd2a84 100644
      AddLocal(spdlog::level::warn, "[console] unknown cvar: " + name);
 diff --git a/src/ui/overlay/cvar_groups.cpp b/src/ui/overlay/cvar_groups.cpp
 new file mode 100644
-index 0000000..ff76045
+index 0000000..56b79b9
 --- /dev/null
 +++ b/src/ui/overlay/cvar_groups.cpp
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,225 @@
 +/**
 + * @file        ui/overlay/cvar_groups.cpp
 + *
@@ -32527,6 +32527,8 @@ index 0000000..ff76045
 +  }
 +  static constexpr std::string_view kCategories[] = {
 +      "Audio", "Display", "Input", "UI/Window", "UI/Presenter", "Launch",
++      // The game's own gameplay switches (Fable II's high_tick_rate).
++      "Game",
 +  };
 +  for (std::string_view category : kCategories) {
 +    if (InCategory(entry.category, category)) {
