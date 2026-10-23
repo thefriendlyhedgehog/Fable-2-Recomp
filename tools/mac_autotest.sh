@@ -12,7 +12,9 @@
 #   keydown/keyup <key> and mousedown/mouseup <LMB|RMB|MMB> (events through
 #   the window's input listeners, as a real key), state (logs what the
 #   keyboard pad sends the game), focus (the pad acts as focused without
-#   taking the focus from the desktop); press also takes stick
+#   taking the focus from the desktop), functrace on|off (counts guest
+#   function calls into fable2_func_summary.log next to the exe, rewritten
+#   every 5 s, cumulative); press also takes stick
 #   directions LU/LD/LL/LR (left stick, LU = forward) and RU/RD/RL/RR (right
 #   stick, camera), combined with '+', e.g. "press LU+RL 2000"). "sleep <seconds>" pauses the
 #   script itself between batches (press and wait are timed in the game, the

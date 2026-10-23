@@ -10,7 +10,23 @@ shader checks: `tools/sdk_offline/README.md`.
 
 ## Resume here
 
-**Where things stand (2026-10-21).** The game holds its 60 fps cap at the
+**Where things stand (2026-10-23): in testing.** The port is playable on the
+Mac and the user is playing it with a Steam Controller (`merge_controllers`);
+new work comes from what they find in play. Open, waiting on the user's
+play: the cursor hiding at rest with the controller, the controller after
+sleep and wake, and the game's own Xbox pop-ups (message boxes, on-screen
+keyboard), which show as ImGui windows since `headless` left their
+`fable_2.toml` and haven't come up in a test yet. Confirmed by the user:
+Start no longer crashes, F3 works with the controller. Parked: the step the
+hero can't climb with the tick-rate patches on (Lord Lucien's circle; the
+F4 Game switch `high_tick_rate` turns them off live; findings in
+`docs/patches.md`), and the Windows build of the Mac changes (overlay
+input, the pop-up check, the live tick-rate switch, the SDK patch), which
+nobody has compiled on Windows yet. The user starts the game with
+`./run_and_watch.sh` (no flags needed since `game_data_root` is read from
+`fable_2.toml`); their `fable_2.toml` has `audio_mute = true` on purpose.
+
+**Performance (2026-10-21).** The game holds its 60 fps cap at the
 trail and in the heavy views (items 44, 48), with even frame pacing (item 47).
 At the trail: GPU 6.7-6.9 ms per frame (40% busy, 2.8 W, item 58); the
 process uses about one core and 3.7 W of CPU power (items 56, 57). The latest
@@ -2063,9 +2079,12 @@ luminance at 280x180 / 560x360).
   (`fable_2_627`, `fable_2_628`): on and off rewrite the doubles at once.
   Cause narrowed down: the hero can't climb the step up to the circle at
   doubled ticks (walking is forced in that scene); switched off live he
-  climbs at once (`docs/patches.md`). The step-up code itself is not found
-  yet. A copy of the build folder with the castle save for this is in
-  `out/tickrate-test` (its own `saves/`, so the user's saves stay untouched).
+  climbs at once (`docs/patches.md`). It is the LF tick alone; the step-up
+  code itself is not found (what was ruled out and the leads are in
+  `docs/patches.md`). Parked: the F4 switch covers it. To pick it up, test
+  in a copy of the build folder with the user's castle save in its own
+  `saves/` (the user's saves must stay untouched); the copy used on
+  2026-10-22 was deleted afterwards.
 
 - **2026-10-21: crash on pressing Start in gameplay** (`fable_2_622`: guest
   write to 0xD8 in `ProcessGameFrame_82276C30`, r31 = 0). A longjmp into a

@@ -89,6 +89,7 @@
 #include <rex/ui/windowed_app_context.h>
 
 #include "fable2_debug_sweep.h"
+#include "fable2_func_trace.h"
 #endif
 
 // Declared here, defined in main.cpp (REXCVAR_DEFINE_* must live in a .cpp).
@@ -928,6 +929,19 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver
       // Treat the window as focused until its next focus event, so a test
       // can drive keys without taking the focus from whoever uses the Mac.
       has_focus_.store(true, std::memory_order_relaxed);
+    } else if (command == "functrace") {
+      // "functrace on" / "functrace off": the guest function-call counter
+      // (fable2_func_trace.h) for just the moments a test needs. Counts
+      // only, rewritten to fable2_func_summary.log every 5 s; cumulative, so
+      // diff copies taken between phases.
+      std::string mode;
+      words >> mode;
+      if (mode == "on") {
+        Fable2FuncTraceSetLogEnabled(false);
+        Fable2FuncTraceSetEnabled(true);
+      } else {
+        Fable2FuncTraceSetEnabled(false);
+      }
     } else if (command == "state") {
       // Log what this pad sends the guest at its next poll.
       log_state_ = true;

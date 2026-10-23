@@ -71,6 +71,25 @@ for the hero inside `QC010_CircleTrigger`, and the scene forces walking
 movement that a smaller per-tick step at walking speed doesn't pass; other
 steps walked slowly may block the same way.
 
+Narrowing it down (same day, function-call counts from the
+`functrace on|off` command around a 3 s push from the save's start):
+- It is the LF tick: LF 30 Hz with HF left at 30 Hz blocks the same way.
+- `sub_82277A00`, called from the per-character physics update
+  `sub_82212050` (once per LF tick per character), reads the LF double for
+  dt = 1/LF and moves the physics body by velocity x dt; it runs only while
+  the hero pushes at the step. Giving it the original 15 Hz while the
+  patches are on (an override that swapped the double around the call) did
+  not help, so it is not the cause.
+- Only in the climbing run (patches off): virtual methods `sub_822A92B8` (a
+  two-counter state query) and `sub_821D2470`, 68 calls each. Only in the
+  blocked run: `sub_822250C8` (a distance and a velocity dot product, then
+  `sub_82219BE8`), 132 calls. The climbing run also starts the circle scene
+  (sounds, effects, layers), which muddies its list, and the hero's state
+  methods are dispatched through the hand-written
+  `CallActivePlayerMethod_821A11E8` / `QueryActivePlayerMethod_821EC8A0`
+  overrides, which the tracer does not count. Next step if this is picked
+  up: count those dispatches too, and trace only the moment of contact.
+
 At the title screen, before `sub_8233AE50` has run, the HF double still
 holds its image value of 15.0, so both ticks are 15 Hz there. Switching it
 off at the title screen writes 30.0, the value the game itself stores on
