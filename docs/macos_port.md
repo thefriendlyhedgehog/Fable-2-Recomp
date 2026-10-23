@@ -235,10 +235,14 @@ the whole GPU queue on MoltenVK:
   results into guest memory. Xenia runs Fable II without it. The app now
   seeds `readback_memexport = false` on macOS.
 - **Resolve readback** (`vulkan_readback_resolve = true` means the "fast"
-  mode: every resolve, one frame late). Upstream now fixes the black
-  hero/dog textures without any readback (`[patches]
-  realtime_texture_morphing`, on by default). The older fix,
-  `[patches] hero_dog_texture_readback` (off by default), needs only one
+  mode: every resolve, one frame late). Upstream fixes the black hero/dog
+  textures without any readback (`[patches] realtime_texture_morphing`), but
+  on the Mac only its full-size level comes out right and every smaller mip
+  is black, so the hero and dog are black away from the camera (2026-10-23;
+  forcing mip 0 with `vulkan_debug_force_mip` showed them right, mip 2
+  black; not the render target path, load hoisting, memexport readback or a
+  CPU copy). So on macOS it is off by default and the older fix,
+  `[patches] hero_dog_texture_readback`, is on; it needs only one
   resolve read back: the SDK patch adds `readback_resolve_force_addresses`,
   and the app seeds it with `0x12704000:color:fmt=8_8_8_8:blit` on macOS.
   Each entry is an address (matching destinations in the next 64 KiB) with
@@ -2290,8 +2294,10 @@ grep -rhoE "// vpku[hw]us(128)? v[0-9]+, ?v[0-9]+, ?v[0-9]+" generated | awk -F'
 
 ## Known gaps
 
-- **Hero/dog black textures:** fixed upstream by realtime texture morphing
-  (no readback). The older readback fix needs the source-built plugin (the
+- **Hero/dog black textures:** fixed on the Mac by the older readback fix
+  (`hero_dog_texture_readback`, on by default on macOS); realtime texture
+  morphing leaves the smaller mips black there (see "Readback defaults on
+  macOS"). The readback fix needs the source-built plugin (the
   prebuilt one has no `readback_resolve_force_addresses`, and the app logs
   "cvar readback_resolve_force_addresses rejected" if
   `hero_dog_texture_readback` is turned on with it).

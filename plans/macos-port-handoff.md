@@ -343,8 +343,9 @@ ordering"):
    had already changed again (xenia-edge 9781a75a), or two loads of one
    image in a submission could land in either order. Both fixed.
 3. Resolve readback is unlikely to matter: memexport readback is off on
-   macOS and the only forced resolve readback (`0x12704000`) needs
-   `[patches] hero_dog_texture_readback`, which is off. (Background:
+   macOS and the only forced resolve readback (`0x12704000`) is the hero/dog
+   textures (`[patches] hero_dog_texture_readback`, on on macOS since
+   2026-10-23, a burst at load only). (Background:
    `docs/macos_port.md`, "Readback defaults on macOS".)
 
 Resolve numbers differ between frames (the mask was resolve 15, 18, 23 or
@@ -2062,6 +2063,14 @@ the dumps); resolve numbers shift between frames; 19-34 post-processing chain (b
 luminance at 280x180 / 560x360).
 
 ## Fixed on this branch (most recent first)
+
+- **2026-10-23: the adult hero's face and hands and the dog render black**
+  (`fable_2_631`, Bower Lake). Realtime texture morphing leaves every mip
+  below the full-size one black on the Mac
+  (`plans/hero-dog-realtime-texture-morphing.md`, "macOS"). macOS now
+  defaults to `hero_dog_texture_readback` instead; checked in a copy of the
+  user's save (`out/hero-test`) with no keys set. Open from the same report:
+  the golden quest trail flickers; not seen at the save's spot yet.
 
 - **2026-10-22: `headless = true` left in the user's `fable_2.toml`** by a
   test run (before Save to config kept only user changes): the game's Xbox

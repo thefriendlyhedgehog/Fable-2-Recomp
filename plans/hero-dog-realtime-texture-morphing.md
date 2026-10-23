@@ -52,6 +52,20 @@ Cost: the morphed textures are uncompressed (a few MB more guest memory). The
 morphs are still only rebuilt when the appearance changes (a burst at load,
 then nothing during normal play).
 
+## macOS: the smaller mips stay black (2026-10-23)
+
+On the Mac (Vulkan over MoltenVK) realtime mode builds the full-size level
+right, but every smaller mip is black: the adult hero and the dog are black
+at normal camera distance, and look right with `vulkan_debug_force_mip=0`
+(mip 2 forced: black). The child hero in the castle looked fine because it
+was close to the camera. Not the render target path (fbo and fsi alike),
+texture load hoisting, memexport readback, or a CPU copy
+(`vulkan_readback_resolve=true` didn't help). The smaller mips are built on
+the GPU by `TextureMips_BuildGPU_821FC4A0`; why they come out empty is not
+known. So on macOS `realtime_texture_morphing` defaults to false and
+`hero_dog_texture_readback` to true (`src/core/fable2_config.h`), which
+builds every level on the CPU and looked right. Not checked on Windows.
+
 ## Known separate issue
 
 The dog shows small flickering light rectangles on its back and side. They

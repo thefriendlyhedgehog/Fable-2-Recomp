@@ -116,8 +116,12 @@ disable_motion_blur = false
 # black hero/dog without hero_dog_texture_readback. The textures are stored
 # uncompressed, so they use a few MB more memory. See
 # plans/hero-dog-realtime-texture-morphing.md. false = original baked mode.
-# Default: true
-realtime_texture_morphing = true
+# On macOS only the full-size texture comes out right and the smaller mips are
+# black (a black hero and dog away from the camera), so there it is off and
+# hero_dog_texture_readback is on. Unset here so each platform gets its own
+# default; uncomment to choose.
+# Default: true (false on macOS)
+# realtime_texture_morphing = true
 
 # Force a CPU readback of the render-to-texture resolve that regenerates the
 # hero/dog face+skin texture, so the character does not render black on a
@@ -126,9 +130,9 @@ realtime_texture_morphing = true
 # Fable II. Seeds the SDK cvar readback_resolve_force_addresses; readback then
 # happens only for that resolve, not every frame. Superseded by
 # realtime_texture_morphing; only needed (and only effective) with that off.
-# false = original black bug.
-# Default: false
-hero_dog_texture_readback = false
+# false = original black bug. Unset here so each platform gets its own default.
+# Default: false (true on macOS)
+# hero_dog_texture_readback = false
 
 # Dog Fur Depth Bias: the dog's fur is drawn as 15 thin layers over its body
 # that rely on exact depth ties in the Xbox 360's 24-bit depth buffer. The PC's
@@ -146,7 +150,7 @@ dog_fur_depth_bias = true
 # leave the game's value; other values are rejected with a warning. MSAA is
 # expensive on the Mac's rendering path (fragment shader interlock). Changing
 # it may move where the game places render-to-texture results in memory, which
-# hero_dog_texture_readback (off by default) relies on; 0 has been played on
+# hero_dog_texture_readback (on by default on macOS) relies on; 0 has been played on
 # macOS without visible problems, 1 is Xenia's value.
 # Default: -1
 game_msaa = -1
