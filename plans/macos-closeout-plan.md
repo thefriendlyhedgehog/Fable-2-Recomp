@@ -265,13 +265,23 @@ before signing.
 
 ### Phase 4 — Acceptance and release (user play time)
 
-4.1 Full playthrough on the Phase 3 build (or the dev build if Phase 3 is
-    deferred), from a fresh save at default settings, 60 fps target; log
-    every crash/soft-lock; verify save/quit/relaunch and controller.
-4.2 Close the remaining §2a items, update known issues with what was
-    actually seen, and only then tag the "closed up" release.
-4.3 Update the memory/handoff store: current state, what "done" meant, what
-    was deliberately left parked.
+Play folder, ready 2026-11-03: `/Volumes/MacMiniExternal/Games/fable2/Fable2-App/`
+— `Fable 2 Recompiled.app` plus hardlinked content, the dev build's saves
+copied in, and the tuned `fable2_config.toml`. Double-click the app.
+
+4.1 Play from the current save (or a fresh one) at default settings, 60 fps
+    target. Watch for the §2a items: Xbox pop-ups (mouse answers, keys don't
+    leak), controller after sleep/wake, cursor at rest, repeated save loads,
+    the golden trail, hero/dog textures at normal distance. Note every crash
+    or soft-lock with the time and the log (`Fable2-App/logs/fable_2.log`,
+    rotated) and the save folder (`Fable2-App/saves`). Quit and relaunch once
+    to confirm saves/settings survive; confirm the app bundle is untouched and
+    `codesign --verify --strict` still passes.
+4.2 Fix what the pass turns up; update `docs/MACOS_KNOWN_ISSUES.md` with what
+    was actually seen.
+4.3 Tag the "closed up" release from `master` (e.g. `v1.0.0-macos`) with
+    notes built from the handoff "Resume here", then close the memory/handoff
+    state (what "done" meant, what stayed parked).
 
 ## 4. Start here (next session, in order)
 
@@ -351,3 +361,8 @@ a dmg, and the Phase 4 playthrough.
 - Shipping or linking game content in any release.
 - Changing `audio_mute` or other user settings.
 - Windows parity work.
+
+P4 setup (2026-11-03): play folder `/Volumes/MacMiniExternal/Games/fable2/Fable2-App/`
+created — app + hardlinked content + a copy of the dev build's saves and tuned
+config; boot-checked to the title screen with a clean exit and state created
+alongside the app (not in the bundle). The pass itself is Kevin's.
