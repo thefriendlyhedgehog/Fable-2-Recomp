@@ -77,10 +77,18 @@ and evidence: [docs/macos_port.md](docs/macos_port.md) and
 (`brew install cmake ninja`), and your own copy of the game content.
 
 1. **Content.** Extract `default.xex` and `data/` from your own Fable 2 GOTY
-   (USA/Europe) disc image with any Xbox 360 ISO extractor and put them in
-   the repository root (next to this README). Do not commit or redistribute
-   them. If they live elsewhere, pass `--game_data_root <dir>` when running,
-   or set `game_data_root` in `out/build/mac-arm64-release/fable_2.toml`.
+   (USA/Europe) disc image and put them in the repository root (next to this
+   README). The helper does it on macOS and checks the executable against the
+   supported-version list:
+
+   ```
+   tools/extract_iso_mac.sh /path/to/Fable2.iso
+   ```
+
+   It builds `extract-xiso` on first use; any other Xbox 360 extractor works
+   too. Do not commit or redistribute the content. If it lives elsewhere,
+   pass `--game_data_root <dir>` when running, or set `game_data_root` in
+   `out/build/mac-arm64-release/fable_2.toml`.
 2. **Build** (first time; the first SDK build is long - the whole Vulkan
    stack - and needs ~4 GB of free disk):
 
@@ -128,6 +136,7 @@ launcher above is Windows-only.
 # Notes for running the game
 - **How to extract (built-in, Windows launcher):** the launcher has an **Extract from ISO** button. Click **Extract from ISO** and pick your disc image (`.iso`). It first checks the iso against the supported-version list, and only once that matches does it extract disc (`default.xex` and `data/`) into the launcher's own folder. No separate tool is required.
 - **How to extract (external GUI tool):** alternatively, rip the disc to an ISO and open it with **[XboxImageExtractor](https://github.com/dromex1/XboxImageExtractor)** — a GUI tool for Xbox 360 game images. It lists the image's filesystem; select `default.xex` and `data` and extract them into the project root (`data` extract as folders).
+- **How to extract (macOS):** `tools/extract_iso_mac.sh <your.iso>` extracts `default.xex` and `data/` into the repository root and checks `default.xex` against the supported-version list. It uses [extract-xiso](https://github.com/XboxDev/extract-xiso), built on first use.
 - **You must supply the game content yourself** (it is not in the repo): rip the Fable 2 GOTY (USA/EU) disc (the one with SHA-256 above) and put `default.xex` and `data/` in the project root (on macOS see the [macOS quickstart](#macos-apple-silicon)). The build does not copy this into the build directories   
 - **Saves live in the `saves/` folder next to the executable** — on Windows `out\build\win-amd64-release\saves\`, on macOS `out/build/mac-arm64-release/saves/`. Back that folder up to keep your progress, and copy it between build trees (Debug/Release) or machines to carry a save over.
 - The `--game_data_root <path>` override, or `game_data_root = "<path>"` in `fable_2.toml` next to the exe (a relative path counts from that folder; the command line wins), still points the content root at a different tree (e.g. to run from a shared content copy without staging); saves/cache still land next to the exe.

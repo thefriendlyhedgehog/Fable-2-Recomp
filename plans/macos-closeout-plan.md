@@ -289,6 +289,16 @@ The reconciled config and `tools/run_mac.sh` were boot-checked: the game
 loaded the new config with no unknown-key warnings, seeded the readback and
 reached the title screen (`fable_2_632`).
 
+P2 (2026-11-03): `tools/extract_iso_mac.sh` added and tracked — extracts
+`default.xex` + `data/` with extract-xiso (building it under `out/tooling/`
+on first use), defaults the destination to the repository root, refuses to
+overwrite existing content without `--force`, and checks `default.xex`
+against the supported list in `constants/game_versions.h`. Verified: the
+argument/refusal/failure paths, and the fresh-user build path (clone + cmake
+build of extract-xiso v2.7.1 arm64, then a clean failure on a non-Xbox
+image). The real-disc path is still unverified — there is no Fable 2 ISO on
+this Mac; run it once on Kevin's ISO before calling it supported.
+
 1. Phase 0.1 + 0.2: back up the play config/saves and run the verification
    list. This is the only work that can change the plan's conclusion.
 2. Phase 1.1-1.3: README Mac quickstart, tracked `tools/run_mac.sh`,

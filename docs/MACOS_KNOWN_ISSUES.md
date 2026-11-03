@@ -52,8 +52,9 @@ Evidence and history: `plans/macos-port-handoff.md`, `docs/macos_port.md`.
   (console), F7 (achievements).
 - **No macOS launcher or `.app` bundle yet:** launch with `tools/run_mac.sh`
   from the repository root and set player options in F4. The Windows WPF
-  launcher and its ISO extractor are Windows-only; on macOS use any Xbox 360
-  ISO extractor to get `default.xex` and `data/`.
+  launcher and its ISO extractor are Windows-only; on macOS use
+  `tools/extract_iso_mac.sh <your.iso>` (or any Xbox 360 extractor) to get
+  `default.xex` and `data/`.
 - **Windows build of the Mac changes is untested:** the overlay input path,
   pop-up capture, live tick-rate switch and SDK patch have not been compiled
   on Windows. The Windows build keeps its own working code paths.
