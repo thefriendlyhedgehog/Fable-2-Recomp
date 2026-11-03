@@ -220,6 +220,13 @@ data relocation) is validated by a play test before release.
 
 ### Phase 3 — Double-clickable app (M, medium risk; do after Phase 0)
 
+Implemented 2026-11-03 as a packaging step instead of a CMake bundle target:
+`tools/package_mac_app.sh` builds `out/dist/Fable 2 Recompiled.app` from the
+flat build, so the dev build and the user's `run_and_watch.sh` are untouched.
+The app treats an executable under `*.app/Contents/MacOS` as bundled and keeps
+content, saves, cache, config and logs next to the `.app`; the SDK still gets
+its Vulkan runtime from `Contents/Resources/vulkan`.
+
 Most plumbing already works: the exe's rpath is `@executable_path`, the
 SDK stages its dylibs next to the exe, and MoltenVK lookup already knows
 bundle layouts. The hard part is relocating mutable state out of the bundle
@@ -298,6 +305,17 @@ argument/refusal/failure paths, and the fresh-user build path (clone + cmake
 build of extract-xiso v2.7.1 arm64, then a clean failure on a non-Xbox
 image). The real-disc path is still unverified — there is no Fable 2 ISO on
 this Mac; run it once on Kevin's ISO before calling it supported.
+
+P3 (2026-11-03): `tools/package_mac_app.sh` + `assets/macos/Info.plist` +
+`assets/app-icon.icns` build an ad-hoc-signed `out/dist/Fable 2 Recompiled.app`
+from the flat build (CMake and the dev workflow unchanged). The app detects an
+executable under `*.app/Contents/MacOS` and keeps content, saves, cache,
+config and logs next to the `.app`; the Vulkan runtime is under
+`Contents/Resources/vulkan`. Verified: direct launch from `/` and a Finder
+`open` both reach the title screen, state is created next to the app, the
+bundle holds only binaries, and `codesign --verify --strict` still passes
+after runs. Remaining for distribution: Developer ID signing + notarization,
+a dmg, and the Phase 4 playthrough.
 
 1. Phase 0.1 + 0.2: back up the play config/saves and run the verification
    list. This is the only work that can change the plan's conclusion.

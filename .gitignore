@@ -77,6 +77,7 @@ __pycache__/
 !tools/sdk_patch_refresh.sh
 !tools/run_mac.sh
 !tools/extract_iso_mac.sh
+!tools/package_mac_app.sh
 
 # --- Fetched/external toolchain deps (created by tools/setup_sdk*.cmd). -------
 # The tracked files in thirdparty/ (rexglue-sdk-local.patch,

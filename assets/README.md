@@ -17,6 +17,10 @@ Generation prompt:
 Use case: logo-brand. Asset type: original Windows desktop application icon for an open-source fantasy RPG recompilation launcher. Design a new independent emblem: a bold gilded open storybook whose two pages rise into a small balanced branching tree, with a tiny warm light at its center. Deep dark teal rounded-square background, restrained antique gold and ivory, simple substantial silhouettes and clean edges, very readable at 32 pixels, centered, generous safe margins. Polished flat-to-subtle-relief icon, not a busy illustration. Square image. No text, letters, digits, characters, faces, weapons, existing brand marks, game imagery, familiar game logos or watermarks. Do not copy any franchise artwork. No reference images.
 
 Use `tools/create_app_icon.ps1` to package a supplied project-owned image as PNG/ICO.
+`assets/app-icon.icns` is the macOS bundle icon, generated from `app-icon.png`
+with `sips` (single 256 px representation; regenerate at larger sizes if the
+source image is replaced); the bundle's `Info.plist` template is
+`assets/macos/Info.plist`.
 
 Review follow-up: keep this icon for now. A future replacement should be a
 simple hand-authored vector mark (for example a flat open-book silhouette),

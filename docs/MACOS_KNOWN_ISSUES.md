@@ -50,11 +50,15 @@ Evidence and history: `plans/macos-port-handoff.md`, `docs/macos_port.md`.
   F2, etc. keys as standard function keys" is on. The debug keys are also on
   6-9 and 0, and the overlays are F3 (debug), F4 (settings), Backtick
   (console), F7 (achievements).
-- **No macOS launcher or `.app` bundle yet:** launch with `tools/run_mac.sh`
-  from the repository root and set player options in F4. The Windows WPF
-  launcher and its ISO extractor are Windows-only; on macOS use
-  `tools/extract_iso_mac.sh <your.iso>` (or any Xbox 360 extractor) to get
-  `default.xex` and `data/`.
+- **No macOS launcher UI yet:** player options are in the F4 overlay. For a
+  double-clickable app, `tools/package_mac_app.sh --with-settings` builds
+  `out/dist/Fable 2 Recompiled.app` (ad-hoc signed, no game content inside);
+  put it in a folder with `default.xex` and `data/`, and saves, cache, logs and
+  the toml files stay next to the .app. It is not notarized: a build shared
+  with someone else needs Developer ID signing and notarization, and a
+  right-click-Open for the ad-hoc build. The Windows WPF launcher and its ISO
+  extractor are Windows-only; on macOS use `tools/extract_iso_mac.sh
+  <your.iso>` (or any Xbox 360 extractor) to get `default.xex` and `data/`.
 - **Windows build of the Mac changes is untested:** the overlay input path,
   pop-up capture, live tick-rate switch and SDK patch have not been compiled
   on Windows. The Windows build keeps its own working code paths.

@@ -124,8 +124,20 @@ and evidence: [docs/macos_port.md](docs/macos_port.md) and
    (achievements). Mac keyboards need `fn` for the F-keys unless "Use F1,
    F2, etc. keys as standard function keys" is on; the debug keys are also on
    6-9 and 0.
+7. **Double-clickable app (optional).** Build it (ad-hoc signed, no game
+   content inside):
 
-There is no macOS launcher yet: set player options in F4. The Windows WPF
+   ```
+   tools/package_mac_app.sh --with-settings
+   ```
+
+   Put `out/dist/Fable 2 Recompiled.app` in a folder together with
+   `default.xex` and `data/`, then double-click it. Saves, cache, logs and the
+   toml files are written next to the .app, not inside it; logs become a single
+   `logs/fable_2.log` instead of per-run files.
+
+There is no macOS launcher UI yet: set player options in F4.
+`tools/package_mac_app.sh --no-sign` skips the ad-hoc signing. The Windows WPF
 launcher above is Windows-only.
 
 

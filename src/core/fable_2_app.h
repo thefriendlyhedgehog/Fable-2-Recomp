@@ -342,9 +342,10 @@ class Fable2App : public rex::ReXApp {
     });
   }
 
-  // Load the recomp's own user config (fable2_config.toml) next to the exe,
-  // creating it with defaults on first launch. Runs after the SDK's logging
-  // init so load/create/parse problems land in logs/ (see src/core/fable2_config.h).
+  // Load the recomp's own user config (fable2_config.toml) in the game's own
+  // folder next to the exe (or next to the .app), creating it with defaults on
+  // first launch. Runs after the SDK's logging init so load/create/parse
+  // problems land in logs/ (see src/core/fable2_config.h).
   // Plain settings are read via fable2::config::Get(); settings that back a
   // cvar are seeded into it below so the console/overlay keep working.
   void OnPostInitLogging() override {
@@ -397,7 +398,7 @@ class Fable2App : public rex::ReXApp {
 #endif
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();
-    fable2::config::Load(exe_dir / "fable2_config.toml");
+    fable2::config::Load(AppDataDir(exe_dir) / "fable2_config.toml");
 
     // Seed cvars from the config. Only when the cvar is still at its
     // compiled default (source kDefault), so higher-priority sources --
@@ -640,15 +641,35 @@ class Fable2App : public rex::ReXApp {
   //                           build, see CMakeLists.txt)
   //   <exe>/saves/         <- user data: save files, settings, profiles
   //   <exe>/cache/         <- runtime caches (shader cache, etc.)
-  //   <exe>/fable_2.toml   <- cvar config (SDK default)
+  //   <exe>/fable_2.toml   <- cvar config
   //   <exe>/logs/          <- game logs (SDK default)
-  // The content root is the exe's own directory ONLY (no ancestor walk), so
-  // the whole build folder is portable as-is: copy it anywhere and it runs.
-  // Override the content location with --game_data_root=<path>.
+  // The content root is that directory ONLY (no ancestor walk), so the whole
+  // build folder is portable as-is: copy it anywhere and it runs. Override it
+  // with --game_data_root=<path>.
+  //
+  // A packaged app is the exception: its executable is <dir>/Fable 2
+  // Recompiled.app/Contents/MacOS/fable_2, and mutable state must not live
+  // inside the bundle (that breaks its signature and is lost when the app is
+  // replaced). There the content root, saves/, cache/ and fable_2.toml live
+  // next to the .app, i.e. in <dir>: keep the app and the game content in
+  // one folder.
   void OnConfigurePaths(rex::PathConfig& paths) override {
     const std::filesystem::path exe_dir =
         rex::filesystem::GetExecutableFolder();
-    sdk_config_path_ = paths.config_path;
+    const std::filesystem::path data_dir = AppDataDir(exe_dir);
+    sdk_config_path_ = paths.config_path = data_dir / paths.config_path.filename();
+#ifdef __APPLE__
+    // A packaged app keeps its log out of the bundle too: the SDK otherwise
+    // writes to <exe>/logs (inside Contents/MacOS), and a bundle mutated at
+    // run time no longer passes codesign. A single rotating fable_2.log next
+    // to the app replaces the per-run fable_2_NNN.log files there.
+    if (data_dir != exe_dir) {
+      const auto log_dir = data_dir / "logs";
+      std::error_code log_ec;
+      std::filesystem::create_directories(log_dir, log_ec);
+      rex::cvar::SetFlagByName("log_file", (log_dir / "fable_2.log").string());
+    }
+#endif
 
     // game_data_root set in fable_2.toml. The SDK reads that file only after
     // this hook, so the setting otherwise never chose the content root. The
@@ -666,8 +687,8 @@ class Fable2App : public rex::ReXApp {
     }
 
     if (paths.game_data_root.empty()) {
-      if (std::filesystem::is_regular_file(exe_dir / "default.xex")) {
-        paths.game_data_root = exe_dir;
+      if (std::filesystem::is_regular_file(data_dir / "default.xex")) {
+        paths.game_data_root = data_dir;
       } else {
         // The SDK's fallback for an empty game_data_root is the cryptic
         // "--game_data_root was not provided" dialog; in this
@@ -675,11 +696,12 @@ class Fable2App : public rex::ReXApp {
         // so say that and stop before the SDK's dialog can show.
         // (Logging is not initialized yet at this hook, dialog only.)
         const std::string msg = std::format(
-            "default.xex was not found next to fable_2.exe ({}).\n\n"
-            "Stage the game content there (the build does this "
-            "automatically), pass --game_data_root=<path> or set "
-            "game_data_root in fable_2.toml.",
-            exe_dir.string());
+            "default.xex was not found in {}.\n\n"
+            "Put default.xex and data/ in the folder that holds the game "
+            "(for an app, the folder that holds Fable 2 Recompiled.app), "
+            "pass --game_data_root=<path> or set game_data_root in "
+            "fable_2.toml.",
+            data_dir.string());
         rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, msg);
         std::exit(1);
       }
@@ -719,15 +741,16 @@ class Fable2App : public rex::ReXApp {
       std::exit(1);
     }
 
-    // Keep saves and caches inside the exe's own folder (self-contained).
-    // The SDK's default user dir is a per-user platform location, which
-    // caused save corruption. NOTE: set unconditionally because the SDK
-    // defaults are non-empty, so empty-checks would never trigger (this
-    // also overrides the cvar/CLI defaults).
+    // Keep saves and caches in the game's own folder: next to the exe, or
+    // next to the .app when packaged (AppDataDir). The SDK's default user
+    // dir is a per-user platform location, which caused save corruption.
+    // NOTE: set unconditionally because the SDK defaults are non-empty, so
+    // empty-checks would never trigger (this also overrides the cvar/CLI
+    // defaults).
     std::error_code ec;
-    paths.user_data_root = exe_dir / "saves";
+    paths.user_data_root = data_dir / "saves";
     std::filesystem::create_directories(paths.user_data_root, ec);
-    paths.cache_root = exe_dir / "cache";
+    paths.cache_root = data_dir / "cache";
     std::filesystem::create_directories(paths.cache_root, ec);
 
     // Mount the $SystemUpdate folder (inside the content root) as update:\
@@ -750,6 +773,21 @@ class Fable2App : public rex::ReXApp {
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 
  private:
+  // The folder the game treats as its own for content and mutable state: the
+  // executable's folder, except inside a macOS app bundle, where it is the
+  // folder that holds the .app (the bundle itself stays read-only).
+  static std::filesystem::path AppDataDir(const std::filesystem::path& exe_dir) {
+#if defined(__APPLE__)
+    const auto contents = exe_dir.parent_path();
+    const auto bundle = contents.parent_path();
+    if (exe_dir.filename() == "MacOS" && contents.filename() == "Contents" &&
+        bundle.extension() == ".app") {
+      return bundle.parent_path();
+    }
+#endif
+    return exe_dir;
+  }
+
   // The value of cvar `name` in the SDK config file, using the same key
   // flattening as rex::cvar::LoadConfig (a key inside [table] is
   // "table_key"): a string as is, anything else as TOML text. A missing or
