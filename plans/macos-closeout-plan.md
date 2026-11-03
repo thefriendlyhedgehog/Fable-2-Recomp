@@ -277,6 +277,18 @@ below the crumbs threshold, so one quiet re-run instead of profiling. The
 hands-on items (§2a) remain open; the user's play config and saves were
 backed up first to `out/backup-20261103-play/`.
 
+P1 (2026-11-03): README now has a macOS quickstart and corrected
+Windows-only/stale feature lines; `tools/run_mac.sh` is tracked (with the
+`.gitignore` exception); `docs/MACOS_KNOWN_ISSUES.md` added; the stale claims
+in `docs/macos_port.md`, both hero-dog plans and the handoff's "Next" list
+are corrected; the staged play config was rebuilt from the current template
+with the tested values preserved (`fps_60` dropped, the `[perf]` and
+`skip_intro_videos`/`disable_motion_blur`/`dog_fur_depth_bias` keys added).
+Still to do in P1: push/tag/release and repo settings (need Kevin's call).
+The reconciled config and `tools/run_mac.sh` were boot-checked: the game
+loaded the new config with no unknown-key warnings, seeded the readback and
+reached the title screen (`fable_2_632`).
+
 1. Phase 0.1 + 0.2: back up the play config/saves and run the verification
    list. This is the only work that can change the plan's conclusion.
 2. Phase 1.1-1.3: README Mac quickstart, tracked `tools/run_mac.sh`,

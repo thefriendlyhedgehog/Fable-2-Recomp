@@ -1,8 +1,11 @@
 # Hero / dog black textures: realtime texture morphing (no readback)
 
-**STATUS: IMPLEMENTED, verified in game** (hero face and dog no longer black
-with `hero_dog_texture_readback = false`). Supersedes the targeted readback in
-`hero-dog-texture-readback.md`, which stays available as a fallback.
+**STATUS: IMPLEMENTED, verified in game (Windows)** (hero face and dog no
+longer black with `hero_dog_texture_readback = false`). Supersedes the
+targeted readback on Windows. **On macOS it is not the active path:** only
+the full-size texture comes out right there and every smaller mip is black,
+so macOS defaults to the readback in `hero-dog-texture-readback.md` (see
+"macOS" below).
 
 ## Root cause (from the XEX)
 

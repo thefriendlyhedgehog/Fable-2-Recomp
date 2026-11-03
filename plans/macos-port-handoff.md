@@ -82,7 +82,10 @@ single lever left at the cap; performance work is parked.
   on the Mac since 2026-10-21 (`docs/macos_port.md`, "Keyboard and mouse
   while an overlay is open").
 
-**Next, when this is picked up again:**
+**Closeout is the next step (2026-11-03).** The plan — verification,
+docs/release hygiene and the Mac app bundle — is in
+`plans/macos-closeout-plan.md`. Performance is parked; the three perf/RE
+items below are the record of where it stopped, not the current next step.
 
 1. A check at the busy square (about 4,400 draws per frame), where frames
    come closest to the budget (items 48, 49).

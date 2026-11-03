@@ -2,9 +2,10 @@
 
 **Status:** builds and runs on an M4 Mac mini (macOS, full Xcode, SDK
 v0.10.0 built from source with `thirdparty/sdk_mac_vulkan_fixes.patch`).
-With FSI render targets the game renders and plays. Current state, open
-problems with the evidence so far, and next steps:
-`plans/macos-port-handoff.md` (this document explains why each change
+With the `fbo` render target path (the macOS default since 2026-10-15) the
+game renders and plays; it has been in play testing since 2026-10-23. Current
+state and open items: `plans/macos-port-handoff.md`; the closeout plan is
+`plans/macos-closeout-plan.md` (this document explains why each change
 exists).
 
 ## Prior work
@@ -436,7 +437,8 @@ test in the handoff), so some input of the draws differs between frames.
 A review of the patch against upstream Xenia and xenia-edge found three
 ordering holes:
 
-- **Upload hoisting** (`vulkan_hoist_shared_memory_uploads`, opt-in) records
+- **Upload hoisting** (`vulkan_hoist_shared_memory_uploads`; on by default
+  on macOS since 2026-10-14) records
   shared memory uploads in a separate list that runs at the start of the
   submission, so a mid-frame upload does not end the render pass. Without
   further care that list could hold two copies of the same page with no
@@ -461,14 +463,13 @@ ordering holes:
   (both in `TRANSFER_DST`, so the usage did not change); now a
   transfer-write to transfer-write barrier orders them.
 
-With all three fixed, hoisting still flickers and turning it off does not,
-while the resolves the shadow draws sample barely change between frames
-(dumps of 24 consecutive frames). So hoisting still moves some upload ahead
-of something that needed the old data, most likely vertex or heightmap
-data the ground draws read from shared memory. It brought no measurable
-speed either (heavy scenes 12-14 fps both ways), so it stays opt-in and
-the tools no longer pass it. The fixes stay: they are correct without
-hoisting too.
+With all three fixed, hoisting still flickered: it moved some upload ahead of
+something that needed the old data. The remaining hole was vertex buffers
+that skip their shared-memory request (a lasting same-address/size shortcut)
+and never marked their pages used; marking them fixed it
+(`plans/macos-port-handoff.md`, "Fixed (2026-10-14)"). Hoisting is clean in
+the flicker tests, on by default on macOS since then, and worth about +38%
+fps. The ordering fixes stay: they are correct without hoisting too.
 
 ### Ported from himdo/rexglue-sdk
 
@@ -2005,9 +2006,13 @@ alternating pairs; the crowd was moving and other apps used the GPU).
 timed frames), 47 passes with at most two draws (3.0 ms), and the main
 scene pass (about 2 ms).
 
-### Performance (open)
+### Performance (parked: the 60 fps cap is held)
 
-GPU at 100% with a low frame rate after the fix. Things known to cost:
+The port holds the game's 60 fps cap in normal play and heavy views
+(`plans/macos-port-handoff.md`, "Resume here"), so performance work is
+parked. The notes below are the record of what it took: they start on
+2026-10-14, when the GPU was still at 100% with a low frame rate. Things
+known to cost:
 
 - `MTL_DEBUG_LAYER=1` itself: measure frame rate without it.
 - The readbacks above (now off by default on macOS). Note that
@@ -2301,8 +2306,13 @@ grep -rhoE "// vpku[hw]us(128)? v[0-9]+, ?v[0-9]+, ?v[0-9]+" generated | awk -F'
   prebuilt one has no `readback_resolve_force_addresses`, and the app logs
   "cvar readback_resolve_force_addresses rejected" if
   `hero_dog_texture_readback` is turned on with it).
-- **Flickering dark shadow areas:** open; evidence and candidates in
-  `plans/macos-port-handoff.md`.
+- **Flickering dark shadow areas:** fixed 2026-10-14 (upload hoisting did
+  not mark vertex-buffer pages as used; see `plans/macos-port-handoff.md`).
+  Reopen only if it comes back.
+- **Golden quest trail flicker:** reported 2026-10-23, not reproduced at the
+  save used for the hero/dog check. Cosmetic.
+- **Mac play status:** playable and in testing; the open play items and their
+  workarounds are in `docs/MACOS_KNOWN_ISSUES.md`.
 - **Keys:** the SDK binds F3 (debug overlay) and F4 (settings overlay, mouse
   unlock); the default `keyboard_gamepad_map` puts the d-pad on the arrow
   keys. Mac keyboards need fn for F-keys unless "Use F1, F2, etc. keys as

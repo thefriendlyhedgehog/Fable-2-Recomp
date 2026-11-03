@@ -1,6 +1,8 @@
 # Hero / Dog black-texture fix (targeted readback-resolve)
 
-**STATUS: IMPLEMENTED + VERIFIED (Phase 0 — done).**
+**STATUS: IMPLEMENTED + VERIFIED (Phase 0 — done). Active macOS path since
+2026-10-23** (realtime texture morphing leaves the smaller mips black on the
+Mac; see `hero-dog-realtime-texture-morphing.md`).
 
 Implementation is complete and the Release build is green; both the staged
 `rexgpu-xenos.dll` (cvar + gated readback + diagnostic log) and `fable_2.exe`

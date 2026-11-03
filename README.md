@@ -3,6 +3,8 @@ First and for most this project was made to test the capabilities of local and o
 
 Recompilation of Fable 2 (Xbox 360, title ID 4D5307F1) using the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) v0.10.0. Guest PPC code is statically recompiled to C++ at build time by `rexglue codegen`, driven by `fable_2_manifest.toml`.
 
+Runs on **Windows** (D3D12) and on **Apple Silicon macOS** (Vulkan over MoltenVK, with the SDK built from source and this project's patch). The macOS port is playable and in testing: see the [macOS quickstart](#macos-apple-silicon) and [macOS known issues](docs/MACOS_KNOWN_ISSUES.md).
+
 # Important Note:
 **This project does not condone Piracy, any mentions or links will result in removal and an instant ban from this repo!**
 
@@ -14,7 +16,8 @@ Original GOTY USA/Europe and German GOTY dumps are supported by the default
 [x] Can be used to beat the game\
 [x] Guild chest fully unlocked\
 [x] Uncapped framerate / increased framerate\
-[ ] Higher Resolution support\
+[x] 60 fps cap held in normal play on Apple Silicon macOS\
+[x] Render scale / resolution options (Windows launcher; F4 in the recomp)\
 [x] Built in Debug Menu
   - [x] Enabling custom lua to run in game
 
@@ -22,13 +25,13 @@ Original GOTY USA/Europe and German GOTY dumps are supported by the default
 [ ] In game Text changed to respect keyboard and mouse
   - [ ] Automatic swapping between text
 
-[ ] Increased performance / framerate\
-[x] Hero / Dog Texture bug fix (upstream renderer, verified on German GOTY)\
-[ ] Vulkan support\
+[ ] Increased performance / framerate (macOS holds 60 fps; further GPU work parked)\
+[x] Hero / Dog Texture bug fix (Windows: upstream renderer; macOS: CPU readback default)\
+[x] Vulkan support (macOS runs Vulkan over MoltenVK; the Windows Vulkan plugin is optional and source-built)\
 [ ] Linux Builds\
 [x] Custom commands to aid in debugging\
 [ ] Improved Graphics rendering\
-[ ] Custom menu(s) / modifying menus for extra functionality (like closing the game)\
+[ ] Custom menu(s) / modifying menus for extra functionality (like closing the game); on macOS, close the window to quit\
 [x] Supporting other languages
   - [x] Germany
   - [x] France
@@ -36,7 +39,7 @@ Original GOTY USA/Europe and German GOTY dumps are supported by the default
   - [x] Russia
   - [x] Spain
 
-[x] Custom Launcher
+[x] Custom Launcher (Windows only)
   - [x] Built in ISO extractor
 
 ## Windows launcher
@@ -60,15 +63,73 @@ and then remembers the user's saved location. Game files can live separately;
 the launcher uses `--game_data_root`. Both applications are named Fable 2
 Recompiled and use new project-owned icons.
 
+## macOS (Apple Silicon)
+
+The macOS port is **playable and in testing**: Vulkan over MoltenVK on Apple
+Silicon, with the SDK built from source and this project's Mac patch. It is
+not an Intel/universal build. Open play items and workarounds:
+[docs/MACOS_KNOWN_ISSUES.md](docs/MACOS_KNOWN_ISSUES.md); development history
+and evidence: [docs/macos_port.md](docs/macos_port.md) and
+[plans/macos-port-handoff.md](plans/macos-port-handoff.md).
+
+**Requirements:** Apple Silicon Mac, macOS 13.3+, a **full Xcode install**
+(the patched SDK builds MoltenVK with `xcodebuild`), CMake >= 3.25 and Ninja
+(`brew install cmake ninja`), and your own copy of the game content.
+
+1. **Content.** Extract `default.xex` and `data/` from your own Fable 2 GOTY
+   (USA/Europe) disc image with any Xbox 360 ISO extractor and put them in
+   the repository root (next to this README). Do not commit or redistribute
+   them. If they live elsewhere, pass `--game_data_root <dir>` when running,
+   or set `game_data_root` in `out/build/mac-arm64-release/fable_2.toml`.
+2. **Build** (first time; the first SDK build is long - the whole Vulkan
+   stack - and needs ~4 GB of free disk):
+
+   ```
+   ./build.sh -release fable_2
+   tools/build_sdk_mac.sh
+   ./build.sh -release fable_2
+   ```
+
+   The first command creates the build tree and fetches the prebuilt SDK;
+   `tools/build_sdk_mac.sh` clones and patches the SDK source and builds the
+   patched GPU plugin/runtime (needs Xcode); the last one relinks and
+   re-stages them. After that, rebuild with
+   `tools/build_sdk_mac.sh && ./build.sh -release fable_2`.
+3. **Run** from the repository root:
+
+   ```
+   tools/run_mac.sh
+   ```
+
+   It launches `out/build/mac-arm64-release/fable_2` and defaults
+   `--game_data_root` to the repository root. Pass the same game flags you
+   would give the executable.
+4. **Saves, logs and settings** live next to the executable:
+   `out/build/mac-arm64-release/saves/` (back this up),
+   `out/build/mac-arm64-release/logs/`, `fable2_config.toml` (patch toggles
+   and input) and `fable_2.toml` (SDK cvars: `game_data_root`, `audio_mute`,
+   `video_mode_refresh_rate`, ...).
+5. **Controller.** A Steam Controller shows up as two SDL devices on macOS;
+   set `merge_controllers = true` in `fable2_config.toml` (the staged copy
+   normally has it) or pass `--merge_controllers`.
+6. **Overlays:** F3 (debug), F4 (settings), Backtick (console), F7
+   (achievements). Mac keyboards need `fn` for the F-keys unless "Use F1,
+   F2, etc. keys as standard function keys" is on; the debug keys are also on
+   6-9 and 0.
+
+There is no macOS launcher yet: set player options in F4. The Windows WPF
+launcher above is Windows-only.
+
+
 
 
 
 
 # Notes for running the game
-- **How to extract (built-in, recommended):** the launcher has an **Extract from ISO** button. Click **Extract from ISO** and pick your disc image (`.iso`). It first checks the iso against the supported-version list, and only once that matches does it extract disc (`default.xex` and `data/`) into the launcher's own folder. No separate tool is required.
+- **How to extract (built-in, Windows launcher):** the launcher has an **Extract from ISO** button. Click **Extract from ISO** and pick your disc image (`.iso`). It first checks the iso against the supported-version list, and only once that matches does it extract disc (`default.xex` and `data/`) into the launcher's own folder. No separate tool is required.
 - **How to extract (external GUI tool):** alternatively, rip the disc to an ISO and open it with **[XboxImageExtractor](https://github.com/dromex1/XboxImageExtractor)** — a GUI tool for Xbox 360 game images. It lists the image's filesystem; select `default.xex` and `data` and extract them into the project root (`data` extract as folders).
-- **You must supply the game content yourself** (it is not in the repo): rip the Fable 2 GOTY (USA/EU) disc (the one with SHA-256 above) and put `default.xex` and `data/` in the project root. The build does not copy this into the build directories   
-- **Saves live in `<build dir>\saves\`** — back that folder up to keep your progress, and copy it between build trees (Debug/Release) or machines to carry a save over.
+- **You must supply the game content yourself** (it is not in the repo): rip the Fable 2 GOTY (USA/EU) disc (the one with SHA-256 above) and put `default.xex` and `data/` in the project root (on macOS see the [macOS quickstart](#macos-apple-silicon)). The build does not copy this into the build directories   
+- **Saves live in the `saves/` folder next to the executable** — on Windows `out\build\win-amd64-release\saves\`, on macOS `out/build/mac-arm64-release/saves/`. Back that folder up to keep your progress, and copy it between build trees (Debug/Release) or machines to carry a save over.
 - The `--game_data_root <path>` override, or `game_data_root = "<path>"` in `fable_2.toml` next to the exe (a relative path counts from that folder; the command line wins), still points the content root at a different tree (e.g. to run from a shared content copy without staging); saves/cache still land next to the exe.
 - Although this was made for the US / Europe GOTY version I have been able to run the following regions: Germany, France, Italy, Russia, and Spain. Your milage may very if you use those regions.
 
@@ -77,8 +138,8 @@ Recompiled and use new project-owned icons.
 
 To run the game you must:
 1) Extract a downloaded copy release of the game 
-2) Extract the "data" and "default.xex" from your copy of the game — easiest with the launcher's **Extract from ISO** button, or an external GUI tool (see "How to extract")
-3) Run the fable.exe program and if no errors pop up then the game should launch and you are good to go
+2) Extract the "data" and "default.xex" from your copy of the game — easiest with the launcher's **Extract from ISO** button, or an external GUI tool (see "How to extract"); on macOS put them in the repository root and use the [macOS quickstart](#macos-apple-silicon)
+3) Run `fable_2.exe` (Windows) or `tools/run_mac.sh` from the repository root (macOS); if no errors pop up then the game should launch and you are good to go
   - If an error pops up about the hash being wrong try to extract a different version of the game and then try again.
 
 
@@ -508,11 +569,13 @@ for code generation but is never published with this repository.
 (`./build.sh -release fable_2`) and fetches the matching prebuilt SDK
 (`mac-arm64`, `mac-amd64` or `linux-amd64`) via `tools/setup_sdk.sh`; stage
 content with `tools/stage_content.sh`. On macOS the port runs on Apple
-Silicon with the SDK built from source and the Mac patch
-(`tools/build_sdk_mac.sh && ./build.sh -release fable_2`, needs full Xcode);
-see [docs/macos_port.md](docs/macos_port.md) and
-[plans/macos-port-handoff.md](plans/macos-port-handoff.md) for status and
-open graphics issues.
+Silicon with the SDK built from source and the Mac patch: run
+`./build.sh -release fable_2` once to create the build tree, then
+`tools/build_sdk_mac.sh` (needs full Xcode; builds MoltenVK and the patched
+plugin), then `./build.sh -release fable_2` again — see the
+[macOS quickstart](#macos-apple-silicon). Background:
+[docs/macos_port.md](docs/macos_port.md) and
+[plans/macos-port-handoff.md](plans/macos-port-handoff.md).
 
 Manual/advanced setup (normally not needed):
 
