@@ -268,6 +268,15 @@ before signing.
 
 ## 4. Start here (next session, in order)
 
+**Progress log.** 2026-11-03: P0 smoke test passed on the HEAD binary in
+`out/hero-test` (clean save load to gameplay to quit, readback default active,
+no errors); gameplay measured 57.0-58.5 fps, GPU 17.2-17.4 ms/frame at 99%
+busy, 0 frames over 40 ms over six 300-frame windows (`fable_2_008`). That is
+~1.3 ms/frame above the pre-readback-default `fable_2_631`; even pacing and
+below the crumbs threshold, so one quiet re-run instead of profiling. The
+hands-on items (§2a) remain open; the user's play config and saves were
+backed up first to `out/backup-20261103-play/`.
+
 1. Phase 0.1 + 0.2: back up the play config/saves and run the verification
    list. This is the only work that can change the plan's conclusion.
 2. Phase 1.1-1.3: README Mac quickstart, tracked `tools/run_mac.sh`,

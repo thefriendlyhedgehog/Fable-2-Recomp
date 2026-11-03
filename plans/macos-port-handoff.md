@@ -37,6 +37,22 @@ play items (pop-ups, controller sleep/wake, cursor at rest, saves/audio),
 doc and config truth, and the double-clickable Mac app. Task list and
 acceptance checks: `plans/macos-closeout-plan.md`.
 
+**Verification (2026-11-03, scripted session).** The HEAD binary in
+`out/hero-test` (same sha256 as the play build) booted (299 draws/frame at
+the title screen), loaded the Bower Lake save, rendered gameplay
+(1,994 draws/frame) and quit cleanly: `native-build … source-built`,
+`xex-verify accepted` (GOTY USA/Europe), `hero_dog_texture_readback=true`,
+0 error lines, `Window closing` → `Execution complete`. Default settings,
+six 300-frame windows in gameplay: 57.0-58.5 fps, longest frame 19-21 ms,
+0 frames over 40 ms; GPU 17.2-17.4 ms/frame at 99% busy (`fable_2_008`,
+stdout and log list in `out/verify-20261103/`). `fable_2_631`, which ran
+with the readback default off, had 60.0 fps and GPU 15.9 ms at the same
+save, so either the readback default or background GPU load costs ~1.3 ms;
+frame pacing is even and this is below the "crumbs" threshold — one quiet
+re-run would settle it, do not profile. Not covered (needs hands): the
+Xbox pop-ups, controller sleep/wake, cursor at rest, repeated save loads,
+golden trail flicker.
+
 **Performance (2026-10-21).** The game holds its 60 fps cap at the
 trail and in the heavy views (items 44, 48), with even frame pacing (item 47).
 At the trail: GPU 6.7-6.9 ms per frame (40% busy, 2.8 W, item 58); the
