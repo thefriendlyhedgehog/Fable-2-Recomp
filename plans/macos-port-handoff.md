@@ -12,7 +12,7 @@ shader checks: `tools/sdk_offline/README.md`.
 
 ## Resume here
 
-**Where things stand (2026-10-23): in testing.** The port is playable on the
+**Where things stand (2026-10-23, closeout update 2026-11-03 below): in testing.** The port is playable on the
 Mac and the user is playing it with a Steam Controller (`merge_controllers`);
 new work comes from what they find in play. Open, waiting on the user's
 play: the cursor hiding at rest with the controller, the controller after

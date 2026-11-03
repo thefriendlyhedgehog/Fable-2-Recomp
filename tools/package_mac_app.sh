@@ -53,7 +53,14 @@ if [ "$WITH_SETTINGS" = 1 ]; then
             cp -p "$BUILD/$f" "$DIST/$f"
         fi
     done
-    echo "Copied the build's settings next to the app: $DIST/fable2_config.toml, fable_2.toml"
+    # The build's fable_2.toml pins game_data_root to this checkout. The app
+    # defaults the content root to the folder that holds the .app, so drop the
+    # absolute path (and any log_file) for a folder that can be moved.
+    if [ -f "$DIST/fable_2.toml" ]; then
+        grep -viE '^(game_data_root|log_file)[[:space:]]*=' "$DIST/fable_2.toml" \
+            > "$DIST/fable_2.toml.tmp" && mv "$DIST/fable_2.toml.tmp" "$DIST/fable_2.toml"
+    fi
+    echo "Copied the build's settings next to the app: $DIST/fable2_config.toml, fable_2.toml (build paths removed)"
 fi
 
 if [ "$SIGN" = 1 ]; then
@@ -72,4 +79,3 @@ fi
 echo "Built: $APP"
 echo "Put the app and the game content (default.xex, data/) in one folder, then double-click it."
 echo "Saves, cache, logs and the toml files are written next to the .app, not inside it."
-echo "Logs still land in Contents/MacOS/logs for now."

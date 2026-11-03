@@ -95,9 +95,10 @@ play and heavy views, and quits cleanly. The user is doing this.
   live by F4 `Game: high_tick_rate` → off for that scene. Do not dig into
   this for closeout.
 
-### 2c. Doc/config drift (fix during closeout)
+### 2c. Doc/config drift (all fixed 2026-11-03; kept as the audit record)
 
-These are real contradictions found by the audit, not new work:
+These are real contradictions found by the audit, not new work. The P1 pass
+fixed every one of them; see the progress log under §4.
 
 1. `docs/macos_port.md` "Known gaps" still lists flickering dark shadow
    areas as open; the handoff says fixed 2026-10-14 and the enabling switch
@@ -301,10 +302,11 @@ in `docs/macos_port.md`, both hero-dog plans and the handoff's "Next" list
 are corrected; the staged play config was rebuilt from the current template
 with the tested values preserved (`fps_60` dropped, the `[perf]` and
 `skip_intro_videos`/`disable_motion_blur`/`dog_fur_depth_bias` keys added).
-Still to do in P1: push/tag/release and repo settings (need Kevin's call).
-The reconciled config and `tools/run_mac.sh` were boot-checked: the game
-loaded the new config with no unknown-key warnings, seeded the readback and
-reached the title screen (`fable_2_632`).
+Push/tag: done (`v0.1.0-macos` at the P1 checkpoint, `master` follows). Repo
+settings (enable Issues) is still an owner decision. The reconciled config and
+`tools/run_mac.sh` were boot-checked: the game loaded the new config with no
+unknown-key warnings, seeded the readback and reached the title screen
+(`fable_2_632`).
 
 P2 (2026-11-03): `tools/extract_iso_mac.sh` added and tracked — extracts
 `default.xex` + `data/` with extract-xiso (building it under `out/tooling/`

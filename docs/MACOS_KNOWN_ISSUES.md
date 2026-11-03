@@ -2,9 +2,10 @@
 
 Status as of 2026-11-03: the port is **playable and in testing**. The game
 holds its 60 fps cap in normal play and heavy views, saves and quits cleanly,
-and the Steam Controller works. The closeout work is verification of the play
-behaviours below, documentation, and packaging (`plans/macos-closeout-plan.md`).
-Evidence and history: `plans/macos-port-handoff.md`, `docs/macos_port.md`.
+and the Steam Controller works. The docs and the app packaging are done; what
+is left is the verification of the play behaviours below and the final
+acceptance pass (`plans/macos-closeout-plan.md`). Evidence and history:
+`plans/macos-port-handoff.md`, `docs/macos_port.md`.
 
 ## Requirements
 
