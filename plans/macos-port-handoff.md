@@ -1,8 +1,10 @@
 # macOS port: handoff and working notes
 
-State as of 2026-10-21, branch `master` (fork
-thefriendlyhedgehog/Fable-2-Recomp; the work was done on
-`claude/elegant-ride-r7ako0`). Written so work can continue on the Mac
+State as of 2026-11-03, branch `claude/elegant-ride-r7ako0` (fork
+thefriendlyhedgehog/Fable-2-Recomp; it is also `origin/master`, HEAD
+`7a25a69`; the local `master` is 5 commits behind, nothing to merge).
+Closeout plan (what is left, the verification list and the Mac packaging
+work): `plans/macos-closeout-plan.md`. Written so work can continue on the Mac
 itself (a local Claude Code instance can build, run and look at the game
 directly) without the history of the cloud sessions. Background and the
 reasoning behind each SDK change: `docs/macos_port.md`. Tools for offline
@@ -25,6 +27,15 @@ input, the pop-up check, the live tick-rate switch, the SDK patch), which
 nobody has compiled on Windows yet. The user starts the game with
 `./run_and_watch.sh` (no flags needed since `game_data_root` is read from
 `fable_2.toml`); their `fable_2.toml` has `audio_mute = true` on purpose.
+
+**2026-11-03: closeout plan written (no code change since 2026-10-23).** The
+checked-in HEAD code is the tested build (the binary postdates every source
+file, and `out/hero-test/007` ran it with the readback default and a clean
+exit); `fable_2_631` is still the last long 60 fps play run, but it predates
+the readback fix. No proven blocker: the closeout work is the unexercised
+play items (pop-ups, controller sleep/wake, cursor at rest, saves/audio),
+doc and config truth, and the double-clickable Mac app. Task list and
+acceptance checks: `plans/macos-closeout-plan.md`.
 
 **Performance (2026-10-21).** The game holds its 60 fps cap at the
 trail and in the heavy views (items 44, 48), with even frame pacing (item 47).
